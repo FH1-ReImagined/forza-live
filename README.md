@@ -62,6 +62,11 @@ launcher needs lands here first; then the game's repository moves its submodule 
 (`git -C server fetch && git -C server checkout <commit> && git add server`). Keep the server
 compatible with released games: players update the launcher on their own schedule.
 
+Experimental organizer-approved community events are documented in
+[`docs/server_events.md`](docs/server_events.md). Enforcement is opt-in and needs
+the updated TU4 client in [game PR #231](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/pull/231);
+it is not authoritative anti-cheat or proof that a player finished a race.
+
 ## History
 
 The server lived in `server/` of the game's repository until October 2026; its history came
