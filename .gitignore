@@ -1,0 +1,5 @@
+# Server data (forza_live_server.py --data-dir default)
+forza_live_data/
+__pycache__/
+*.pyc
+.game-repo/

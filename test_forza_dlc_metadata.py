@@ -2,7 +2,7 @@
 Id -1, the game's "none" (with Id 0 and no Path the game saved a file without a name to its
 marketplace save, that failed, and Horizon Rally said "MARKETPLACE ERROR").
 
-Run: cd server && python3 -m unittest discover -p 'test_*.py'
+Run: python3 -m unittest discover -p 'test_*.py'
 """
 
 import unittest

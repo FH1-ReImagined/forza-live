@@ -29,7 +29,7 @@ def enabled():
     return WEBHOOK.startswith("https://discord.com/api/webhooks/")
 
 
-# Find Game's playlists (server/forza_live_lsp.py HOPPERS) and the game types a public
+# Find Game's playlists (forza_live_lsp.py HOPPERS) and the game types a public
 # custom game is found by (docs/title_services.md, Find Custom Game). A private custom game
 # publishes 0xFFFFFFFF, which nobody can search for.
 FIND_GAME = {3: "Horizon World", 1: "Races", 2: "Playground Games"}

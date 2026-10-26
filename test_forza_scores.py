@@ -1,7 +1,7 @@
 """Scoreboard services in-process: speed traps and zones, event times, the 1000 Club
 (ChallengeCompleted, its GetRows board).
 
-Run: cd server && python3 -m unittest discover -p 'test_*.py'
+Run: python3 -m unittest discover -p 'test_*.py'
 """
 
 import json

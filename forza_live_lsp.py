@@ -443,7 +443,7 @@ GAME_OPTIONS_XML = """<GameOptions GameTypePreset="{preset}"{filter} TrackId="{t
 
 
 # The Playground Games playlist (hopper 2): the game's own Infected, Cat & Mouse and King
-# presets (server/playground_rounds.xml, from GameOptionPresets.xml), one per round.
+# presets (playground_rounds.xml, from GameOptionPresets.xml), one per round.
 PLAYGROUND_HOPPER = 2
 
 

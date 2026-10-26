@@ -1,7 +1,7 @@
 """Photo uploads (forza_photos.py): the calls photo mode's upload makes, as the game's type
 descriptors encode them (forza_xtsw_all.py).
 
-Run: cd server && python3 -m unittest discover -p 'test_*.py'
+Run: python3 -m unittest discover -p 'test_*.py'
 """
 
 import tempfile

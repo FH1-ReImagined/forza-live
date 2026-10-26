@@ -2,10 +2,15 @@
 
 Forza Horizon talks to Turn 10's servers for its Horizon sign-in, the Find Game playlists
 ("hoppers"), online XP, scoreboards, the storefront and more. The Forza Live server
-answers the calls online play needs (`server/forza_live_lsp.py`, the protocol in
-`server/forza_xtsw.py`). Everything below was read from the base `default.xex` (addresses
+answers the calls online play needs (`forza_live_lsp.py`, the protocol in
+`forza_xtsw.py`). Everything below was read from the base `default.xex` (addresses
 are guest addresses) and checked against the game's requests and its reaction to our
 answers.
+
+Paths: the server's files are at the root of this repository (in the game's repository it is the
+`server/` submodule). `tools/server_probe.py` and `tools/xtsw_decode.py` are here; the other
+`tools/` and `docs/` paths are in [ForzaHorizon1-ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined), and the
+website's files in [website](https://github.com/FH1-ReImagined/website).
 
 ## Finding the title server
 
@@ -53,7 +58,7 @@ world's event along) when the key is not the XUID's, and takes a call without a 
 game before the key or for an XUID that never signed in with one, as unverified: accepted
 and logged (once per XUID every 10 minutes), its race stats marked `verified: false`, and
 never the player's word where it matters (`caller_trusted()`). Addresses can't do this job:
-behind a tunnel (`docs/hosting.md`) every HTTP connection and UDP datagram arrive from the
+behind a tunnel ([`hosting.md`](hosting.md)) every HTTP connection and UDP datagram arrive from the
 tunnel agent's address, and a connection's TCP port says nothing about the player's UDP one.
 
 The call itself is `sub_82AABAC0(client, class, method, params, results member list,
@@ -128,7 +133,7 @@ Notifications, Transaction}`. What the game calls, in order:
 | | `DLCMetadata.GetStringTableInfo("EN")` | no table (`Id` -1, #79); with the empty answer the game also asked `Xls Content.DownloadContent(0, 0, 0x40000)` x2 and saved a nameless file to `marketplace:\` |
 | Party lobby | `Hopper.GetList(maxCategoryResults 2, maxHopperResults 32)`; Title Update 4: `GetListEx` (each hopper also has `requiredOfferId`, u64) | the playlists (below) |
 | Find Game, picking a playlist | `Hopper.GetSearchSettings(hopperId)`, `GetGameOptions(hopperId, roundNum, 0x8000)`, then (after the session search) `UserRegister(hopperId, sessionId)` every `nextRegisterSeconds` | search settings, the round's GameOptions XML, 60 s |
-| Race start | `GameplayLog.Write`, `Hopper.GetRaceMultipliers` | empty, multiplier 1.0 (a campaign round's players: `--coop-race-multiplier`, a test knob; 2 doubles the online XP, 0 counts as 1; `docs/coop_campaign.md`, "The race multiplier") |
+| Race start | `GameplayLog.Write`, `Hopper.GetRaceMultipliers` | empty, multiplier 1.0 (a campaign round's players: `--coop-race-multiplier`, a test knob; 2 doubles the online XP, 0 counts as 1; [`coop_campaign.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/coop_campaign.md), "The race multiplier") |
 | Race end | `Scoreboard.SubmitScoreEx` / `SubmitScore`, `User.SetPlayercardInfo`, `OnlineProfile.UpdateAllTables` / `UpdateAll` | the score kept (scoreboards below) / success (profile kept) |
 | End of a Rivals race (also retiring) | `User.WriteRaceStatsEx(id, raceStats, scoreData)` | kept per player (`userXP`, credits, the race) |
 | After the sign-in (single player too) | `Xls Notifications.RetrieveForUser` `notificationPollIntervalSeconds` after `Logon2`, then every `nextRetrieveSeconds` (`StartNewSession` on some paths) | the player's notifications (Message Center, below), 15 s then 60 s (with 0 the game polled 7 times a second) |
@@ -167,9 +172,9 @@ wins < `maxAllowedWins` and races >= `minAllowedRaces` (beginner playlists). Our
 3 "Horizon World", 1 "Races", 2 "Playground Games" and 20 "Co-op Festival", all in the one
 category Online (a second category's hoppers would not be listed). Co-op Festival is the
 Horizon World among friends (placement only into a world a friend leads), whose host starts
-festival events with `/event` in World chat (`docs/coop_campaign.md`, "Milestone 1 progress");
+festival events with `/event` in World chat ([`coop_campaign.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/coop_campaign.md), "Milestone 1 progress");
 it is listed only to games whose HELLO has feature 0x08. Horizon World is
-the shared free-roam world (`docs/online_vision.md`): preset 7 rounds from the festival
+the shared free-roam world ([`online_vision.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/online_vision.md)): preset 7 rounds from the festival
 (track 1101), `GameTypeFilterType="FreeRoam"`, endless (`EndConditionOptions Type="None"`;
 the client runs them as an online free roam that players JUMP IN to, which has no timed
 end anyway; `--world-round-minutes` serves `Type="Time" Time=` seconds for clients with
@@ -194,7 +199,7 @@ game database's `HopperRaces` table (preset, track, laps: (1, 322, 3), (2, 155, 
 3), (2, 145, 1)), picked by `roundNum`; `DATA_DIR/hoppers/<id>.xml` replaces them. The
 Playground Games playlist (2) serves the game's own Infected (4, arena track 215), Cat &
 Mouse (5, track 322, 2 laps) and King (6, track 215, 180 s) presets in turn
-(`server/playground_rounds.xml`, copied from `GameOptionPresets.xml` with their buckets,
+(`playground_rounds.xml`, copied from `GameOptionPresets.xml` with their buckets,
 tag and scoring options; the game's own playground hopper default is a free roam);
 `--playground-games 6,4` picks and orders them.
 
@@ -304,7 +309,7 @@ Live server), those with a free slot only, the fullest first. The **session host
 `GetGameOptions` for the **next** round when a round starts (the answer is the round the
 lobby shows after this one; a vote to skip asks again). In the Horizon World the server
 answers it with a festival event when one was requested for that world
-(`server/forza_world.py`, `docs/online_vision.md` phase 2).
+(`forza_world.py`, [`online_vision.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/online_vision.md) phase 2).
 
 ### Find Custom Game (#61, 2026-10-15)
 
@@ -343,7 +348,7 @@ has `no answer from <server> yet` and no `signed in to`): see "Without a server 
 A public King lobby was listed under Infected, with the track, time limit and host of
 rounds long gone, and joining it said PLAYER UNREACHABLE. A lobby's players publish
 standby records of it (the game picks a new host by itself when its host leaves, see
-`docs/online_vision.md`), and the server lists those once nobody hosts the session. A
+[`online_vision.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/online_vision.md)), and the server lists those once nobody hosts the session. A
 standby record kept the search key and the QoS data the player found the lobby with. In
 a custom game the game type is that key and the QoS data is everything the details pane
 shows, the host's name included. So when the host changed the setup and then left, the
@@ -373,7 +378,7 @@ and joins, A saves King and leaves. Before, a search for Infected listed the Kin
 both fixes King lists it as "KING 03:00, class B, host DriverB" and Infected finds nothing;
 B's setup changed to Cat and Mouse moved both records to key 6. With an older game as B
 (v0.1.33 behaviour) and only the server fixed, a third game C found it under King with
-A's last King details and joined it. `server/test_forza_lobby_details.py`.
+A's last King details and joined it. `test_forza_lobby_details.py`.
 
 Not reproduced: a player who was in a King round for the others but never appeared in one
 player's game (the second part of #391). That player's log has every join of the lobby in
@@ -464,7 +469,7 @@ traps (175-200 km/h on Sth Rt. 38, board 210, where it said 132).
 Not done: an event board (type 3) was not driven again with the new board keys
 (unit-tested); the Storefront's rows (`GetStorefrontRows`) stay empty.
 
-### Scoreboards, leaderboards and Rivals (`server/forza_scores.py`)
+### Scoreboards, leaderboards and Rivals (`forza_scores.py`)
 
 The method stubs (`Forza.WebServices.Scoreboard`, all calling `sub_82A92018`) and their
 callers:
@@ -603,17 +608,17 @@ medals earned before the server kept them, or on another server, are not on the 
 (After the medal was in the save, a few more ONE EIGHTY tries in the Aventador sent
 nothing; they may not all have counted as the skill.)
 
-Seen with two players (`docs/dlc.md`, 1000 Club): "1 DriverB 1 (medal icon) 10/15/2026,
+Seen with two players ([`dlc.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/dlc.md), 1000 Club): "1 DriverB 1 (medal icon) 10/15/2026,
 2 DriverA 1 ...", "YOU ARE IN THE TOP 100% OF 2 PLAYERS"; the score shows as the medal
 count and `submittedTime` as the date; the filters (views 2, 3, 1, 0) all list the board.
-Unit tests: `server/test_forza_scores.py` (`cd server && python3 -m unittest discover -p
+Unit tests: `test_forza_scores.py` (`python3 -m unittest discover -p
 'test_*.py'`).
 
 The thumbprint names the challenge: the Aventador's ONE EIGHTY SKILL sent `carId 1398,
 challengeThumbprint 0xAE6828D3` both times it was completed (the second time after a
-restart had lost the medal: the career must be saved, `docs/dlc.md`).
+restart had lost the medal: the career must be saved, [`dlc.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/dlc.md)).
 
-### Car clubs and the club garage (`server/forza_clubs.py`)
+### Car clubs and the club garage (`forza_clubs.py`)
 
 At the festival the CAR CLUB sign (X) calls `Xls User.GetUserData`: with no club the menu
 is MY CLUB (CREATE, JOIN CLUB). JOIN CLUB is `Xls Clan.GetUsersToJoin(filter 1, 8)`: the
@@ -657,7 +662,7 @@ poll: MEMBERSHIP ACCEPTED "Welcome to the club. Your membership to the Horizon K
 has been accepted." (In an invite-only club the game offers only SHOW GAMER CARD and ADD
 AS FAVORITE on that row.)
 
-### The Auction House and car gifts (`server/forza_market.py`)
+### The Auction House and car gifts (`forza_market.py`)
 
 The server side is complete and unit-tested (`Auction.*`: GetGlobalConfig, Create,
 UploadAuctionTextures, SearchForAuction, GetAuctions, GetDetails, GetMyAuctions,
@@ -722,7 +727,7 @@ the recipient list (`sub_826EA0A0`: popup screen 0xDE over the friends list; eve
 player online is a friend here) and on the choice (action 7, `sub_826F0330`) runs
 `Forza::CGiftingTransactionSendCarGift` (`sub_8289D9E8` -> `SendCarGift`).
 
-### Photos and the photo storefront (`server/forza_photos.py`, #71, #82)
+### Photos and the photo storefront (`forza_photos.py`, #71, #82)
 
 Photo mode > PHOTO SHARE has BROWSE PHOTOS (PG PICKS, most downloaded, top rated, search) and
 MY SHARED PHOTOS (the player's own storefront, `SLOTS AVAILABLE n/m`). Uploading from there
@@ -760,7 +765,7 @@ gives the slot back (25/25 on reopening). The thumbnails of the photo saved on a
 session are black. Not seen: other players' photos (no second account), ratings, search
 results with a match, `Purchase`, the 27 KB request (a photo of the player's own).
 
-### Notifications (Message Center) (`server/forza_notifications.py`)
+### Notifications (Message Center) (`forza_notifications.py`)
 
 The Message Center is in the pause menu (START, MESSAGE CENTER; not in multiplayer). It
 lists what `Xls Notifications.RetrieveForUser(nonce, maxResults 512, cbParameterBlockSize
@@ -838,7 +843,7 @@ gift's DOWNLOAD called `RetrieveCreditsGift` and the save's credits went from 64
 ## Testing these services
 
 `--dump-requests` saves every call under `DATA_DIR/requests`; `tools/xtsw_decode.py -n 20
-DATA_DIR` decodes the last ones with `server/forza_xtsw_all.py` (all 292 records). The
+DATA_DIR` decodes the last ones with `forza_xtsw_all.py` (all 292 records). The
 career tests used a copy of the user's Xenia save (`tools/play.sh --xenia`, a copy per
 instance under its `XDG_DATA_HOME`), which starts at the GoPro Millennia Masters sign-up;
 the map (BACK) fast-travels (X on a festival icon) to Race Central, the Car Club, the
@@ -909,7 +914,7 @@ notification flows), all scratch files not kept in the repo.
 - The other services (the design storefront for liveries, tuning, layer groups and replays,
   DLC metadata) get empty answers; only the photo storefront is kept (above).
   Existing local design/vinyl saves can now be inspected and exported with
-  `tools/ugc_catalog.py` ([preservation workflow](ugc-preservation.md)); these bundles
+  `tools/ugc_catalog.py` ([preservation workflow](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/ugc-preservation.md)); these bundles
   preserve encrypted payloads and attribution but are not yet installable or served online.
 - Monthly Rivals: a time trial raced to its end (score, ghost, bounty) was not tried; the
   server has two sample trials and no tool to edit them.

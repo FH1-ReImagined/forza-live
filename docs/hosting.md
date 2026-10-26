@@ -1,7 +1,12 @@
 # Hosting a Forza Live server
 
-`server/` is a standard-library Python server: UDP rendezvous/relay plus the HTTP title
+Forza Live is a standard-library Python server: UDP rendezvous/relay plus the HTTP title
 services (Turn 10's services, kept-alive connections) and a JSON status page.
+
+Paths: the server's files are at the root of this repository (in the game's repository it is the
+`server/` submodule). `tools/server_probe.py` and `tools/xtsw_decode.py` are here; the other
+`tools/` and `docs/` paths are in [ForzaHorizon1-ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined), and the
+website's files in [website](https://github.com/FH1-ReImagined/website).
 
 | Port | Protocol | Use |
 |------|----------|-----|
@@ -15,7 +20,7 @@ forward nothing (UDP hole punching, server relay as fallback).
 
 ## Docker
 
-    docker build -t forza-live server/
+    docker build -t forza-live .        # in a checkout of this repository
     docker run -d --name forza-live --restart unless-stopped --network host \
         -e FORZA_ADMIN_TOKEN=choose-a-token \
         -v /path/to/data:/data forza-live --host 0.0.0.0
@@ -25,7 +30,7 @@ Docker's UDP proxy. The optional world events and the Co-op Festival (its festiv
 with CPU drivers; without the database the playlist is not offered) need the game's
 `gamedb.slt` (`--game-db`, not included; mount it into the container).
 
-Unraid: copy `server/` to `/mnt/user/appdata/forza-live/src`, build there, run with
+Unraid: copy this repository (`git archive main | tar -x -C ...`) to `/mnt/user/appdata/forza-live/src`, build there, run with
 `-v /mnt/user/appdata/forza-live/data:/data`. `docker inspect forza-live` shows the token.
 
 ## Behind a tunnel (playit.gg)
@@ -167,7 +172,7 @@ Mutes and bans are kept in `moderation.json` in the data folder until they run o
 The relay limit is 256 KB/s per player (bursts of 4 s): a game sends each peer one datagram a
 frame, about 100 bytes per car it runs, so a player in a full Horizon World (7 peers) needs about
 106 KB/s through the relay at 144 fps and 181 KB/s at 240 (measured with four games, #12;
-`docs/online_vision.md`, "Three and four players"). Players with a direct path to each other do
+[`online_vision.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/online_vision.md), "Three and four players"). Players with a direct path to each other do
 not use the relay.
 
 ## Leaderboards on the website (#148)
@@ -204,14 +209,14 @@ The file is `{"boards": {"speed-trap-230": "Rt. 29 Speed Trap", "event-199": "..
 speed zones and events, and the cars). `--dlc` is a folder with the DLC packages, installed
 (`tools/install_dlc.py`, the game's user data folder) or extracted (a Xenia `content` folder):
 the car packs' cars are in their database patches and their names in their string tables. The
-cars of the disc 2 car packs (docs/disc.md) are named only when their packages are there. The website has the same board names in
-`site/data/map_points.json`, so the page shows them either way; only the boards without a place
+cars of the disc 2 car packs ([`disc.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/disc.md)) are named only when their packages are there. The website has the same board names in
+its `data/map_points.json`, so the page shows them either way; only the boards without a place
 on the map (monthly Rivals, events off the Colorado map) and the cars need the server's file.
 
 The website (https) cannot fetch a plain-http tunnel (mixed content), so the `pages` workflow
-(`.github/workflows/pages.yml`) copies `/leaderboards/snapshot` from
+(the website repository's `.github/workflows/pages.yml`) copies `/leaderboards/snapshot` from
 `http://forza-reimagined.playit.plus:56678` into the site as `data/leaderboards.json` once a
-day (06:23 UTC; run the workflow by hand for a fresh copy sooner), and `site/leaderboards.html` reads that file. A scheduled run that cannot reach the
+day (06:23 UTC; run the workflow by hand for a fresh copy sooner), and the website's `leaderboards.html` reads that file. A scheduled run that cannot reach the
 server fails and leaves the published site as it was. Nothing else is needed at deploy but the
 tunnel publishing the HTTP port. To try the page against a local server:
 `leaderboards.html?api=http://127.0.0.1:21201`.
@@ -220,7 +225,7 @@ tunnel publishing the HTTP port. To try the page against a local server:
 
 The page's map of Colorado is our own drawing, not the game's map image:
 
-- `site/images/colorado-map.svg`: every road of Colorado (the interstates, main and secondary
+- the website's `images/colorado-map.svg`: every road of Colorado (the interstates, main and secondary
   roads, dirt roads, the towns and the festival), drawn by `tools/build_map_roads.py` from the
   road layout in a copy of the game: the sat-nav road graph
   (`media/tracks/colorado/colorado.nav`). Its lanes (a freeway's carriageways, one-way pairs)
@@ -228,16 +233,17 @@ The page's map of Colorado is our own drawing, not the game's map image:
   main, secondary, dirt). The terrain regions, the reservoir and the landmark icons are drawn
   from `tools/map_terrain.json`. Its colours are the page's CSS tokens (`--map-*`), for the
   light and dark themes.
-- `site/data/map_points.json`: the place and in-game name of every speed trap, speed zone,
+- the website's `data/map_points.json`: the place and in-game name of every speed trap, speed zone,
   event (Rivals) and landmark, written by `tools/extract_map_points.py` from a copy of the game
-  (`--game extracted/game --update extracted/tu4 --out site/data/map_points.json`). Only
+  (`--game extracted/game --update extracted/tu4 --out ../website/data/map_points.json`). Only
   coordinates and names.
 
-To redraw the map from your own copy of the game:
+To redraw the map from your own copy of the game (in the game's repository, with the website
+repository checked out beside it as `../website`):
 
 ```
 python3 tools/build_map_roads.py --game extracted/game \
-    --points site/data/map_points.json --out site/images/colorado-map.svg
+    --points ../website/data/map_points.json --out ../website/images/colorado-map.svg
 ```
 
 `--ghosts COPY_OF_DATA_DIR/ghosts` (the server's Rivals ghosts, copied) and `--carlog drive.log`
@@ -248,7 +254,7 @@ python3 tools/build_map_roads.py --game extracted/game \
 The launcher's *Prebuild shaders* step builds a list of pipelines before play. Launchers upload
 pipeline *descriptions* (shader hashes and decoded render state, plus how to rebuild a shader from
 the player's own files; never shader code or game data) and the server publishes what several
-players saw ([shader prebuild](shader_prebuild.md#phase-3-lists-from-players-276)). Both endpoints
+players saw ([shader prebuild](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/shader_prebuild.md#phase-3-lists-from-players-276)). Both endpoints
 are on `--http-port` (`forza_shader_lists.py`):
 
 - `POST /shader-lists/upload`: JSON `{"version", "pipelines", "shaders"}` in the list format
@@ -265,7 +271,7 @@ Data: `shader_lists.json` in the data folder (atomic writes, at most a few MB; k
 rest of the data folder). To seed the published list, put a list for one storage version in
 `shader_lists_seed.json` beside it (the launcher's `data/pipelines-4D5309C9.json` fits; entries
 are checked on load). Nothing else is needed at deploy: the module ships with the other
-`server/*.py` files (the Dockerfile copies them), and a tunnel must publish the HTTP port as for
+`*.py` files (the Dockerfile copies them), and a tunnel must publish the HTTP port as for
 the other title services (the launcher reaches it at the server's UDP port plus one, 56678 for
 the public server).
 

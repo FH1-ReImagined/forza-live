@@ -12,7 +12,11 @@ import forza_friends as fr
 import forza_shader_lists as sl
 
 VERSION = "fbo:20260228/20261018"
-TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+# The list format's own definition is the game repository's tools/pipeline_list.py and
+# tools/fxobj_shaders.py: found beside this folder when it is that repository's server/
+# submodule, or where FORZA_REPO_TOOLS says (the CI checks those two files out).
+TOOLS = os.environ.get("FORZA_REPO_TOOLS") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+HAVE_TOOLS = all(os.path.isfile(os.path.join(TOOLS, n)) for n in ("pipeline_list.py", "fxobj_shaders.py"))
 
 
 def keyof(n):
@@ -57,6 +61,7 @@ class ListsTest(unittest.TestCase):
                                         {}, b"")
         return status, json.loads(body)
 
+    @unittest.skipUnless(HAVE_TOOLS, "the game repository's tools/pipeline_list.py is not here (set FORZA_REPO_TOOLS)")
     def test_table_matches_the_tool(self):
         sys.path.insert(0, TOOLS)
         try:

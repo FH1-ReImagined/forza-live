@@ -1,7 +1,7 @@
 """Xbox LIVE stats in-process (forza_stats.py): XSessionWriteStats of the TrueSkill view,
 the rating of a game, XUserReadStats rows.
 
-Run: cd server && python3 -m unittest discover -p 'test_*.py'
+Run: python3 -m unittest discover -p 'test_*.py'
 """
 
 import struct

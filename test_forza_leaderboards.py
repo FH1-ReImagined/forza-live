@@ -1,7 +1,7 @@
 """The public leaderboards JSON (forza_leaderboards.py): shape, no XUIDs, ASCII names, cache,
 rate limit, CORS.
 
-Run: cd server && python3 -m unittest discover -p 'test_*.py'
+Run: python3 -m unittest discover -p 'test_*.py'
 """
 
 import json

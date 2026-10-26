@@ -5,14 +5,14 @@
     tools/xtsw_decode.py -n 20 DATA_DIR                  # the last 20 (polling calls skipped)
 
 Each line: time, Class.Method, body size, the parameters (zero and empty fields left out;
-"[+N bytes]" when the body is longer than the record). Uses server/forza_xtsw_all.py.
+"[+N bytes]" when the body is longer than the record). Uses forza_xtsw_all.py.
 """
 import argparse
 import glob
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import forza_xtsw as x  # noqa: E402
 import forza_xtsw_all as schema  # noqa: E402
 

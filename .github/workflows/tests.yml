@@ -1,0 +1,57 @@
+# The server's unit tests on every push to main and every pull request, and the Docker image.
+# test_forza_shader_lists also checks the server's copy of the pipeline list format against its
+# definition in the game's repository (tools/pipeline_list.py, tools/fxobj_shaders.py): those
+# files are checked out beside this repository for it.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]   # 3.12: the Docker image and the launcher's builds
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: FH1-ReImagined/ForzaHorizon1-ReImagined
+          path: .game-repo
+          sparse-checkout: |
+            tools/pipeline_list.py
+            tools/fxobj_shaders.py
+            tools/xxh3.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        env:
+          FORZA_REPO_TOOLS: ${{ github.workspace }}/.game-repo/tools
+        run: python -m unittest discover -s . -p 'test_*.py' -v
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t forza-live .
+      - name: The image starts and answers on its status page
+        run: |
+          docker run -d --name forza-live -p 21201:21201 forza-live
+          for i in $(seq 30); do
+            curl -fsS http://127.0.0.1:21201/ > status.json && break
+            sleep 1
+          done
+          docker logs forza-live
+          python3 -c "import json; json.load(open('status.json'))"
+          docker rm -f forza-live

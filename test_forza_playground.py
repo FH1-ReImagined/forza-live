@@ -1,7 +1,7 @@
 """The Playground Games playlist (issues #13, #14): its rounds in turn (--playground-games),
 the Cat & Mouse preset a two-player lobby plays, and the profile upload after a round.
 
-Run: cd server && python3 -m unittest discover -p 'test_*.py'
+Run: python3 -m unittest discover -p 'test_*.py'
 """
 
 import argparse

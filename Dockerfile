@@ -1,4 +1,4 @@
-# Forza Live server: docker build -t forza-live server/ &&
+# Forza Live server: docker build -t forza-live . &&
 #   docker run --network host -v forza-live-data:/data forza-live --http-port 21201
 # (or -p 21200:21200/udp -p 21201:21201; --network host keeps players' public ports intact)
 FROM python:3.12-slim

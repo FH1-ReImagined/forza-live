@@ -10,7 +10,7 @@ keep a friends list here, forza_friends.py), and game traffic flows between them
 when UDP hole punching works, through this server when it doesn't. Nothing here talks to Microsoft or
 Turn 10 services.
 
-    python3 server/forza_live_server.py [--port 21200] [--http-port 21201]
+    python3 forza_live_server.py [--port 21200] [--http-port 21201]
 
 The wire format is RecompiledHaloReach's (its docs/online_plan.md, section 5). Standard library only.
 """
