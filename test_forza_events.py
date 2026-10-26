@@ -121,6 +121,16 @@ class EventsTest(unittest.TestCase):
         motd_length = struct.unpack_from(">H", welcome, 12)[0]
         self.assertEqual(welcome[14 + motd_length + 2], 1)
 
+    def test_current_lobby_and_event_capabilities_keep_required_policy(self):
+        self.server.transport.sent.clear()
+        peer = self.join(features=0x3F, address=20006)
+        self.assertIsNotNone(peer)
+        self.assertEqual(peer.features, 0x3F)
+        welcome = next(d[5:] for _, d in self.server.transport.sent if d[4] == srv.WELCOME)
+        motd_length = struct.unpack_from(">H", welcome, 12)[0]
+        self.assertEqual(welcome[14 + motd_length + 2:], b"\x01")
+        self.assertTrue(any(d[4] == ev.KIND for _, d in self.server.transport.sent))
+
     def test_award_requires_attendance_and_explicit_ownership(self):
         with self.assertRaises(ValueError): self.approve()
         self.poll()
