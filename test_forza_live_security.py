@@ -1,5 +1,6 @@
 """Abuse tests for the public server: operator endpoints, malformed input, limits."""
 
+from contextlib import ExitStack
 import os
 import socket
 import struct
@@ -105,20 +106,34 @@ class ServerTest(unittest.TestCase):
 
     def test_welcome_is_small_and_peers_per_ip_capped(self):
         welcomes = 0
-        for i in range(24):
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(0.5)
-            hello = MAGIC + b"\x01" + struct.pack(">HQQIH", 1, 1, 0x0009000000000300 + i, 0, 1) + b"\0\2Pn"
-            s.sendto(hello, ("127.0.0.1", self.port))
-            try:
-                reply, _ = s.recvfrom(4096)
-                if reply[4] == 2:
-                    welcomes += 1
-                    self.assertLess(len(reply), 3 * len(hello))
-            except socket.timeout:
-                pass
-            s.close()
-        self.assertEqual(welcomes, 16)
+        with ExitStack() as sockets:
+            # Keep endpoints alive: closing each socket lets the OS reuse its
+            # port, making a later HELLO refresh an existing peer instead of
+            # testing the new-player cap.
+            clients = []
+            for i in range(24):
+                s = sockets.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+                s.bind(("127.0.0.1", 0))
+                s.settimeout(0.5)
+                hello = MAGIC + b"\x01" + struct.pack(">HQQIH", 1, 1, 0x0009000000000300 + i, 0, 1) + b"\0\2Pn"
+                clients.append((s, hello))
+                s.sendto(hello, ("127.0.0.1", self.port))
+                try:
+                    reply, _ = s.recvfrom(4096)
+                    if reply[4] == 2:
+                        welcomes += 1
+                        self.assertLess(len(reply), 3 * len(hello))
+                except socket.timeout:
+                    pass
+            self.assertEqual(welcomes, 16)
+
+            # Retransmitting an accepted HELLO still gets a WELCOME at the cap;
+            # WELCOME count alone is only a player count for distinct endpoints.
+            first, hello = clients[0]
+            first.sendto(hello, ("127.0.0.1", self.port))
+            reply, _ = first.recvfrom(4096)
+            self.assertEqual(reply[:5], MAGIC + b"\x02")
+            self.assertLess(len(reply), 3 * len(hello))
 
 
 class LimitsTest(unittest.TestCase):
