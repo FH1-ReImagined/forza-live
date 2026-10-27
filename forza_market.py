@@ -35,6 +35,7 @@ import forza_notifications as notifications
 import forza_limits as limits
 import forza_xtsw as x
 import forza_xtsw_all as A
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -97,16 +98,14 @@ class Market:
             return
         self.loaded = True
         try:
-            with open(self.path("auctions.json")) as f:
-                data = json.load(f)
+            data = durable.load(self.path("auctions.json"))
             self.auctions = {int(k): unjson(v) for k, v in data.get("auctions", {}).items()}
             self.textures = {int(k): v for k, v in data.get("textures", {}).items()}
             self.next_id = data.get("nextId", 1)
         except (OSError, ValueError):
             pass
         try:
-            with open(self.path("gifts.json")) as f:
-                data = json.load(f)
+            data = durable.load(self.path("gifts.json"))
             self.gifts = {int(k): unjson(v) for k, v in data.get("gifts", {}).items()}
             self.next_id = max(self.next_id, data.get("nextId", 1))
         except (OSError, ValueError):
@@ -120,7 +119,7 @@ class Market:
             tmp = self.path(name) + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(jsonable(data), f, indent=1)
-            os.replace(tmp, self.path(name))
+            durable.replace(tmp, self.path(name))
 
     def new_id(self):
         self.load()

@@ -34,6 +34,7 @@ import urllib.parse
 
 import forza_limits as limits
 import forza_scores as scores
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -104,8 +105,7 @@ def names():
     try:
         mtime = os.stat(path).st_mtime
         if _names[0] != mtime:
-            with open(path) as f:
-                data = json.load(f)
+            data = durable.load(path)
             _names = (mtime, data if isinstance(data, dict) else {})
     except (OSError, ValueError):
         _names = (None, {})

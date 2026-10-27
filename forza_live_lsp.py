@@ -56,6 +56,7 @@ import forza_stats as stats
 import forza_world as world
 import forza_xtsw as x
 import forza_xtsw_all as A
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -232,8 +233,7 @@ def player_path(xuid):
 
 def load_player(xuid):
     try:
-        with open(player_path(xuid)) as f:
-            return json.load(f)
+        return durable.load(player_path(xuid))
     except (OSError, ValueError):
         return {}
 
@@ -241,13 +241,14 @@ def load_player(xuid):
 def save_player(xuid, record):
     path = player_path(xuid)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not os.path.exists(path) and len(os.listdir(os.path.dirname(path))) >= limits.MAX_PLAYERS:
+    if not os.path.exists(path) and sum(n.endswith(".json") for n in os.listdir(os.path.dirname(path))) \
+            >= limits.MAX_PLAYERS:  # players only: not their .bak copies (forza_durable)
         log.warning("player limit reached: %016X not saved", xuid)
         return
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(record, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    durable.replace(tmp, path)
 
 
 # ---- Services ----

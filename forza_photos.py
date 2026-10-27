@@ -33,6 +33,7 @@ import forza_clubs as clubs
 import forza_limits as limits
 import forza_xtsw as x
 import forza_xtsw_all as A
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -67,8 +68,7 @@ def load():
     if not _loaded[0]:
         _loaded[0] = True
         try:
-            with open(index_path()) as f:
-                INDEX.update(json.load(f))
+            INDEX.update(durable.load(index_path()))
         except (OSError, ValueError):
             pass
     return INDEX
@@ -79,7 +79,7 @@ def save():
     tmp = index_path() + ".tmp"
     with open(tmp, "w") as f:
         json.dump(INDEX, f, indent=1)
-    os.replace(tmp, index_path())
+    durable.replace(tmp, index_path())
 
 
 def remove(fid):

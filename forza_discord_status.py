@@ -14,6 +14,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -147,8 +148,7 @@ def post(data_dir, content):
     try:
         msg_id = None
         try:
-            with open(_id_path(data_dir)) as f:
-                msg_id = json.load(f).get("id")
+            msg_id = durable.load(_id_path(data_dir)).get("id")
         except (OSError, ValueError):
             pass
         if msg_id:

@@ -34,6 +34,7 @@ import time
 import urllib.parse
 
 import forza_friends as friends
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -92,8 +93,7 @@ def load():
     if not _state:
         _state.update({"versions": {}, "daily": {}})
         try:
-            with open(data_path()) as f:
-                data = json.load(f)
+            data = durable.load(data_path())
             if isinstance(data.get("versions"), dict):
                 _state["versions"] = data["versions"]
             if isinstance(data.get("daily"), dict):
@@ -108,7 +108,7 @@ def save():
     tmp = data_path() + ".tmp"
     with open(tmp, "w") as f:
         json.dump(_state, f, separators=(",", ":"), sort_keys=True)
-    os.replace(tmp, data_path())
+    durable.replace(tmp, data_path())
 
 
 def player_id(xuid):
@@ -317,8 +317,7 @@ def merged(version):
 def _seed(version):
     """The operator's seed list for this version (checked entry by entry), or None."""
     try:
-        with open(seed_path()) as f:
-            data = json.load(f)
+        data = durable.load(seed_path())
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict) or data.get("storage_versions") != [version]:
