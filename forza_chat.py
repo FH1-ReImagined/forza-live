@@ -42,6 +42,7 @@ import time
 
 import forza_friends as friends
 import forza_limits as limits
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -96,8 +97,7 @@ class Chat:
         if not self.path:
             return
         try:
-            with open(self.path) as f:
-                data = json.load(f)
+            data = durable.load(self.path)
             now = time.time()
             self.mutes = {int(k, 16): v for k, v in data.get("mutes", {}).items() if v > now}
             self.bans = {int(k, 16): v for k, v in data.get("bans", {}).items() if v > now}
@@ -114,7 +114,7 @@ class Chat:
             with open(tmp, "w") as f:
                 json.dump({"mutes": {"%016X" % k: v for k, v in self.mutes.items()},
                            "bans": {"%016X" % k: v for k, v in self.bans.items()}}, f)
-            os.replace(tmp, self.path)
+            durable.replace(tmp, self.path)
         except OSError as e:
             log.warning("cannot write %s: %s", self.path, e)
 

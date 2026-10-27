@@ -26,6 +26,7 @@ import uuid
 import forza_limits as limits
 import forza_xtsw as x
 import forza_xtsw_all as A
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -106,8 +107,7 @@ class Store:
             return
         self.loaded = True
         try:
-            with open(self.path()) as f:
-                data = json.load(f)
+            data = durable.load(self.path())
             self.boards = migrate(data.get("boards", {}))
             self.club = data.get("club1000", {})
             self.next_file = data.get("nextFileId", 1)
@@ -124,7 +124,7 @@ class Store:
         with open(tmp, "w") as f:
             json.dump({"boards": self.boards, "club1000": self.club,
                        "nextFileId": self.next_file}, f, indent=1)
-        os.replace(tmp, self.path())
+        durable.replace(tmp, self.path())
 
     def board(self, kind, sbid, stt, create=False):
         """A board's entries by player: {} for a board nobody is on, or with create the
@@ -523,9 +523,10 @@ def online_xp_entries():
     folder = os.path.join(DATA_DIR, "players")
     out = []
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if not name.endswith(".json"):
+            continue  # .bak copies (forza_durable) and leftovers
         try:
-            with open(os.path.join(folder, name)) as f:
-                record = json.load(f)
+            record = durable.load(os.path.join(folder, name))
         except (OSError, ValueError):
             continue
         xp = record.get("profile", {}).get("onlineXP", 0)

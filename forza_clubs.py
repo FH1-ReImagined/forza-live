@@ -26,6 +26,7 @@ import forza_notifications as notifications
 import forza_limits as limits
 import forza_xtsw as x
 import forza_xtsw_all as A
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -50,8 +51,7 @@ class Clubs:
         if not self.loaded:
             self.loaded = True
             try:
-                with open(self.path()) as f:
-                    self.data.update(json.load(f))
+                self.data.update(durable.load(self.path()))
             except (OSError, ValueError):
                 pass
         return self.data
@@ -61,7 +61,7 @@ class Clubs:
         tmp = self.path() + ".tmp"
         with open(tmp, "w") as f:
             json.dump(self.data, f, indent=1)
-        os.replace(tmp, self.path())
+        durable.replace(tmp, self.path())
 
     def new_id(self):
         d = self.load()

@@ -37,6 +37,7 @@ import forza_campaign as campaign
 import forza_coop_ledger as coop_ledger
 import forza_world as world
 import forza_world_host as world_host
+import forza_durable as durable
 
 MAGIC = b"RLV1"
 VERSION = 1
@@ -882,7 +883,7 @@ class ForzaLive(asyncio.DatagramProtocol):
             tmp = self.state_path + ".tmp"
             with open(tmp, "w") as f:
                 f.write(data)
-            os.replace(tmp, self.state_path)
+            durable.replace(tmp, self.state_path)
         except OSError as e:
             log.warning("cannot write %s: %s", self.state_path, e)
             return False
@@ -904,8 +905,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         if not self.state_path or self.peers:
             return 0
         try:
-            with open(self.state_path) as f:
-                state = json.load(f)
+            state = durable.load(self.state_path)
             age = time.time() - state["saved_at"]
             if state["version"] != STATE_VERSION or not -60 <= age <= max_age:
                 log.info("state file ignored (%s)", "version" if state["version"] != STATE_VERSION

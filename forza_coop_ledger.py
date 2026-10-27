@@ -48,6 +48,7 @@ import os
 import threading
 import time
 import urllib.parse
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -79,8 +80,7 @@ class Ledger:
         if not self.path:
             return
         try:
-            with open(self.path) as f:
-                data = json.load(f)
+            data = durable.load(self.path)
             self.rounds = {r["id"]: r for r in data.get("rounds", []) if isinstance(r, dict)}
             for r in self.rounds.values():  # version 1 kept no open flag: closed
                 r.setdefault("open", False)
@@ -103,7 +103,7 @@ class Ledger:
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump({"version": 3, "rounds": list(self.rounds.values())}, f)
-            os.replace(tmp, self.path)
+            durable.replace(tmp, self.path)
         except OSError as e:
             log.warning("cannot write %s: %s", self.path, e)
             return

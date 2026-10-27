@@ -47,6 +47,7 @@ import time
 import zlib
 
 import forza_limits as limits
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -210,8 +211,7 @@ class Store:
         if not self.path:
             return
         try:
-            with open(self.path) as f:
-                data = json.load(f)
+            data = durable.load(self.path)
             players = data["players"]
             cutoff = time.time() - FORGET_DAYS * 86400
             self.players = {k: p for k, p in players.items()
@@ -230,7 +230,7 @@ class Store:
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump({"version": 1, "players": self.players}, f)
-            os.replace(tmp, self.path)
+            durable.replace(tmp, self.path)
         except OSError as e:
             log.warning("cannot write %s: %s", self.path, e)
             return False

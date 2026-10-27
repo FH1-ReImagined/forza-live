@@ -38,6 +38,7 @@ import struct
 import time
 
 import forza_limits as limits
+import forza_durable as durable
 
 log = logging.getLogger("forza-live")
 
@@ -137,8 +138,7 @@ class Store:
             return
         self.loaded = True
         try:
-            with open(self.path()) as f:
-                self.players = json.load(f).get("players", {})
+            self.players = durable.load(self.path()).get("players", {})
         except (OSError, ValueError):
             pass
 
@@ -147,7 +147,7 @@ class Store:
         tmp = self.path() + ".tmp"
         with open(tmp, "w") as f:
             json.dump({"players": self.players}, f, indent=1)
-        os.replace(tmp, self.path())
+        durable.replace(tmp, self.path())
 
     def view(self, xuid, view, gamertag=None, create=False):
         self.load()

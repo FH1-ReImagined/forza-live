@@ -33,6 +33,7 @@ import threading
 import time
 
 import forza_xtsw as x
+import forza_durable as durable
 from forza_xtsw import BOOL, F32, I32, U8, U16, U32, U64, S, SYSTIME, WSTR
 
 log = logging.getLogger("forza-live")
@@ -144,8 +145,7 @@ class Store:
         if not self.loaded:
             self.loaded = True
             try:
-                with open(self.path()) as f:
-                    self.data.update(json.load(f))
+                self.data.update(durable.load(self.path()))
             except (OSError, ValueError):
                 pass
         return self.data
@@ -155,7 +155,7 @@ class Store:
         tmp = self.path() + ".tmp"
         with open(tmp, "w") as f:
             json.dump(self.data, f, indent=1)
-        os.replace(tmp, self.path())
+        durable.replace(tmp, self.path())
 
 
 STORE = Store()
