@@ -365,14 +365,15 @@ def race_multiplier(round_id):
     return _multipliers[round_id]
 
 
-USAGE = ("Co-op Festival: /event <code or id> starts a festival event for this world, "
-         "e.g. /event FR05; /events [level] lists them")
+USAGE = ("World host: /event random picks a race. Co-op Festival: /event <code or id> "
+         "picks one, e.g. /event FR05; /events [level] lists them")
 # Where /event works, in the game's own menu names (#395: a Custom Free Roam's host was only
 # told "You are not in a Horizon World"). One line each: the Chat tab shows one notice.
 WHERE = "Multiplayer > Find Game > Co-op Festival"
 NOT_IN_WORLD = "/event needs a Co-op Festival world (custom games have none): " + WHERE
-IN_HORIZON_WORLD = "/event needs a Co-op Festival world, not the Horizon World: " + WHERE
-NOT_WORLD_CHAT = "Type /event in World chat (To: Horizon World), in a Co-op Festival world"
+IN_HORIZON_WORLD = ("Use /event random here. For a specific festival event, join " + WHERE)
+NOT_WORLD_CHAT = ("Type /event in World chat (To: Horizon World), in a Horizon World "
+                  "or Co-op Festival")
 
 
 def listing(level=None, width=180):

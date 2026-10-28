@@ -10,6 +10,7 @@ import struct
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 import forza_campaign as cp
@@ -415,6 +416,66 @@ class CoopFestivalTest(CoopWorldCase):
         self.assertEqual(self.notices(self.c), [cp.IN_HORIZON_WORLD])
         self.say(self.old, "/event FR05")
         self.assertEqual(self.notices(self.old), [cp.NOT_IN_WORLD])
+
+    def test_random_campaign_uses_the_existing_eligible_pool(self):
+        sid = self.coop_world()
+        cp.STREET = False
+        self.addCleanup(setattr, cp, "STREET", True)
+        choices = cp.available()
+        with patch.object(srv.random, "choice", return_value=choices[-1]) as choose:
+            self.say(self.a, "/event RaNdOm")
+        choose.assert_called_once_with(choices)
+        self.assertFalse(world.WORLDS.state[sid]["campaign"].street)
+        self.assertEqual(world.WORLDS.pending(sid)[0], choices[-1].id)
+        self.assertEqual(self.notices(self.a), self.notices(self.b))
+        self.assertIn(choices[-1].code, self.notices(self.b)[0])
+
+    def test_random_world_resolves_one_track_for_the_session(self):
+        sid = b"world-03"
+        self.publish(self.a, lsp.WORLD_HOPPER, sid, 2)
+        self.standby(self.b, lsp.WORLD_HOPPER, sid)
+        choices = [(4, 1, 324, 2, 4), (231, 2, 145, 1, 5)]
+        with patch.object(world, "load_events", return_value=choices), \
+                patch.object(srv.random, "choice", return_value=choices[-1]) as choose:
+            self.say(self.a, "/event random")
+        choose.assert_called_once_with(choices)
+        self.assertEqual(world.WORLDS.pending(sid), choices[-1])
+        self.assertIsNone(world.WORLDS.state[sid]["campaign"])
+        self.assertEqual(self.notices(self.a), ["Driver1 starts a random race"])
+        self.assertEqual(self.notices(self.a), self.notices(self.b))
+        options = self.game_options(self.a, lsp.WORLD_HOPPER)
+        self.assertEqual(options.get("TrackId"), "145")
+        self.assertEqual(options.get("GameTypePreset"), "2")
+        self.assertEqual(options.find("EndConditionOptions").get("NumLaps"), "1")
+
+    def test_random_world_refuses_guests_and_keeps_pending_selection(self):
+        sid = b"world-03"
+        self.publish(self.a, lsp.WORLD_HOPPER, sid, 2)
+        self.standby(self.b, lsp.WORLD_HOPPER, sid)
+        self.say(self.b, "/event random")
+        self.assertEqual(self.notices(self.b), [
+            "Only the world's host (Driver1) can start an event"])
+        with patch.object(world, "load_events", return_value=[(4, 1, 324, 2, 4)]):
+            self.say(self.a, "/event random")
+        self.say(self.a, "/event random")
+        self.assertEqual(self.notices(self.a), ["An event is already starting in this world"])
+        self.assertEqual(world.WORLDS.pending(sid)[0], 4)
+
+    def test_random_world_does_not_send_fallback_event_zero(self):
+        sid = b"world-03"
+        self.publish(self.a, lsp.WORLD_HOPPER, sid, 1)
+        with patch.object(world, "load_events", return_value=world.FALLBACK_EVENTS):
+            self.say(self.a, "/event random")
+        self.assertIn("server needs", self.notices(self.a)[0])
+        self.assertIsNone(world.WORLDS.pending(sid))
+
+    def test_random_campaign_empty_pool_is_explained(self):
+        sid = self.coop_world()
+        with patch.object(cp, "available", return_value=[]):
+            self.say(self.a, "/event random")
+        self.assertEqual(self.notices(self.a), [
+            "No random races are available in this Co-op Festival"])
+        self.assertIsNone(world.WORLDS.pending(sid))
 
     def test_a_custom_free_roam_is_told_where_events_start(self):
         """#395: the host of a Custom Free Roam (game type 8) typed /event FR05 in World chat

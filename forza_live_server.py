@@ -799,6 +799,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         if word not in ("/event", "/events"):
             return False
         arg = text[len(word):].strip()
+        random_event = arg.lower() == "random"
         if channel != chat.WORLD:
             self.chat.notice(peer, campaign.NOT_WORLD_CHAT)
             return True
@@ -814,20 +815,41 @@ class ForzaLive(asyncio.DatagramProtocol):
         worlds = self.world_sessions()
         if sid is None or sid not in worlds:
             self.chat.notice(peer, campaign.NOT_IN_WORLD)
-        elif self.world_keys.get(sid) != lsp.COOP_HOPPER:
+        elif self.world_keys.get(sid) != lsp.COOP_HOPPER and not (
+                random_event and self.world_keys.get(sid) == lsp.WORLD_HOPPER):
             self.chat.notice(peer, campaign.IN_HORIZON_WORLD)
         elif worlds[sid][0].xuid != peer.xuid:
             self.chat.notice(peer, "Only the world's host (%s) can start an event" %
                              worlds[sid][0].name)
         elif world.WORLDS.state.get(sid):
             self.chat.notice(peer, "An event is already starting in this world")
-        elif coop_ledger.LEDGER.open_round(sid):
+        elif self.world_keys.get(sid) == lsp.COOP_HOPPER and coop_ledger.LEDGER.open_round(sid):
             self.chat.notice(peer, "An event is running in this world: start the next one when "
                                    "you are back in the free roam")
-        elif coop_ledger.LEDGER.waiting_for(peer.xuid) >= coop_ledger.MAX_WAITING:
+        elif (self.world_keys.get(sid) == lsp.COOP_HOPPER
+              and coop_ledger.LEDGER.waiting_for(peer.xuid) >= coop_ledger.MAX_WAITING):
             self.chat.notice(peer, coop_ledger.LEDGER.refusal(peer.xuid))
         else:
-            event = campaign.find(arg)
+            if random_event and self.world_keys.get(sid) == lsp.WORLD_HOPPER:
+                # Resolve once on the server; every player gets the same ordinary
+                # round options. The fallback playlist has no actionable event IDs.
+                choices = [e for e in world.load_events() if e[0] > 0]
+                if not choices:
+                    self.chat.notice(peer, "No random races are available: the server needs "
+                                           "the game's event database")
+                    return True
+                event = random.choice(choices)
+                world.WORLDS.request(sid, event_id=event[0], by=peer.name,
+                                     by_xuid=peer.xuid)
+                for p in self.world_members(sid):
+                    if p.features & chat.FEATURE:
+                        self.chat.notice(p, "%s starts a random race" % peer.name)
+                return True
+            choices = campaign.available() if random_event else []
+            if random_event and not choices:
+                self.chat.notice(peer, "No random races are available in this Co-op Festival")
+                return True
+            event = random.choice(choices) if random_event else campaign.find(arg)
             if event is None:
                 self.chat.notice(peer, "No festival or street race %r to race online (/events "
                                        "lists them)" % arg[:20])
