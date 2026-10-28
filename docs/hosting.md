@@ -60,13 +60,38 @@ address. For a trusted proxy:
   registration and error rates are counted per tunnelled player (per source port) instead.
   The server-wide player cap and every player's relay budget stay;
 - its players are told no public address, so other players do not punch to the agent's
-  socket and their traffic goes through the server relay. Players connecting directly keep
-  hole punching. The log says `via proxy` on joins and the status page has `via_proxy`;
+  socket and their traffic goes through the server relay, unless the agent sends a PROXY
+  protocol header (below). Players connecting directly keep hole punching. The log says
+  `via proxy` on joins and the status page has `via_proxy`;
 - its address no longer counts as "this machine" for the operator endpoints (a tunnelled
   request from 127.0.0.1 would otherwise be admin): use `FORZA_ADMIN_TOKEN`.
 
 Without the option nothing changes. Only list addresses you control: a trusted address gets
 no per-address protection.
+
+### PROXY protocol v2 (hole punching through the tunnel)
+
+With the tunnel's Proxy Protocol set to `proxy-protocol-v2` (playit.gg: the tunnel's page,
+Origin Configuration, Proxy Protocol; per tunnel), the agent tells the server each player's
+public address in a PROXY v2 header (`forza_proxy.py`): on UDP once per flow, as a datagram
+of its own before the flow's first one (agents up to 0.15.26: in front of every datagram;
+0.16.0 to 0.16.4 swap its two addresses, so update those); on TCP once at the start of the
+connection. Headers are believed only from a `--trusted-proxy` address. A UDP player whose
+header gave its address gets it in its welcome and the others get it to punch to, as for a
+player connecting directly; the relay stays the fallback (symmetric NATs). On HTTP the
+address is the one logged and counted for the per-address connection limit. Everything else
+(the per-address UDP limits, the relay budget, admin, auth) stays as above.
+
+A flow without a header is relayed as before: the setting off, or a flow that began before it
+was turned on (the agent sends a header only when it opens a flow: a game that keeps playing
+keeps its flow, so players get their address the next time they start the game). An HTTP
+connection without a header is served as before. The address is kept across a server restart
+with the registration (#93), since the agent's flow goes on without a new header. So deploy
+the server first, then turn the setting on: no outage either way. Choose version 2: playit
+sends no version 1 header on UDP, and one on TCP is refused (as by older servers). The status
+page counts `via_proxy_address` (players with a PROXY address; per player `proxy_address`) and
+`proxy_protocol` (headers taken on UDP and HTTP, headers refused, flows known), with no IP
+address; the log says `via proxy, public address from PROXY` on such joins.
 
 ## Operator endpoints
 

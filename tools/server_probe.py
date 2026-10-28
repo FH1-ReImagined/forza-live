@@ -46,7 +46,12 @@ for attempt in range(3):
     except socket.timeout:
         continue
 if answer == WELCOME:
-    print(f"PASS udp {port}: WELCOME from {addr[0]}")
+    # Our public address as the server tells it (not printed): none when we came through
+    # a tunnel that sends no PROXY header, so other players would reach us only by relay.
+    public = len(data) >= 17 and any(data[11:17])
+    print(f"PASS udp {port}: WELCOME from {addr[0]} ("
+          + ("it knows our public address: others can punch to us)" if public else
+             "no public address for us: our traffic goes through its relay)"))
     s.sendto(MAGIC + bytes([BYE]), addr)
 else:
     ok = False
