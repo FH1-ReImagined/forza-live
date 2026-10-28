@@ -83,13 +83,15 @@ sends them, as the PROXY protocol requires (a player can send the same bytes its
   taken only as the first datagram of a flow: of an agent socket not heard for 2 minutes
   (the agent closes a flow after at most 106 s of silence), and not in the server's first 2
   minutes (a flow then may be older than the server). Never in the middle of a flow. The
-  address belongs to the first game that says HELLO on that flow; another game on the same
-  socket without a new header gets none. Such a player gets its address in its welcome and
-  the others get it to punch to, as for a player connecting directly; the relay stays the
-  fallback (symmetric NATs). Only global addresses count. A flow without a header (older
-  than the setting or than the server) is relayed as before; players get their address the
-  next time they start the game. The address is kept across a restart (#93): the agent's
-  flow goes on without a new header.
+  address belongs to the first game whose HELLO on that flow is accepted (its token and
+  XUID); another game on the same socket without a new header gets none and uses the relay,
+  and so does any player once its agent is no longer a `--trusted-proxy`. A player with an
+  address gets it in its welcome and the others get it to punch to, as for a player
+  connecting directly; the relay stays the fallback (symmetric NATs). Only global addresses
+  count. A flow without a header (older than the setting or than the server) is relayed as
+  before; players get their address the next time they start the game. The address is kept
+  across a restart (#93), as the agent's flow goes on without a new header, for the same
+  token and XUID, while the agent is still a `--trusted-proxy` and the flow map has room.
 - `--proxy-protocol-tcp` (env `FORZA_PROXY_PROTOCOL_TCP=1`): every connection from a trusted
   proxy must start with a header, or it is closed: so reach the operator endpoints from an
   address that is not a trusted proxy (the LAN, with the token). The header's address is the

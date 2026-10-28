@@ -48,9 +48,12 @@ class FakeTransport:
         self.sent.append((addr, data))
 
 
+def xuid(token):
+    return 0x0009000000000000 | token
+
+
 def hello(token, name="P", room="r", lan=("10.0.0.5", 3074)):
-    body = struct.pack(">HQQIH", srv.VERSION, token, 0x0009000000000000 | token,
-                       srv.ip_to_u32(lan[0]), lan[1])
+    body = struct.pack(">HQQIH", srv.VERSION, token, xuid(token), srv.ip_to_u32(lan[0]), lan[1])
     body += bytes([len(room)]) + room.encode() + bytes([len(name)]) + name.encode()
     return srv.MAGIC + bytes([srv.HELLO]) + body
 
@@ -255,7 +258,7 @@ class UdpTest(ProxyServerTest):
         peer = self.join(a, 1)
         self.assertTrue(peer.proxied)
         self.assertEqual(peer.real_addr, REAL_A)
-        self.assertEqual(self.server.proxy_flows[a].owner, 1)
+        self.assertEqual(self.server.proxy_flows[a].owner, (1, xuid(1)))
         self.assertEqual(welcome_public(self.net, a), REAL_A)
         self.assertEqual(struct.unpack(">IIHIH", self.server.forward_header(peer)),
                          (peer.id, srv.ip_to_u32(REAL_A[0]), REAL_A[1],
@@ -484,6 +487,89 @@ class UdpTest(ProxyServerTest):
         self.assertEqual(self.join(fresh, 300, REAL_B).real_addr, REAL_B)
         self.assertNotIn(players[0].addr, self.server.proxy_flows)
 
+    # --- the address is bound to the accepted HELLO's token and XUID (from f8fde36) ---
+
+    def flows_view(self):
+        return {a: (f.mode, f.public, f.owner) for a, f in self.server.proxy_flows.items()}
+
+    def test_reused_socket_without_header_forgets_previous_identity(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        peer = self.join(addr, 2)
+        self.assertIsNone(peer.real_addr)
+        self.assertEqual(welcome_public(self.net, addr), ("0.0.0.0", 0))
+        self.assertEqual(self.flows_view()[addr], (srv.FLOW_HEADER, None, None))
+
+    def test_dropped_flow_does_not_give_another_identity_its_address(self):
+        addr = (AGENT, 40001)
+        old = self.join(addr, 1, REAL_A)
+        self.server.drop(old, "timed out")
+        self.assertIsNone(self.join(addr, 2).real_addr)
+
+    def test_new_flow_same_public_address_accepts_new_identity(self):
+        """A fresh header binds the next accepted HELLO, whoever it is; but only a header at
+        the start of a flow (mid-flow it may be the player's own, and changes nothing)."""
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        self.send(proxy.header(REAL_A, TUNNEL), addr)  # mid-flow: ignored
+        self.assertIsNone(self.join(addr, 2).real_addr)
+        aged(self.server, addr, srv.PROXY_FLOW_IDLE + 1)  # the agent opened a new flow
+        self.send(proxy.header(REAL_A, TUNNEL), addr)
+        self.assertEqual(self.join(addr, 2).real_addr, REAL_A)
+        self.assertEqual(welcome_public(self.net, addr), REAL_A)
+
+    def test_zero_token_is_bound_not_pending(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 0, REAL_A)
+        self.assertEqual(self.server.proxy_flows[addr].owner, (0, xuid(0)))
+        self.assertIsNone(self.join(addr, 2).real_addr)
+
+    def test_address_is_bound_to_xuid_as_well_as_token(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        packet = bytearray(hello(1))
+        struct.pack_into(">Q", packet, 15, xuid(2))
+        self.send(bytes(packet), addr)
+        self.assertIsNone(self.server.by_addr[addr].real_addr)
+        self.assertEqual(welcome_public(self.net, addr), ("0.0.0.0", 0))
+
+    def test_rejected_hello_cannot_claim_fresh_header(self):
+        addr = (AGENT, 40001)
+        self.send(proxy.header(REAL_A, TUNNEL), addr)
+        bad = bytearray(hello(99))
+        struct.pack_into(">H", bad, 5, srv.VERSION + 1)
+        self.send(bytes(bad), addr)  # another protocol: refused
+        self.assertIsNone(self.server.proxy_flows[addr].owner)
+        self.server.max_peers = 0
+        self.assertIsNone(self.join(addr, 98))  # server full: refused
+        self.assertIsNone(self.server.proxy_flows[addr].owner)
+        self.server.max_peers = 1024
+        self.assertEqual(self.join(addr, 1).real_addr, REAL_A)
+
+    def test_bad_or_untrusted_header_cannot_reset_pending_or_owned_flow(self):
+        addr = (AGENT, 40001)
+        header = proxy.header(REAL_A, TUNNEL)
+        self.send(header, addr)
+        for owned in (False, True):
+            if owned:
+                self.join(addr, 1)
+            before = self.flows_view()
+            self.send(header[:20], addr)  # trusted, but malformed
+            self.send(proxy.header(REAL_B, TUNNEL), ("203.0.113.99", 40001))  # not trusted
+            self.assertEqual(self.flows_view(), before)
+        self.assertEqual(self.join(addr, 1).real_addr, REAL_A)
+
+    def test_revoked_proxy_address_is_not_advertised(self):
+        addr = (AGENT, 40001)
+        peer = self.join(addr, 1, REAL_A)
+        limits.configure_proxies("")
+        self.assertIsNone(self.server.public_of(peer))
+        self.assertEqual(self.server.forward_header(peer),
+                         struct.pack(">IIHIH", peer.id, 0, 0, 0, 0))
+        self.join(addr, 1)
+        self.assertIsNone(peer.real_addr)
+        self.assertEqual(self.server.proxy_flows, {})
+
     def test_limits_stay_those_of_the_agents_socket(self):
         # 20 players behind one public address (a CGNAT) through the agent: no per-address cap
         # by their real address, as before (MAX_PEERS_PER_IP is 16)
@@ -517,7 +603,8 @@ class RestartTest(ProxyServerTest):
         self.assertTrue(self.server.save_state())
         with open(self.path) as f:
             state = json.load(f)
-        self.assertEqual(state["proxy_flows"], [[AGENT, 40001, srv.FLOW_HEADER, list(REAL_A), 1]])
+        self.assertEqual(state["proxy_flows"],
+                         [[AGENT, 40001, srv.FLOW_HEADER, list(REAL_A), [1, xuid(1)]]])
         self.assertNotIn("real", state["peers"][0])
         again, net = self.restarted()
         self.assertEqual(again.by_addr[a].real_addr, REAL_A)
@@ -549,13 +636,49 @@ class RestartTest(ProxyServerTest):
         self.server.save_state()
         with open(self.path) as f:
             state = json.load(f)
-        state["proxy_flows"][0][4] = 99  # the flow's address belongs to another token
+        state["proxy_flows"][0][4] = [99, xuid(99)]  # the address belongs to another game
         with open(self.path, "w") as f:
             json.dump(state, f)
         again, net = self.restarted()
         self.assertIsNone(again.by_addr[s].real_addr)
         self.send(hello(1, "P1"), s, again)
         self.assertEqual(welcome_public(net, s), ("0.0.0.0", 0))
+
+    def test_restarted_server_does_not_give_new_identity_old_address(self):  # from f8fde36
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        self.assertTrue(self.server.save_state())
+        again, _ = self.restarted()
+        self.assertIsNone(self.join(addr, 2, server=again).real_addr)
+
+    def test_restore_requires_current_proxy_trust(self):  # from f8fde36
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        self.assertTrue(self.server.save_state())
+        limits.configure_proxies("")
+        again, _ = self.restarted()
+        self.assertEqual(len(again.peers), 1)
+        self.assertIsNone(again.by_addr[addr].real_addr)
+        self.assertEqual(again.proxy_flows, {})
+
+    def test_restore_respects_proxy_flow_cap(self):  # from f8fde36
+        self.join((AGENT, 40001), 1, REAL_A)
+        self.join((AGENT, 40002), 2, REAL_B)
+        self.assertTrue(self.server.save_state())
+        again, _ = self.new_server(started=False)
+        again.proxy_flows_max = 1
+        again.state_path = self.path
+        self.assertEqual(again.load_state(), 2)
+        self.assertEqual(len(again.proxy_flows), 1)
+        self.assertEqual(sum(p.real_addr is not None for p in again.peers.values()), 1)
+
+    def test_a_pending_flow_is_not_restored(self):
+        """A header with no accepted HELLO yet: after a restart any game could claim it."""
+        self.send(proxy.header(REAL_A, TUNNEL), (AGENT, 40001))
+        self.join((AGENT, 40002), 2)
+        self.assertTrue(self.server.save_state())
+        again, _ = self.restarted()
+        self.assertEqual(again.proxy_flows, {})
 
     def test_flows_opened_while_the_server_was_down(self):
         """Their header went to the stopped server: the first datagram the new one hears

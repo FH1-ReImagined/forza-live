@@ -178,8 +178,8 @@ class Peer:
 
 class ProxyFlow:
     """A trusted proxy's socket while PROXY protocol is on for UDP: how its first datagram
-    began, when it was last heard, the public address its header gave and the token of the
-    first game that said HELLO on it, which alone gets that address."""
+    began, when it was last heard, the public address its header gave and the (token, XUID)
+    of the first game whose HELLO on it was accepted, which alone gets that address."""
     __slots__ = ("mode", "seen", "public", "owner")
 
     def __init__(self, mode, seen, public=None, owner=None):
@@ -401,27 +401,27 @@ class ForzaLive(asyncio.DatagramProtocol):
             flow.public, flow.owner = public, None
         peer = self.by_addr.get(addr)
         if peer is not None and peer.proxied:
-            real = flow.public if flow.owner == peer.token else None
+            real = flow.public if flow.owner == (peer.token, peer.xuid) else None
             if peer.real_addr != real:
                 peer.real_addr = real
                 self.state_dirty = True
 
-    def flow_public(self, addr, token):
-        """The public address of the flow from addr for a HELLO with token: the first game
-        that says HELLO on a flow owns its address; another one (its socket reused without
-        a header) gets none, and the flow loses it."""
+    def flow_public(self, addr, identity):
+        """(the flow from addr, the public address a HELLO of identity (token, XUID) may have
+        from it). The first game whose HELLO is accepted owns the address (on_hello claims
+        it); another one (the socket reused without a header) gets none, and the flow loses
+        it. Nothing either while addr is no longer a trusted proxy."""
         flow = self.proxy_flows.get(addr) if self.proxy_udp else None
-        if flow is None or flow.public is None:
-            return None
-        if flow.owner is None:
-            flow.owner = token
-            self.state_dirty = True
-        elif flow.owner != token:
+        if flow is None:
+            return None, None
+        if not limits.is_trusted_proxy(addr[0]):
+            del self.proxy_flows[addr]
+            return None, None
+        if flow.owner is not None and flow.owner != identity:
             flow.public = flow.owner = None
             self.tell_once("owner", "proxy protocol: another game said HELLO on a flow without "
                            "a new header: its address is dropped, the flow is relayed")
-            return None
-        return flow.public
+        return flow, flow.public
 
     def expire_proxy_flows(self, now):
         """Forgets the agent's sockets not heard for PROXY_FLOW_IDLE s (the agent closed those
@@ -432,8 +432,13 @@ class ForzaLive(asyncio.DatagramProtocol):
 
     def public_of(self, peer):
         """The (ip, port) other players punch to: the player's as this server sees it, or
-        behind a trusted proxy the one its PROXY header gave (None without one)."""
-        return peer.real_addr if peer.proxied else peer.addr
+        behind a trusted proxy the one its PROXY header gave (None without one, or once its
+        agent is no longer a trusted proxy)."""
+        if peer.proxied:
+            if peer.real_addr and limits.is_trusted_proxy(peer.addr[0]):
+                return peer.real_addr
+            return None
+        return peer.addr
 
     def on_hello(self, body, addr):
         version, token, xuid, local_ip, local_port = struct.unpack_from(">HQQIH", body, 0)
@@ -448,7 +453,6 @@ class ForzaLive(asyncio.DatagramProtocol):
         friend_key = b""  # after the features byte: u8 length + the friends key
         if pos + 1 < len(body):
             friend_key = body[pos + 2:pos + 2 + body[pos + 1]]
-        real = self.flow_public(addr, token)  # PROXY protocol: its flow's address, or None
         if version != VERSION:
             self.error(addr, 2, f"server speaks protocol {VERSION}, client {version}")
             return
@@ -459,6 +463,7 @@ class ForzaLive(asyncio.DatagramProtocol):
             if take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP):
                 self.error(addr, 4, "removed by the server admin")
             return
+        flow, real = self.flow_public(addr, (token, xuid))  # PROXY protocol: its flow's address
         peer = self.by_addr.get(addr)
         if peer is not None and peer.token != token:
             self.drop(peer, "restarted")  # same address, new game process
@@ -497,6 +502,9 @@ class ForzaLive(asyncio.DatagramProtocol):
                      addr[1], u32_to_ip(local_ip), local_port,
                      (" via proxy, public address from PROXY" if real else " via proxy")
                      if proxied else "")
+        if real is not None and flow.owner is None:  # accepted: the flow's address is its own
+            flow.owner = (token, xuid)
+            self.state_dirty = True
         peer.seen = time.monotonic()
         self.restored.discard(peer.id)
         if peer.proxied and peer.real_addr != real:
@@ -531,7 +539,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         player behind a trusted proxy has the public address its PROXY header gave, or none
         (its observed address is the proxy's socket, useless to others): clients punch only
         toward a nonzero public address, so they keep using the server relay for it."""
-        public = src.real_addr if src.proxied else src.addr
+        public = self.public_of(src)
         if public is None:
             return struct.pack(">IIHIH", src.id, 0, 0, 0, 0)
         return struct.pack(">IIHIH", src.id, ip_to_u32(public[0]), public[1], src.local[0],
@@ -1083,8 +1091,8 @@ class ForzaLive(asyncio.DatagramProtocol):
         state = {"version": STATE_VERSION, "saved_at": now_w, "epoch": self.epoch,
                  "next_id": self.next_id, "peers": peers}
         if self.proxy_udp:  # the agent's flows go on through a restart, without a new header
-            state["proxy_flows"] = [[a[0], a[1], f.mode, list(f.public), f.owner]
-                                    for a, f in self.proxy_flows.items() if f.public]
+            state["proxy_flows"] = [[a[0], a[1], f.mode, list(f.public), list(f.owner)]
+                                    for a, f in self.proxy_flows.items() if f.public and f.owner]
         return state
 
     def save_state(self):
@@ -1162,11 +1170,14 @@ class ForzaLive(asyncio.DatagramProtocol):
 
     def load_proxy_flows(self, saved, now):
         """The flows with a PROXY address of the state file: they went on through the restart
-        without a new header. Their restored owners get the address back."""
+        without a new header. Kept while their agent is still a trusted proxy and there is
+        room; their restored owners (token and XUID) get the address back."""
         try:
             for ip, port, mode, public, owner in saved:
                 public = proxy.client_address((public[0], public[1]), ipv4=True)
+                owner = tuple(owner) if isinstance(owner, list) and len(owner) == 2 else None
                 if (public and mode in (FLOW_HEADER, FLOW_PREFIXED) and isinstance(port, int)
+                        and owner is not None and limits.is_trusted_proxy(ip)
                         and len(self.proxy_flows) < self.proxy_flows_max):
                     self.proxy_flows[(ip, port)] = ProxyFlow(mode, now, public, owner)
         except (ValueError, TypeError, IndexError) as e:  # never lose the registrations for it
@@ -1174,7 +1185,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         for pid in self.restored:
             peer = self.peers[pid]
             flow = self.proxy_flows.get(peer.addr)
-            if peer.proxied and flow is not None and flow.owner == peer.token:
+            if peer.proxied and flow is not None and flow.owner == (peer.token, peer.xuid):
                 peer.real_addr = flow.public
 
     def rebind_restored(self, addr, token, xuid):
