@@ -17,6 +17,7 @@ import forza_coop_ledger as ledger
 import forza_live_lsp as lsp
 import forza_live_server as srv
 import forza_stats as stats
+import forza_xtsw as x
 import forza_world as world
 from test_forza_campaign import CoopWorldCase
 
@@ -236,16 +237,23 @@ class LedgerTest(CoopWorldCase):
     def test_an_unverified_call_moves_no_campaign_along(self):
         self.say(self.a, "/event FR05")
         self.server.world_tick()
-        # someone calling as the host without its key gets the world, and nothing changes
-        self.assertEqual(self.game_options(self.a, lsp.COOP_HOPPER, key=False).get("GameTypePreset"), "7")
+        # someone calling as the host without its key is refused, and nothing changes
+        self.assertEqual(self.keyless_game_options(), (2, 5))
         self.assertEqual(world.WORLDS.state[self.sid]["state"], "pending")
         self.game_options(self.a, lsp.COOP_HOPPER)
-        self.game_options(self.a, lsp.COOP_HOPPER, key=False)
+        self.assertEqual(self.keyless_game_options(), (2, 5))
         self.assertEqual(ledger.LEDGER.rounds, {})
         self.game_options(self.a, lsp.COOP_HOPPER)
         rid = next(iter(ledger.LEDGER.rounds))
-        self.game_options(self.a, lsp.COOP_HOPPER, key=False)  # no early close either
+        self.assertEqual(self.keyless_game_options(), (2, 5))  # no early close either
         self.assertTrue(ledger.LEDGER.rounds[rid]["open"])
+
+    def keyless_game_options(self):
+        """Hopper.GetGameOptions as the host's XUID without its friends key: (status, code)."""
+        reply = self.title_call(self.a, "Hopper", "GetGameOptions", x.HopperGetGameOptions_Params,
+                                {"hopperId": lsp.COOP_HOPPER, "roundNum": 1, "cchOptionXmlMax": 0x8000},
+                                False)
+        return struct.unpack_from(">II", reply)
 
     def test_event_is_refused_while_a_round_runs_and_beyond_the_player_s_limit(self):
         self.run_round()
