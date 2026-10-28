@@ -147,5 +147,41 @@ class LimitsTest(unittest.TestCase):
             x.decode(x.ARR(x.RAW(4)), data)
 
 
+class StorageTest(unittest.TestCase):
+    """GET /storage/<path> serves DATA_DIR/storage only: DATA_DIR itself holds friends.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = self.tmp.name
+        os.makedirs(os.path.join(root, "storage", "sub"))
+        with open(os.path.join(root, "storage", "sub", "a.txt"), "wb") as f:
+            f.write(b"public")
+        with open(os.path.join(root, "friends.json"), "wb") as f:
+            f.write(b"secret")
+        old, lsp.DATA_DIR = lsp.DATA_DIR, root
+        self.addCleanup(setattr, lsp, "DATA_DIR", old)
+
+    def test_a_stored_file_is_served(self):
+        self.assertEqual(lsp.stored_file("/storage/sub/a.txt"), b"public")
+        self.assertEqual(lsp.stored_file("/storage/sub/../sub/a.txt"), b"public")
+
+    def test_nothing_outside_storage_is_served(self):
+        for path in ("/storage/../friends.json", "/storage/sub/../../friends.json",
+                     "/storage/./../friends.json", "/storage/../../etc/passwd",
+                     "/storage/", "/storage/sub", "/friends.json"):
+            self.assertIsNone(lsp.stored_file(path), path)
+
+    def test_a_link_out_of_storage_is_not_followed(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks")
+        try:
+            os.symlink(os.path.join(self.tmp.name, "friends.json"),
+                       os.path.join(self.tmp.name, "storage", "link.json"))
+        except OSError:
+            self.skipTest("cannot create symlinks here")
+        self.assertIsNone(lsp.stored_file("/storage/link.json"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -215,10 +215,15 @@ def dump(method, path, headers, body):
 
 
 def stored_file(path):
-    rel = os.path.normpath(path.lstrip("/"))
-    if rel.startswith(".."):
+    """GET /storage/<path>: a file under DATA_DIR/storage, never one outside it (DATA_DIR
+    itself holds the friends keys and the players' records)."""
+    base = os.path.realpath(os.path.join(DATA_DIR, "storage"))
+    full = os.path.realpath(os.path.join(DATA_DIR, path.lstrip("/")))
+    try:
+        if full == base or os.path.commonpath([base, full]) != base:
+            return None
+    except ValueError:  # another drive on Windows
         return None
-    full = os.path.join(DATA_DIR, rel)
     if os.path.isfile(full):
         with open(full, "rb") as f:
             return f.read()
