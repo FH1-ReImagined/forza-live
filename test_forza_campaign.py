@@ -447,6 +447,16 @@ class CoopFestivalTest(CoopWorldCase):
         self.assertEqual(options.get("TrackId"), "145")
         self.assertEqual(options.get("GameTypePreset"), "2")
         self.assertEqual(options.find("EndConditionOptions").get("NumLaps"), "1")
+        # The race's own prefetch asks for free roam next, but isn't a return to it.
+        self.game_options(self.a, lsp.WORLD_HOPPER)
+        self.say(self.a, "/event random")
+        self.assertIn("An event is running", self.notices(self.a)[0])
+        self.assertIsNone(world.WORLDS.pending(sid))
+        # The subsequent free-roam round releases the guard.
+        self.game_options(self.a, lsp.WORLD_HOPPER)
+        with patch.object(world, "load_events", return_value=choices):
+            self.say(self.a, "/event random")
+        self.assertIsNotNone(world.WORLDS.pending(sid))
 
     def test_random_world_refuses_guests_and_keeps_pending_selection(self):
         sid = b"world-03"

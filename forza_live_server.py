@@ -823,6 +823,9 @@ class ForzaLive(asyncio.DatagramProtocol):
                              worlds[sid][0].name)
         elif world.WORLDS.state.get(sid):
             self.chat.notice(peer, "An event is already starting in this world")
+        elif sid in world.WORLDS.racing:
+            self.chat.notice(peer, "An event is running in this world: start the next one when "
+                                   "you are back in the free roam")
         elif self.world_keys.get(sid) == lsp.COOP_HOPPER and coop_ledger.LEDGER.open_round(sid):
             self.chat.notice(peer, "An event is running in this world: start the next one when "
                                    "you are back in the free roam")
