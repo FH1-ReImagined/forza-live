@@ -18,7 +18,8 @@ import os
 log = logging.getLogger("forza_live")
 
 
-def _fsync_path(path, flags=os.O_RDONLY):
+def _fsync_path(path, flags=os.O_RDWR):
+    # A file needs a writable handle: Windows' fsync (_commit) refuses a read-only one.
     fd = os.open(path, flags)
     try:
         os.fsync(fd)
