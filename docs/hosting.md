@@ -60,13 +60,69 @@ address. For a trusted proxy:
   registration and error rates are counted per tunnelled player (per source port) instead.
   The server-wide player cap and every player's relay budget stay;
 - its players are told no public address, so other players do not punch to the agent's
-  socket and their traffic goes through the server relay. Players connecting directly keep
-  hole punching. The log says `via proxy` on joins and the status page has `via_proxy`;
+  socket and their traffic goes through the server relay, unless the tunnel sends PROXY
+  protocol headers (below). Players connecting directly keep hole punching. The log says
+  `via proxy` on joins and the status page has `via_proxy`;
 - its address no longer counts as "this machine" for the operator endpoints (a tunnelled
   request from 127.0.0.1 would otherwise be admin): use `FORZA_ADMIN_TOKEN`.
 
 Without the option nothing changes. Only list addresses you control: a trusted address gets
 no per-address protection.
+
+### PROXY protocol v2 (hole punching through the tunnel)
+
+With a tunnel's Proxy Protocol set to `proxy-protocol-v2` (playit.gg: the tunnel's page,
+Origin Configuration, Proxy Protocol; each tunnel has its own), the agent tells the server
+each player's public address in a PROXY v2 header (`forza_proxy.py`): on UDP once per flow,
+as a datagram of its own before the flow's first one (agents up to 0.15.26 put it in front
+of every datagram; 0.16.0 to 0.16.4 swap its two addresses: use 0.16.5 or newer); on TCP
+once at the start of the connection. The server reads headers only when told the tunnel
+sends them, as the PROXY protocol requires (a player can send the same bytes itself):
+
+- `--proxy-protocol-udp` (env `FORZA_PROXY_PROTOCOL_UDP=1`): a header from a trusted proxy is
+  taken only as the first datagram of a flow: of an agent socket not heard for 2 minutes
+  (the agent closes a flow after at most 106 s of silence), and not in the server's first 2
+  minutes (a flow then may be older than the server). Never in the middle of a flow. The
+  address belongs to the first game whose HELLO on that flow is accepted (its token and
+  XUID); another game on the same socket without a new header gets none and uses the relay,
+  and so does any player once its agent is no longer a `--trusted-proxy`. Repeated legacy
+  inline headers only confirm the flow's first address; a changed address clears it and
+  leaves traffic relayed until a fresh flow. A valid standalone header on a legacy flow
+  switches it to the newer header-once format, including across server restarts, so client
+  bytes after an agent upgrade cannot be interpreted as more agent headers. A player with an
+  address gets it in its welcome and the others get it to punch to, as for a player
+  connecting directly; the relay stays the fallback (symmetric NATs). Only global addresses
+  count. A flow without a header (older than the setting or than the server) is relayed as
+  before; players get their address the next time they start the game. The address is kept
+  across a restart (#93), as the agent's flow goes on without a new header, for the same
+  token and XUID, while the agent is still a `--trusted-proxy` and the flow map has room.
+- `--proxy-protocol-tcp` (env `FORZA_PROXY_PROTOCOL_TCP=1`): every connection from a trusted
+  proxy must start with a header, or it is closed: so reach the operator endpoints from an
+  address that is not a trusted proxy (the LAN, with the token). The header's address is the
+  one logged and counted for the per-address connection limit; admin still needs the token.
+
+Everything else (the per-address UDP limits, the relay budget, admin, auth) stays as above.
+The status page then counts `via_proxy_address` (players with a PROXY address; per player
+`proxy_address`) and `proxy_protocol` (headers taken on UDP and HTTP, headers refused, flows
+known), with no IP address; the log says `via proxy, public address from PROXY` on such joins.
+
+Order (each setting on the playit side and its option go together):
+
+1. Deploy the server without the options: it is the server it was.
+2. UDP: update the agent to 0.16.5 or newer, set the UDP tunnel to `proxy-protocol-v2`, then
+   restart the server with `--proxy-protocol-udp`. In between, the server drops the header
+   datagrams as before (no outage); players who join then, or in the restarted server's first
+   2 minutes, stay relayed until they next start the game. Never run the option without the
+   tunnel's setting: a player's first datagram could then name any address.
+3. TCP (optional: log lines and limits per player): set the TCP tunnel to `proxy-protocol-v2`
+   and restart the server with `--proxy-protocol-tcp` right after. In between, title-service
+   connections through the tunnel fail (the server without the option cannot read them, and
+   with it refuses connections without a header), so do it when few players are on.
+
+Before going back to a server without the option (an older one, a rollback), turn the
+tunnel's setting off: for TCP always (an older server closes every tunnelled connection),
+and for UDP too with an agent at 0.15.26 or older (an older server drops every datagram that
+starts with a header). And never leave an option on once its tunnel's setting is off.
 
 ## Operator endpoints
 
