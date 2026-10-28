@@ -80,6 +80,13 @@ along when it moved here.
 
 ## License
 
-[MIT](LICENSE). Forza Horizon is (c) Microsoft. This project is not affiliated with, endorsed by
+Forza Live is free software under the
+[GNU Affero General Public License, version 3 or later](LICENSE) (AGPL-3.0-or-later). If you run a
+modified version for other people over a network, you must offer them its source (section 13).
+Releases and commits before this license change were published under the MIT License and stay
+available under it; see [`NOTICE.md`](NOTICE.md). The game and its launcher are under the GNU
+General Public License, version 3 or later.
+
+Forza Horizon is (c) Microsoft. This project is not affiliated with, endorsed by
 or sponsored by Microsoft, Playground Games or Turn 10 Studios, and the server talks to none of
 their services.
