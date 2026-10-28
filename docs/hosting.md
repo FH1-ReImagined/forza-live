@@ -86,8 +86,13 @@ A flow without a header is relayed as before: the setting off, or a flow that be
 was turned on (the agent sends a header only when it opens a flow: a game that keeps playing
 keeps its flow, so players get their address the next time they start the game). An HTTP
 connection without a header is served as before. The address is kept across a server restart
-with the registration (#93), since the agent's flow goes on without a new header. So deploy
-the server first, then turn the setting on: no outage either way. Choose version 2: playit
+with the registration (#93), since the agent's flow goes on without a new header.
+The cached address belongs to that registration's token and XUID. If the agent reuses its
+socket for another identity without a fresh header, the new player uses the relay instead
+of inheriting the old address. Restoring an address also requires the agent to remain a
+configured trusted proxy and space in the bounded flow map.
+
+Deploy the server first, then turn the setting on: no outage either way. Choose version 2: playit
 sends no version 1 header on UDP, and one on TCP is refused (as by older servers). The status
 page counts `via_proxy_address` (players with a PROXY address; per player `proxy_address`) and
 `proxy_protocol` (headers taken on UDP and HTTP, headers refused, flows known), with no IP

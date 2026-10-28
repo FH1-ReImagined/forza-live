@@ -369,6 +369,7 @@ class UdpTest(unittest.TestCase):
         self.server.proxy_flows[b] = (REAL_B, old)
         self.server.expire()
         self.assertEqual(self.server.proxy_flows, {})
+        self.assertEqual(self.server.proxy_flow_owners, {})
 
     def test_back_after_a_silence_on_the_same_flow(self):
         """A game silent for longer than PEER_TIMEOUT but not long enough for the agent to
@@ -388,6 +389,7 @@ class UdpTest(unittest.TestCase):
         for i in range(40):  # headers of flows that never register
             self.send(proxy.header(("198.51.100.%d" % (i + 1), 40000), TUNNEL), (AGENT, 42000 + i))
             self.assertLessEqual(len(self.server.proxy_flows), 8)
+            self.assertEqual(set(self.server.proxy_flow_owners), set(self.server.proxy_flows))
         for p in players:
             self.assertIn(p.addr, self.server.proxy_flows)
         self.assertIn((AGENT, 42039), self.server.proxy_flows)  # the newest kept, the oldest gone
@@ -458,6 +460,126 @@ class UdpTest(unittest.TestCase):
             self.assertEqual(old.load_state(), 2)
             self.assertIsNone(old.by_addr[a].real_addr)
             self.assertEqual(old.proxy_flows, {})
+
+
+    def test_reused_socket_without_header_forgets_previous_identity(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        peer = self.join(addr, 2)
+        self.assertIsNone(peer.real_addr)
+        self.assertEqual(welcome_public(self.net, addr), ("0.0.0.0", 0))
+        self.assertNotIn(addr, self.server.proxy_flows)
+        self.assertNotIn(addr, self.server.proxy_flow_owners)
+
+    def test_dropped_flow_does_not_give_another_identity_its_address(self):
+        addr = (AGENT, 40001)
+        old = self.join(addr, 1, REAL_A)
+        self.server.drop(old, "timed out")
+        self.assertIsNone(self.join(addr, 2).real_addr)
+
+    def test_restarted_server_does_not_give_new_identity_old_address(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "live_state.json")
+            self.server.state_path = path
+            self.assertTrue(self.server.save_state())
+            self.server = self.new_server()
+            self.server.connection_made(self.net)
+            self.server.state_path = path
+            self.assertEqual(self.server.load_state(), 1)
+            self.assertIsNone(self.join(addr, 2).real_addr)
+
+    def test_restore_requires_current_proxy_trust(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "live_state.json")
+            self.server.state_path = path
+            self.assertTrue(self.server.save_state())
+            limits.configure_proxies("")
+            again = self.new_server()
+            again.connection_made(self.net)
+            again.state_path = path
+            self.assertEqual(again.load_state(), 1)
+            self.assertIsNone(again.by_addr[addr].real_addr)
+            self.assertEqual(again.proxy_flows, {})
+            self.assertEqual(again.proxy_flow_owners, {})
+
+    def test_fresh_header_same_public_address_accepts_new_identity(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        self.send(proxy.header(REAL_A, TUNNEL), addr)
+        self.assertEqual(self.join(addr, 2).real_addr, REAL_A)
+        self.assertEqual(welcome_public(self.net, addr), REAL_A)
+
+    def test_zero_token_is_bound_not_pending(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 0, REAL_A)
+        self.assertIsNone(self.join(addr, 2).real_addr)
+
+    def test_address_is_bound_to_xuid_as_well_as_token(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A)
+        packet = bytearray(hello(1))
+        struct.pack_into(">Q", packet, 15, 0x0009000000000002)
+        self.send(bytes(packet), addr)
+        self.assertIsNone(self.server.by_addr[addr].real_addr)
+        self.assertEqual(welcome_public(self.net, addr), ("0.0.0.0", 0))
+
+    def test_restore_respects_proxy_flow_cap(self):
+        self.join((AGENT, 40001), 1, REAL_A)
+        self.join((AGENT, 40002), 2, REAL_B)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "live_state.json")
+            self.server.state_path = path
+            self.assertTrue(self.server.save_state())
+            again = self.new_server()
+            again.connection_made(self.net)
+            again.proxy_flows_max = 1
+            again.state_path = path
+            self.assertEqual(again.load_state(), 2)
+            self.assertEqual(len(again.proxy_flows), 1)
+            self.assertEqual(set(again.proxy_flow_owners), set(again.proxy_flows))
+            self.assertEqual(sum(p.real_addr is not None for p in again.peers.values()), 1)
+
+    def test_rejected_hello_cannot_claim_fresh_header(self):
+        addr = (AGENT, 40001)
+        self.send(proxy.header(REAL_A, TUNNEL), addr)
+        bad = bytearray(hello(99))
+        struct.pack_into(">H", bad, 5, srv.VERSION + 1)
+        self.send(bytes(bad), addr)
+        self.assertIsNone(self.server.proxy_flow_owners[addr])
+        self.server.max_peers = 0
+        self.assertIsNone(self.join(addr, 98))
+        self.assertIsNone(self.server.proxy_flow_owners[addr])
+        self.server.max_peers = 1024
+        self.assertEqual(self.join(addr, 1).real_addr, REAL_A)
+
+    def test_bad_or_untrusted_header_cannot_reset_pending_or_owned_flow(self):
+        addr = (AGENT, 40001)
+        header = proxy.header(REAL_A, TUNNEL)
+        self.send(header, addr)
+        for owned in (False, True):
+            if owned:
+                self.join(addr, 1)
+            before = (dict(self.server.proxy_flows), dict(self.server.proxy_flow_owners))
+            self.send(header[:20], addr)  # trusted, but malformed
+            self.send(proxy.header(REAL_B, TUNNEL), ("203.0.113.99", 40001))
+            self.assertEqual((self.server.proxy_flows, self.server.proxy_flow_owners), before)
+        self.assertEqual(self.join(addr, 1).real_addr, REAL_A)
+
+    def test_revoked_proxy_address_is_not_advertised(self):
+        addr = (AGENT, 40001)
+        peer = self.join(addr, 1, REAL_A)
+        limits.configure_proxies("")
+        self.assertIsNone(self.server.public_of(peer))
+        self.assertEqual(self.server.forward_header(peer),
+                         struct.pack(">IIHIH", peer.id, 0, 0, 0, 0))
+        self.join(addr, 1)
+        self.assertIsNone(peer.real_addr)
+        self.assertEqual(self.server.proxy_flows, {})
+        self.assertEqual(self.server.proxy_flow_owners, {})
 
 
 class HttpTest(unittest.IsolatedAsyncioTestCase):
