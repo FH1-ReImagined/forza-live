@@ -27,6 +27,7 @@ import struct
 import time
 import urllib.parse
 
+import forza_auth as auth
 import forza_challenge as challenge
 import forza_chat as chat
 import forza_discord_status as discord_status
@@ -55,8 +56,9 @@ INVITE_LIMIT, INVITE_WINDOW = 4, 30.0
 # (#90). Invites from or to a game without it are dropped.
 FEATURE_INVITE_PICK = 0x01
 # FEATURE_FRIENDS: the game shows the server's friends list (FRIEND messages,
-# forza_friends.py, #92) instead of everyone in the room; its friends key follows the
-# features byte (u8 length + bytes).
+# forza_friends.py, #92) instead of everyone in the room; its signed auth block (or, from games
+# before signed requests, its friends key) follows the features byte (u8 length + bytes;
+# forza_auth.py, which also adds the server's time and a challenge to the WELCOME).
 FEATURE_FRIENDS = friends.FEATURE
 FRIEND = friends.KIND  # 22
 # FEATURE_CHAT: the game has text chat (CHAT messages, forza_chat.py, #92).
@@ -283,7 +285,8 @@ class ForzaLive(asyncio.DatagramProtocol):
         name = limits.clean_gamertag(body[pos + 1:pos + 1 + name_len].decode("utf-8", "replace"), xuid)
         pos += 1 + name_len
         features = body[pos] if pos < len(body) else 0
-        friend_key = b""  # after the features byte: u8 length + the friends key
+        signed = body[:pos + 1]  # what a HELLO's signature covers (forza_auth.py)
+        friend_key = b""  # after the features byte: u8 length + an auth block or the friends key
         if pos + 1 < len(body):
             friend_key = body[pos + 2:pos + 2 + body[pos + 1]]
         if version != VERSION:
@@ -340,7 +343,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         peer.name, peer.xuid, peer.room, peer.local = name, xuid, room, (local_ip, local_port)
         peer.features = features
         was_ok = peer.friends_ok
-        self.friends.hello(peer, friend_key)
+        self.friends.hello(peer, friend_key, signed)
         peer.events_identity = (peer.xuid, self.events.credential(peer)) if peer.friends_ok else None
         if peer.friends_ok != was_ok:
             self.state_dirty = True
@@ -354,6 +357,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         welcome = body + self.motd + struct.pack(">H", http_port)
         if peer.features & events.FEATURE:
             welcome += bytes([self.events.required])
+        welcome += auth.welcome(self.friends.store, peer)  # last: signed requests (forza_auth.py)
         self.send(addr, WELCOME, welcome)
         self.events.hello(peer)
 
@@ -1097,7 +1101,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                 "via_proxy": sum(1 for p in self.peers.values() if p.proxied),
                 "relayed_packets": self.relayed_packets,
                 "dropped_packets": self.dropped_packets, "rooms": rooms, "worlds": worlds,
-                **self.challenges.status(), **self.friends.status(),
+                **self.challenges.status(), **self.friends.status(), **auth.status(),
                 "chat": {"with_chat": len(self.chat.chatters()), "kept": len(self.chat.ring)}}
 
 
@@ -1140,7 +1144,8 @@ def response(status, body, content_type="application/octet-stream", extra=()):
     reason = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
               500: "Internal Server Error"}
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
-            f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *", *extra]
+            f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *",
+            f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (forza_auth.py)
     return ("\r\n".join(head) + "\r\n\r\n").encode() + body
 
 

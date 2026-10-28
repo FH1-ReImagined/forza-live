@@ -28,6 +28,12 @@ def hello(token, name, room="r"):
     return srv.MAGIC + bytes([srv.HELLO]) + body
 
 
+def welcome_http_port(d):
+    """The WELCOME's title server port: after the MOTD (the auth part follows it)."""
+    at = 5 + 14 + struct.unpack_from(">H", d, 5 + 12)[0]
+    return struct.unpack_from(">H", d, at)[0]
+
+
 class ProxyTest(unittest.TestCase):
     def setUp(self):
         limits.configure_proxies(PROXY + ", 127.0.0.1")
@@ -55,11 +61,11 @@ class ProxyTest(unittest.TestCase):
             self.net.sent.clear()
             self.server.datagram_received(hello(addr[1], "P"), addr)
             welcome = [d for a, d in self.net.sent if a == addr and d[4] == srv.WELCOME][0]
-            self.assertEqual(struct.unpack(">H", welcome[-2:])[0], want)
+            self.assertEqual(welcome_http_port(welcome), want)
         self.server.proxy_http_port = 0  # unset: everyone gets --http-port
         self.net.sent.clear()
         self.server.datagram_received(hello(7, "Q"), (PROXY, 40002))
-        self.assertEqual(struct.unpack(">H", self.net.sent[-1][1][-2:])[0], 21201)
+        self.assertEqual(welcome_http_port(self.net.sent[-1][1]), 21201)
 
     def test_many_players_from_one_proxy_address(self):
         peers = [self.join((PROXY, 40000 + i), i + 1) for i in range(40)]

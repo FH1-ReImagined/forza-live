@@ -21,8 +21,8 @@ applies it to the save after the session (launcher/forza_launcher/coop_grant.py)
 The launcher asks for its player's pending results and confirms the ones it settled:
 
     GET  /coop/results           {"results": [{"id", "event", "code", "place", "places",
-                                 "at", "until", "host", "winnings"}]} for the player of X-Xuid /
-                                 X-Friends-Key (the same proof as the shader list upload);
+                                 "at", "until", "host", "winnings"}]} for the player that signed
+                                 the request (the same proof as the shader list upload);
                                  until: when the server drops it unapplied, host: the
                                  world's host who started it, winnings: the player's
                                  onlineWinnings before that race paid and at its next race
@@ -349,14 +349,14 @@ def configure(data_dir):
 
 def handle(server, method, path, headers, body, authenticate):
     """(status, content type, body) for /coop/...; None for another path. authenticate(store,
-    headers) -> XUID or None (forza_shader_lists.authenticate)."""
+    headers, method, path, body) -> XUID or None (forza_shader_lists.authenticate)."""
     url = urllib.parse.urlsplit(path)
     if url.path not in ("/coop/results", "/coop/results/applied"):
         return None
 
     def reply(status, obj):
         return status, "application/json", json.dumps(obj).encode()
-    xuid = authenticate(server.friends.store, headers)
+    xuid = authenticate(server.friends.store, headers, method, path, body)
     if xuid is None:
         return reply(403, {"error": "unknown player"})
     if url.path == "/coop/results" and method == "GET":

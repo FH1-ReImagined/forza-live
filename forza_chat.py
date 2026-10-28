@@ -40,6 +40,7 @@ import struct
 import unicodedata
 import time
 
+import forza_auth as auth
 import forza_friends as friends
 import forza_limits as limits
 import forza_durable as durable
@@ -283,7 +284,8 @@ class Chat:
         if not text:
             return
         if not getattr(peer, "friends_ok", False):
-            self.notice(peer, "Chat is off: this XUID belongs to another installation")
+            self.notice(peer, auth.refusal(peer, "Chat is off")
+                        or "Chat is off: this XUID belongs to another installation")
             return
         until = self.admin_muted(peer.xuid)
         if until:

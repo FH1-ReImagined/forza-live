@@ -41,6 +41,7 @@ import os
 import time
 import urllib.parse
 
+import forza_auth as auth
 import forza_campaign as campaign
 import forza_clubs as clubs
 import forza_coop_ledger as coop_ledger
@@ -149,6 +150,7 @@ def hopper_get_search_settings(xuid, body):
 
 
 def add_arguments(parser):
+    auth.add_arguments(parser)
     parser.add_argument("--data-dir", default=os.environ.get("FORZA_LIVE_DATA", "forza_live_data"),
                         help="player records and operator-provided title storage files "
                              "(default ./forza_live_data)")
@@ -183,6 +185,7 @@ def configure(args):
     global DATA_DIR, DUMP, WORLD_ROUND_MINUTES
     DATA_DIR = args.data_dir
     DUMP = args.dump_requests
+    auth.configure(args)
     WORLD_ROUND_MINUTES = max(0.0, args.world_round_minutes)
     scores.TIME_TRIALS_ENABLED = args.time_trials
     scores.ENFORCE_TRAP_LIMITS = args.trap_limits and not args.no_trap_limits
@@ -582,20 +585,23 @@ SERVICES = {
 
 
 # --- Who is calling ---------------------------------------------------------------------------
-# The game names the player of a call in X-UserId, which anyone can write. Our game adds its
-# Live identity's friends key (X-Friends-Key, 32 hex digits: forza-recomp
-# src/kernel/lsp_request_header.h), the secret the XUID was bound to at its first HELLO
-# (forza_friends.Store.claim; the launcher's shader list upload proves itself the same way).
-# Addresses can't stand in for it: behind a tunnel (docs/hosting.md, playit.gg) every HTTP
-# connection and every UDP datagram come from the tunnel agent's address, and the TCP source
-# ports have nothing to do with the players' UDP ports.
-#   TRUSTED     the key matches the XUID's
-#   UNVERIFIED  an XUID with no key on record (it never signed in with a game that sends one):
+# The game names the player of a call in X-UserId, which anyone can write. Our game signs each
+# call with its Live identity's Ed25519 key (X-Forza-Auth, forza_auth.py; forza-recomp
+# src/kernel/live_auth.cpp), whose public key the XUID was bound to at a HELLO
+# (forza_friends.Store; the launcher's shader list upload proves itself the same way). Games
+# before signed requests sent their friends key itself (X-Friends-Key, 32 hex digits), taken
+# for an XUID still bound to it until --raw-key-cutoff. Addresses can't stand in for either:
+# behind a tunnel (docs/hosting.md, playit.gg) every HTTP connection and every UDP datagram come
+# from the tunnel agent's address, and the TCP source ports have nothing to do with the
+# players' UDP ports.
+#   TRUSTED     signed by the XUID's key (or its friends key, for an XUID still bound to it)
+#   UNVERIFIED  an XUID with no key on record (it never signed in with a game that has one):
 #               accepted for now, logged, and never taken as the player's word where it
 #               matters (caller_trusted())
-#   FORGED      a key that is not the XUID's, or no key for an XUID that has one on record
-#               (its game always sends it, so a call without it is someone else's): calls that
-#               change anything are refused, reads are answered
+#   FORGED      a signature or friends key that is not the XUID's, a friends key the XUID may no
+#               longer use, or neither for an XUID that has a key on record (its game always
+#               signs, so a call without it is someone else's): calls that change anything are
+#               refused, reads are answered
 TRUSTED, UNVERIFIED, FORGED = "trusted", "unverified", "forged"
 _caller = contextvars.ContextVar("lsp_caller", default=UNVERIFIED)
 READ_PREFIXES = ("Get", "Search", "Download")
@@ -606,32 +612,34 @@ _unverified_logged = {}  # xuid -> when its last unverified call was logged
 
 
 def caller_trusted():
-    """The title service call being handled carries its player's own friends key."""
+    """The title service call being handled is signed by its player's own friends key."""
     return _caller.get() == TRUSTED
 
 
-def verify_caller(server, xuid, headers):
-    """TRUSTED, UNVERIFIED or FORGED for a call's X-UserId and X-Friends-Key."""
-    given = headers.get("x-friends-key")
-    record = server.friends.store.get(xuid) if server is not None and xuid else None
-    if not record or not record.get("key"):
+def verify_caller(server, xuid, headers, method="POST", path="", body=b""):
+    """TRUSTED, UNVERIFIED or FORGED for a call's X-UserId and its X-Forza-Auth signature
+    (or the X-Friends-Key of a game before signed requests)."""
+    store = server.friends.store if server is not None else None
+    if not auth.bound(store, xuid):
         return UNVERIFIED
+    checked = auth.check_request(store, method, path, headers, body)
+    if checked is not None:
+        return TRUSTED if checked.ok and checked.xuid == xuid else FORGED
+    given = headers.get("x-friends-key")
     if given is None:
         return FORGED
     try:
         key = bytes.fromhex(given.strip())
     except ValueError:
         return FORGED
-    if len(key) != friends.KEY_SIZE:
-        return FORGED
-    return TRUSTED if hmac.compare_digest(record["key"], friends.key_hash(key)) else FORGED
+    return TRUSTED if auth.raw_key_ok(store, xuid, key, "http") else FORGED
 
 
 def changes_state(short, method):
     return not method.startswith(READ_PREFIXES) or (short, method) in STATE_CHANGING
 
 
-def service_call(headers, body, server=None):
+def service_call(headers, body, server=None, http_method="POST", path="/Services.Horizon/o.xtsw"):
     """bin/xtsw call -> reply body."""
     cls = headers.get("x-classname", "").split(",")[0]          # Forza.WebServices.Hopper
     short = cls.rsplit(".", 1)[-1]
@@ -647,11 +655,11 @@ def service_call(headers, body, server=None):
     fn = SERVICES.get((short, method))
     if (short, method) == ("Hopper", "GetGameOptions"):  # needs the server's world sessions
         fn = lambda xuid, body: hopper_get_game_options(server, xuid, body)  # noqa: E731
-    state = verify_caller(server, xuid, headers)
+    state = verify_caller(server, xuid, headers, http_method, path, body)
     if state == FORGED and changes_state(short, method):
         log.warning("title: %s.%s for %016X %s: refused", cls, method, xuid,
-                    "without its friends key" if "x-friends-key" not in headers
-                    else "with another player's friends key")
+                    "not signed by its own key" if auth.HEADER in headers or "x-friends-key"
+                    in headers else "unsigned")
         return x.failure(5, "not this player's call")
     if state == UNVERIFIED and xuid:
         now = time.monotonic()
@@ -659,8 +667,8 @@ def service_call(headers, body, server=None):
             _unverified_logged[xuid] = now
             if len(_unverified_logged) > 20000:
                 _unverified_logged.clear()
-            log.info("title: calls for %016X carry no friends key it is bound to (an older game, "
-                     "or someone else): accepted as unverified", xuid)
+            log.info("title: calls for %016X carry no signature or friends key it is bound to "
+                     "(an older game, or someone else): accepted as unverified", xuid)
     if fn is None:
         log.info("title: %s.%s from %016X (%d bytes): empty answer", cls, method, xuid,
                  len(body))
@@ -758,7 +766,7 @@ def handle(server, method, path, headers, body, peer):
     if method == "POST" and url.path.endswith("/o.xtsw"):
         log.info("LSP %s.%s (%d bytes)", headers.get("x-classname", "?").split(",")[0],
                  headers.get("x-method", "?"), len(body))
-        return 200, "bin/xtsw", service_call(headers, body, server)
+        return 200, "bin/xtsw", service_call(headers, body, server, method, path)
     log.info("LSP request %s %s (%d bytes)", method, path, len(body))
     if url.path.startswith("/shader-lists"):  # players' shader lists (forza_shader_lists.py)
         answer = shader_lists.handle(server, method, path, headers, body)

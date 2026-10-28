@@ -6,11 +6,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import forza_auth as auth
 import forza_events as ev
 import forza_live_lsp as lsp
 import forza_live_server as srv
 import forza_market as market
 import forza_notifications as notices
+
+AUTH_PART = len(auth.welcome(None, type("P", (), {"xuid": 0, "addr": None})()))
 
 
 class Transport:
@@ -95,7 +98,8 @@ class EventsTest(unittest.TestCase):
         self.assertIsNotNone(peer)
         welcome = next(d[5:] for _, d in self.server.transport.sent if d[4] == srv.WELCOME)
         motd_length = struct.unpack_from(">H", welcome, 12)[0]
-        self.assertEqual(len(welcome), 14 + motd_length + 2)
+        # the signed requests part ends every WELCOME (forza_auth.py)
+        self.assertEqual(len(welcome), 14 + motd_length + 2 + AUTH_PART)
         self.assertFalse(any(d[4] == ev.KIND for _, d in self.server.transport.sent))
         self.server.transport.sent.clear()
         self.poll(peer)
@@ -110,7 +114,8 @@ class EventsTest(unittest.TestCase):
         self.assertIsNotNone(peer)
         welcome = next(d[5:] for _, d in self.server.transport.sent if d[4] == srv.WELCOME)
         motd_length = struct.unpack_from(">H", welcome, 12)[0]
-        self.assertEqual(len(welcome), 14 + motd_length + 2)
+        # the signed requests part ends every WELCOME (forza_auth.py)
+        self.assertEqual(len(welcome), 14 + motd_length + 2 + AUTH_PART)
         self.assertFalse(any(d[4] == ev.KIND for _, d in self.server.transport.sent))
         self.server.transport.sent.clear()
         self.poll(peer)
@@ -128,7 +133,7 @@ class EventsTest(unittest.TestCase):
         self.assertEqual(peer.features, 0x3F)
         welcome = next(d[5:] for _, d in self.server.transport.sent if d[4] == srv.WELCOME)
         motd_length = struct.unpack_from(">H", welcome, 12)[0]
-        self.assertEqual(welcome[14 + motd_length + 2:], b"\x01")
+        self.assertEqual(welcome[14 + motd_length + 2:-AUTH_PART], b"\x01")
         self.assertTrue(any(d[4] == ev.KIND for _, d in self.server.transport.sent))
 
     def test_award_requires_attendance_and_explicit_ownership(self):

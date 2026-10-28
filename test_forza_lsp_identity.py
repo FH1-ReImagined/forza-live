@@ -89,7 +89,7 @@ class IdentityTest(unittest.TestCase):
         with self.assertLogs("forza-live", "WARNING") as logs:
             self.assertEqual(self.status(self.race_stats(2)), (2, 5))
         self.assertIsNone(self.last_race())
-        self.assertTrue(any("without its friends key" in m for m in logs.output))
+        self.assertTrue(any("unsigned" in m for m in logs.output))
         # reads are still answered
         reply = self.call("Hopper", "GetList", x.HopperGetList_Params,
                           {"maxCategoryResults": 2, "maxHopperResults": 32})

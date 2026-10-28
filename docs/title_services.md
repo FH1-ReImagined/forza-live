@@ -47,19 +47,25 @@ X-TransactionId: <GUID as hex>                          (transactional calls onl
 ```
 
 **Who is calling.** `X-UserId` is the only thing in the game's request that names the player,
-and anyone can send it. Our game adds `X-Friends-Key: <32 hex digits>` to every request on its
-title server connections (`src/kernel/live_tcp.cpp`, `lsp_request_header.h`: the head of each
-request is held until it is complete and the line goes in before its blank line), the friends
-key of its Live identity (`live_identity.txt`), which the server bound to the XUID at the
-game's first HELLO (`forza_friends.py`; the launcher's shader list upload proves itself the
-same way). The server (`forza_live_lsp.verify_caller`) refuses a call that changes anything
-(every method but `Get*`/`Search*`/`Download*`, and `Hopper.GetGameOptions`, which moves a
-world's event along) when the key is not the XUID's, and takes a call without a key, from a
-game before the key or for an XUID that never signed in with one, as unverified: accepted
-and logged (once per XUID every 10 minutes), its race stats marked `verified: false`, and
-never the player's word where it matters (`caller_trusted()`). Addresses can't do this job:
-behind a tunnel ([`hosting.md`](hosting.md)) every HTTP connection and UDP datagram arrive from the
-tunnel agent's address, and a connection's TCP port says nothing about the player's UDP one.
+and anyone can send it. Our game signs every request on its title server connections with its
+Live identity's Ed25519 key (`signing_seed` in `live_identity.txt`), whose public key the server
+bound to the XUID at a HELLO (`forza_friends.py`; the launcher's shader list upload proves
+itself the same way): `X-Forza-Auth: FORZA-ED25519-V1 Server=<name>, Xuid=<16 hex>,
+Time=<unix>, Nonce=<32 hex>, Signature=<128 hex>`, a signature of the method, the target, the
+server's name, the XUID, the time, the nonce, `X-ClassName`, `X-Method` and the SHA-256 of the
+body (`forza_auth.py` has the scheme; `src/kernel/live_signing.h`, `lsp_request_header.h`: each
+request is held until its body is complete and the line goes in before its blank line). Games
+before signed requests sent their friends key itself (`X-Friends-Key: <32 hex digits>`), taken
+for an XUID still bound to it until `--raw-key-cutoff`
+([`hosting.md`](hosting.md#signed-requests-515)). The server (`forza_live_lsp.verify_caller`)
+refuses a call that changes anything (every method but `Get*`/`Search*`/`Download*`, and
+`Hopper.GetGameOptions`, which moves a world's event along) when the signature (or friends key)
+is not the XUID's or is missing for an XUID with a key on record, and takes a call for an XUID
+that never signed in with a key as unverified: accepted and logged (once per XUID every 10
+minutes), its race stats marked `verified: false`, and never the player's word where it matters
+(`caller_trusted()`). Addresses can't do this job: behind a tunnel ([`hosting.md`](hosting.md))
+every HTTP connection and UDP datagram arrive from the tunnel agent's address, and a
+connection's TCP port says nothing about the player's UDP one.
 
 The call itself is `sub_82AABAC0(client, class, method, params, results member list,
 &results, ...)`; each service method has a small stub that passes its class and method
