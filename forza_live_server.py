@@ -391,7 +391,18 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.proxy_stats["udp_headers"] += 1
         self.tell_once("udp", "proxy protocol: the tunnel agent sends PROXY v2 headers on UDP; "
                        "its new flows' players get their public address")
-        self.set_flow_public(addr, flow, proxy.client_address(source, ipv4=True))
+        public = proxy.client_address(source, ipv4=True)
+        if flow.mode == FLOW_PREFIXED:
+            # A restored legacy socket may now carry a newer agent's raw client bytes.
+            # Repeated legacy headers may confirm the first address, never replace it.
+            if public != flow.public:
+                self.refuse_header("changed udp", "dropped an address changed within a legacy "
+                                   "flow; its traffic is relayed until a fresh flow")
+                public = None
+            if not rest:  # a valid standalone header: the newer agent's header-once format
+                flow.mode = FLOW_HEADER
+                self.state_dirty = True
+        self.set_flow_public(addr, flow, public)
         return rest
 
     def set_flow_public(self, addr, flow, public):

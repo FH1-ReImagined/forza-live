@@ -85,7 +85,11 @@ sends them, as the PROXY protocol requires (a player can send the same bytes its
   minutes (a flow then may be older than the server). Never in the middle of a flow. The
   address belongs to the first game whose HELLO on that flow is accepted (its token and
   XUID); another game on the same socket without a new header gets none and uses the relay,
-  and so does any player once its agent is no longer a `--trusted-proxy`. A player with an
+  and so does any player once its agent is no longer a `--trusted-proxy`. Repeated legacy
+  inline headers only confirm the flow's first address; a changed address clears it and
+  leaves traffic relayed until a fresh flow. A valid standalone header on a legacy flow
+  switches it to the newer header-once format, including across server restarts, so client
+  bytes after an agent upgrade cannot be interpreted as more agent headers. A player with an
   address gets it in its welcome and the others get it to punch to, as for a player
   connecting directly; the relay stays the fallback (symmetric NATs). Only global addresses
   count. A flow without a header (older than the setting or than the server) is relayed as

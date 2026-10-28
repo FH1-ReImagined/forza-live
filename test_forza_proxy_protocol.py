@@ -500,6 +500,43 @@ class UdpTest(ProxyServerTest):
         self.assertEqual(welcome_public(self.net, addr), ("0.0.0.0", 0))
         self.assertEqual(self.flows_view()[addr], (srv.FLOW_HEADER, None, None))
 
+    def test_legacy_flow_never_adopts_a_changed_public_address_mid_flow(self):
+        addr = (AGENT, 40001)
+        peer = self.join(addr, 1, REAL_A, prefixed=True)
+        # A reused legacy socket may now carry a newer agent that passes client bytes raw.
+        self.send(proxy.header(FORGED, TUNNEL) + hello(1), addr)
+        self.assertIsNone(peer.real_addr)
+        self.assertEqual(welcome_public(self.net, addr), ("0.0.0.0", 0))
+        self.assertNotIn(FORGED[0], json.dumps(self.server.snapshot()))
+        # Once invalidated, repeated prefixes cannot acquire another address until a new flow.
+        self.send(proxy.header(REAL_A, TUNNEL) + hello(1), addr)
+        self.assertIsNone(peer.real_addr)
+        direct = ("203.0.113.50", 5555)
+        other = self.join(direct, 2)
+        self.send(proxy.header(REAL_A, TUNNEL) + relay(other.id, b"kept payload"), addr)
+        self.assertEqual(forwards(self.net, direct)[-1][1:], ("0.0.0.0", 0, "0.0.0.0", 0))
+        self.assertTrue(self.net.sent[-1][1].endswith(b"kept payload"))
+        aged(self.server, addr, srv.PROXY_FLOW_IDLE + 1)
+        self.send(proxy.header(REAL_B, TUNNEL) + hello(1), addr)
+        self.assertEqual(peer.real_addr, REAL_B)
+
+    def test_standalone_header_downgrades_legacy_flow_to_header_once(self):
+        addr = (AGENT, 40001)
+        peer = self.join(addr, 1, REAL_A, prefixed=True)
+        self.server.state_dirty = False
+        self.send(proxy.header(REAL_A, TUNNEL), addr)  # genuine newer agent header
+        self.assertEqual(self.server.proxy_flows[addr].mode, srv.FLOW_HEADER)
+        self.assertTrue(self.server.state_dirty)
+        self.send(proxy.header(FORGED, TUNNEL) + hello(1), addr)
+        self.assertEqual(peer.real_addr, REAL_A)
+
+    def test_malformed_legacy_header_does_not_select_a_new_mode(self):
+        addr = (AGENT, 40001)
+        peer = self.join(addr, 1, REAL_A, prefixed=True)
+        self.send(proxy.header(REAL_A, TUNNEL)[:20], addr)
+        self.assertEqual(self.server.proxy_flows[addr].mode, srv.FLOW_PREFIXED)
+        self.assertIsNone(peer.real_addr)
+
     def test_dropped_flow_does_not_give_another_identity_its_address(self):
         addr = (AGENT, 40001)
         old = self.join(addr, 1, REAL_A)
@@ -629,6 +666,36 @@ class RestartTest(ProxyServerTest):
         self.assertEqual(welcome_public(net, s), ("0.0.0.0", 0))
         self.send(hello(1, "P1"), (AGENT, 40002), again)  # the first comes back elsewhere
         self.assertIsNone(again.by_addr[(AGENT, 40002)].real_addr)
+
+    def test_restored_legacy_flow_accepts_newer_agent_format_without_injection(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A, prefixed=True)
+        self.assertTrue(self.server.save_state())
+        again, net = self.restarted()
+        # Upgrade <=0.15.26 -> >=0.16.5, with source socket reuse during the restart.
+        self.send(proxy.header(REAL_A, TUNNEL), addr, again)
+        self.send(hello(1), addr, again)
+        self.assertEqual(again.by_addr[addr].real_addr, REAL_A)
+        self.send(proxy.header(FORGED, TUNNEL) + hello(1), addr, again)
+        self.assertEqual(again.by_addr[addr].real_addr, REAL_A)
+        self.assertEqual(again.proxy_flows[addr].mode, srv.FLOW_HEADER)
+        self.assertEqual(welcome_public(net, addr), REAL_A)
+        self.assertTrue(again.save_state())
+        third, _ = self.restarted()
+        self.assertEqual(third.proxy_flows[addr].mode, srv.FLOW_HEADER)
+        self.send(proxy.header(FORGED, TUNNEL) + hello(1), addr, third)
+        self.assertEqual(third.by_addr[addr].real_addr, REAL_A)
+
+    def test_restored_legacy_flow_with_missed_new_header_cannot_learn_client_header(self):
+        addr = (AGENT, 40001)
+        self.join(addr, 1, REAL_A, prefixed=True)
+        self.assertTrue(self.server.save_state())
+        again, net = self.restarted()
+        # The newer agent's genuine standalone header went to the stopped server.
+        self.send(proxy.header(FORGED, TUNNEL) + hello(1), addr, again)
+        self.assertIsNone(again.by_addr[addr].real_addr)
+        self.assertEqual(welcome_public(net, addr), ("0.0.0.0", 0))
+        self.assertNotIn(FORGED[0], json.dumps(again.snapshot()))
 
     def test_a_restored_flow_owned_by_another_game(self):
         s = (AGENT, 40001)
