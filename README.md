@@ -16,6 +16,12 @@ The public server is `forza-reimagined.playit.plus:56677`, the launcher's defaul
 launcher's **This PC** mode runs this server on the player's own machine; it comes with every
 release of the game's launcher (the game's repository has this one as its `server/` submodule).
 
+In World chat, the world's host can type `/event random` to start a random race in
+Horizon World or Co-op Festival. The server picks once for the whole session from
+that mode's eligible events. Horizon World needs the game database configured;
+Co-op Festival keeps its usual event restrictions and rewards. Other players cannot
+change the host's selection.
+
 ## Run it
 
     python3 forza_live_server.py --http-port 21201

@@ -191,6 +191,7 @@ class Worlds:
         self.dropped = []     # campaign requests the last tick dropped
         self.empty = []       # (sid, campaign event) of campaign rounds that ended at once
         self.rounds = {}      # session id -> (campaign event, when it started, members)
+        self.racing = set()   # event round started; its next free-roam round has not started
 
     def request(self, sid, event_id=None, campaign=None, by="", by_xuid=0):
         if campaign is not None:
@@ -229,6 +230,7 @@ class Worlds:
             return event_xml(st["event"], humans)
         if st and st["state"] == "next":
             # the event round started (its prefetch): the world comes back after it
+            self.racing.add(sid)
             log.info("world %s: event %d started; the world is next", sid.hex(),
                      st["event"][0])
             if st.get("campaign") is not None:
@@ -238,7 +240,8 @@ class Worlds:
                 ledger.LEDGER.start_round(sid, st["campaign"], st.get("by_xuid", 0),
                                           st.get("by", ""), members)
             del self.state[sid]
-        elif trusted:  # the world's round after a campaign round
+        elif trusted:  # the free-roam round after an event
+            self.racing.discard(sid)
             for r in ledger.LEDGER.close_round(sid):
                 if not r["results"] and time.time() - r["started"] < EMPTY_ROUND:
                     campaign = self.rounds.get(sid, (None,))[0]
@@ -288,6 +291,7 @@ class Worlds:
         Co-op Festival's worlds only get the events their host asks for). Returns
         [(sid, event)] still waiting for their host."""
         now = time.monotonic()
+        self.racing.intersection_update(sids)
         self.dropped = []  # (sid, state) of the campaign requests dropped now (their host is told)
         for sid in list(self.state):
             st = self.state[sid]
