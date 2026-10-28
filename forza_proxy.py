@@ -16,8 +16,11 @@ each flow is in the binary header of HAProxy's PROXY protocol (proxy-protocol.tx
 Agents 0.16.0 to 0.16.4 swapped the two addresses of the UDP header (the tunnel's address
 where the player's belongs; fixed in 0.16.5): use a current agent.
 
-Only a trusted proxy's header is believed. From anywhere else, bytes that start with the
-signature are neither a game datagram nor an HTTP request and are dropped, as before.
+The agent passes the player's own bytes on unchanged, so a header can be the player's: the
+server never guesses (the spec's section 2). Headers are read only when the operator says
+the tunnel sends them (--proxy-protocol-udp, --proxy-protocol-tcp), only from a trusted
+proxy, and only where the agent puts its own: first on a TCP connection (which then must
+start with one), and on UDP first in a new flow (forza_live_server.py, ProxyFlow).
 Standard library only.
 """
 
@@ -91,8 +94,9 @@ def parse(data, transport):
 
 
 def client_address(source, ipv4=False):
-    """source when it can be a player's address on the internet; None for no address, a
-    port 0, an unspecified, loopback, link-local, multicast or reserved address, or a
+    """source when it can be a player's address on the internet (a global unicast address
+    and a port: what the tunnel's servers see); None otherwise, for no address, a private,
+    shared (CGNAT), loopback, link-local, documentation, multicast or reserved one, or a
     trusted proxy's. ipv4: IPv4 only (the game's protocol carries no IPv6 address)."""
     if not source or not source[1]:
         return None
@@ -102,8 +106,7 @@ def client_address(source, ipv4=False):
         return None
     if ipv4 and ip.version != 4:
         return None
-    if (ip.is_unspecified or ip.is_loopback or ip.is_link_local or ip.is_multicast
-            or ip.is_reserved or limits.is_trusted_proxy(str(ip))):
+    if not ip.is_global or ip.is_multicast or limits.is_trusted_proxy(str(ip)):
         return None
     return (str(ip), source[1])
 

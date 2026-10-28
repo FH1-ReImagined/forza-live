@@ -1,7 +1,8 @@
 """PROXY protocol v2 from the tunnel agent (forza_proxy.py): a tunnelled player's public
-address reaches the others for hole punching, and a flow without a header (the setting off,
-or a flow that began before it was turned on or before a restart) is relayed exactly as
-before, so the server can be deployed before the tunnel's setting is turned on."""
+address reaches the others for hole punching. The server never guesses whether a header is
+there: without --proxy-protocol-udp / --proxy-protocol-tcp it is byte for byte the server it
+was, and with them it takes a header only where the agent puts its own (first on a TCP
+connection, first in a new UDP flow), never a player's own bytes mid-flow."""
 
 import asyncio
 import json
@@ -20,8 +21,9 @@ import forza_proxy as proxy
 
 AGENT = "192.168.100.105"  # the tunnel agent's address, a trusted proxy
 TUNNEL = ("192.0.2.10", 56677)  # the tunnel's public address (the header's destination)
-REAL_A = ("203.0.113.7", 40001)  # players' public addresses
-REAL_B = ("198.51.100.9", 52000)
+REAL_A = ("81.2.69.142", 40001)  # players' public addresses (global unicast)
+REAL_B = ("89.160.20.112", 52000)
+FORGED = ("8.8.4.4", 3074)  # what a player claims in a header of its own
 
 
 def playit_v4(src, dst, kind=0x12):
@@ -70,6 +72,11 @@ def forwards(net, addr):
         struct.unpack_from(">IIHIH", d, 5)) for a, d in net.sent if a == addr and d[4] == srv.FORWARD]
 
 
+def aged(server, addr, seconds):
+    """The flow of addr as if last heard `seconds` ago."""
+    server.proxy_flows[addr].seen = time.monotonic() - seconds
+
+
 class ParseTest(unittest.TestCase):
     def setUp(self):
         limits.configure_proxies(AGENT)
@@ -89,13 +96,13 @@ class ParseTest(unittest.TestCase):
                          (REAL_A, b"RLV1\x01x"))
 
     def test_ipv6(self):
-        v6 = ("2001:db8::7", 40001)
-        header = playit_v6(v6, ("2001:db8::1", 56677))
+        v6 = ("2a02:26f0::7", 40001)
+        header = playit_v6(v6, ("2a02:26f0::1", 56677))
         self.assertEqual(len(header), 52)
         self.assertEqual(proxy.parse(header, proxy.DGRAM), (v6, b""))
         self.assertEqual(proxy.client_address(v6), v6)  # HTTP: logged and limited as is
         self.assertIsNone(proxy.client_address(v6, ipv4=True))  # UDP: the game has no IPv6
-        mapped = playit_v6(("::ffff:203.0.113.7", 40001), ("::ffff:192.0.2.10", 56677))
+        mapped = playit_v6(("::ffff:81.2.69.142", 40001), ("::ffff:192.0.2.10", 56677))
         self.assertEqual(proxy.parse(mapped, proxy.DGRAM), (REAL_A, b""))
 
     def test_tlvs_are_skipped(self):
@@ -138,7 +145,7 @@ class ParseTest(unittest.TestCase):
             changed(13, 0x22),  # IPv6 with 12 bytes of addresses
             changed(15, 11),  # 11 bytes: too few for IPv4
             changed(14, 0x10),  # 4108 bytes: over MAX_LENGTH
-            b"PROXY UDP4 203.0.113.7 192.0.2.10 40001 56677\r\n",  # version 1 text
+            b"PROXY UDP4 81.2.69.142 192.0.2.10 40001 56677\r\n",  # version 1 text
             b"RLV1\x01",
         ]
         for data in bad:
@@ -147,55 +154,108 @@ class ParseTest(unittest.TestCase):
         with self.assertRaises(ValueError):  # UDP's header on TCP
             proxy.parse(bytes(good), proxy.STREAM)
 
-    def test_unusable_source_addresses(self):
-        for ip in ("0.0.0.0", "127.0.0.1", "127.9.8.7", "224.0.0.1", "169.254.3.4",
-                   "240.0.0.1", "255.255.255.255", AGENT, "::1", "::", "fe80::1", "not an ip"):
+    def test_only_global_addresses(self):
+        for ip in ("0.0.0.0", "127.0.0.1", "127.9.8.7", "10.0.0.1", "172.16.5.4", "192.168.1.1",
+                   "100.64.0.1", "100.127.255.254", "169.254.3.4", "192.0.2.7", "198.51.100.7",
+                   "203.0.113.7", "198.18.0.1", "224.0.0.1", "239.1.2.3", "240.0.0.1",
+                   "255.255.255.255", "::1", "::", "fe80::1", "fc00::1", "2001:db8::7",
+                   "ff02::1", "not an ip"):
             self.assertIsNone(proxy.client_address((ip, 1234)), ip)
-        self.assertIsNone(proxy.client_address(("203.0.113.7", 0)))
+        self.assertIsNone(proxy.client_address((REAL_A[0], 0)))
         self.assertIsNone(proxy.client_address(None))
+        limits.configure_proxies("81.2.69.0/24")
+        self.assertIsNone(proxy.client_address(REAL_A))  # a trusted proxy's own address
+        limits.configure_proxies(AGENT)
         self.assertEqual(proxy.client_address(REAL_A, ipv4=True), REAL_A)
-        self.assertEqual(proxy.client_address(("10.1.2.3", 5)), ("10.1.2.3", 5))
+        self.assertEqual(proxy.client_address(("100.128.0.7", 5)), ("100.128.0.7", 5))
 
 
-class UdpTest(unittest.TestCase):
+class ProxyServerTest(unittest.TestCase):
+    """The UDP side; servers made with new_server(udp=...) are closed after each test."""
+
     def setUp(self):
         limits.configure_proxies(AGENT + ", 127.0.0.0/8")
-        self.server = self.new_server()
-        self.net = FakeTransport()
-        self.server.connection_made(self.net)
+        self.servers = []
+        self.server, self.net = self.new_server()
 
     def tearDown(self):
         limits.configure_proxies("")
         for server in self.servers:
             server.events.db.close()
 
-    def new_server(self):
-        if not hasattr(self, "servers"):
-            self.servers = []
-        self.servers.append(srv.ForzaLive("hi", 1024))
-        return self.servers[-1]
+    def new_server(self, udp=True, started=True):
+        """A server with --proxy-protocol-udp (udp), past its first PROXY_FLOW_IDLE s unless
+        not started."""
+        server, net = srv.ForzaLive("hi", 1024), FakeTransport()
+        server.connection_made(net)
+        server.proxy_udp = udp
+        if started:
+            server.proxy_unsure_until = 0
+        self.servers.append(server)
+        return server, net
 
-    def send(self, data, addr):
-        self.server.datagram_received(data, addr)
+    def send(self, data, addr, server=None):
+        (server or self.server).datagram_received(data, addr)
 
-    def join(self, addr, token, real=None, prefixed=False):
+    def join(self, addr, token, real=None, prefixed=False, server=None):
         """A player through the agent's socket addr; real: the address its header gives
         (agents from 0.16: a datagram of its own; prefixed: in front of every datagram)."""
+        server = server or self.server
         header = proxy.header(real, TUNNEL) if real else b""
         if real and not prefixed:
-            self.send(header, addr)
+            self.send(header, addr, server)
             header = b""
-        self.send(header + hello(token, f"P{token}"), addr)
-        return self.server.by_addr.get(addr)
+        self.send(header + hello(token, f"P{token}"), addr, server)
+        return server.by_addr.get(addr)
 
+
+class OffTest(ProxyServerTest):
+    """Without --proxy-protocol-udp: as before, whatever a datagram carries."""
+
+    def test_headers_are_dropped_as_before(self):
+        self.server.proxy_udp = False
+        a, b = (AGENT, 40001), ("203.0.113.50", 5555)
+        self.send(proxy.header(REAL_A, TUNNEL), a)
+        self.send(proxy.header(REAL_A, TUNNEL) + hello(9, "P9"), a)  # not a game datagram
+        self.assertEqual(self.net.sent, [])
+        pa, pb = self.join(a, 1), self.join(b, 2)
+        self.send(proxy.header(FORGED, TUNNEL), a)  # the review's injection: nothing
+        self.assertIsNone(pa.real_addr)
+        self.assertEqual(self.server.proxy_flows, {})
+        self.assertEqual(welcome_public(self.net, a), ("0.0.0.0", 0))
+        self.net.sent.clear()
+        self.send(relay(pb.id), a)
+        self.assertEqual(self.net.sent, [(b, srv.MAGIC + bytes([srv.FORWARD]) +
+                                          struct.pack(">IIHIH", pa.id, 0, 0, 0, 0) +
+                                          struct.pack(">HH", 1, 2) + b"hi")])
+        status = self.server.status()
+        for key in ("via_proxy_address", "proxy_protocol"):
+            self.assertNotIn(key, status)
+        self.assertNotIn("proxy_address", status["rooms"]["r"][0])
+        self.assertNotIn("proxy_flows", self.server.snapshot())
+        self.assertEqual(self.server.proxy_stats,
+                         {"udp_headers": 0, "http_headers": 0, "rejected": 0})
+
+    def test_welcome_bytes_as_before(self):
+        self.server.proxy_udp = False
+        self.server.http_port, self.server.proxy_http_port = 21201, 56678
+        pa = self.join((AGENT, 40001), 1)
+        welcome = [d for ad, d in self.net.sent if ad == pa.addr and d[4] == srv.WELCOME][0]
+        self.assertEqual(welcome, srv.MAGIC + bytes([srv.WELCOME]) +
+                         struct.pack(">IHIHH", pa.id, self.server.epoch, 0, 0, 2) + b"hi" +
+                         struct.pack(">H", 56678))
+
+
+class UdpTest(ProxyServerTest):
     def test_header_datagram_then_hello(self):
         a = (AGENT, 40001)
         self.send(proxy.header(REAL_A, TUNNEL), a)
         self.assertEqual(self.net.sent, [])  # nothing answers the header itself
-        self.assertEqual(self.server.proxy_flows[a][0], REAL_A)
+        self.assertEqual(self.server.proxy_flows[a].public, REAL_A)
         peer = self.join(a, 1)
         self.assertTrue(peer.proxied)
         self.assertEqual(peer.real_addr, REAL_A)
+        self.assertEqual(self.server.proxy_flows[a].owner, 1)
         self.assertEqual(welcome_public(self.net, a), REAL_A)
         self.assertEqual(struct.unpack(">IIHIH", self.server.forward_header(peer)),
                          (peer.id, srv.ip_to_u32(REAL_A[0]), REAL_A[1],
@@ -211,12 +271,16 @@ class UdpTest(unittest.TestCase):
         a, b = (AGENT, 40001), ("203.0.113.50", 5555)
         peer = self.join(a, 1, REAL_A, prefixed=True)
         self.assertEqual(welcome_public(self.net, a), REAL_A)
+        self.assertEqual(self.server.proxy_flows[a].mode, srv.FLOW_PREFIXED)
         other = self.join(b, 2)
         self.send(proxy.header(REAL_A, TUNNEL) + relay(other.id), a)
         self.assertEqual(forwards(self.net, b),
                          [(peer.id, REAL_A[0], REAL_A[1], "10.0.0.5", 3074)])
-        self.assertEqual(len(self.server.proxy_flows), 1)
-        self.assertEqual(self.server.proxy_stats["udp_headers"], 2)
+        # the player's own header comes after the agent's: not a game datagram, dropped
+        self.send(proxy.header(REAL_A, TUNNEL) + proxy.header(FORGED, TUNNEL) + relay(other.id), a)
+        self.assertEqual(len(forwards(self.net, b)), 1)
+        self.assertEqual(peer.real_addr, REAL_A)
+        self.assertEqual(self.server.proxy_stats["udp_headers"], 3)
 
     def test_others_punch_to_the_real_address_and_the_relay_stays(self):
         a, c = (AGENT, 40001), (AGENT, 40003)
@@ -235,58 +299,94 @@ class UdpTest(unittest.TestCase):
         self.send(srv.MAGIC + bytes([srv.BROADCAST]) + b"\0\1\0\2hey", a)
         self.assertEqual(forwards(self.net, b)[0][1:3], REAL_A)
         self.assertEqual(forwards(self.net, c)[0][1:3], REAL_A)
-        # nobody is told the agent's socket as a punch target
         self.assertNotIn(socket.inet_aton(AGENT), b"".join(d for _, d in self.net.sent))
 
-    def test_no_header_is_exactly_as_before(self):
-        """The new server before the tunnel's setting is on: byte for byte what it sent."""
-        self.server.http_port, self.server.proxy_http_port = 21201, 56678
-        a, b = (AGENT, 40001), ("203.0.113.50", 5555)
-        pa, pb = self.join(a, 1), self.join(b, 2)
-        welcome = [d for ad, d in self.net.sent if ad == a and d[4] == srv.WELCOME][0]
-        self.assertEqual(welcome, srv.MAGIC + bytes([srv.WELCOME]) +
-                         struct.pack(">IHIHH", pa.id, self.server.epoch, 0, 0, 2) + b"hi" +
-                         struct.pack(">H", 56678))
-        self.assertIsNone(pa.real_addr)
-        self.assertEqual(self.server.forward_header(pa), struct.pack(">IIHIH", pa.id, 0, 0, 0, 0))
-        self.net.sent.clear()
-        self.send(relay(pb.id), a)
-        self.assertEqual(self.net.sent, [(b, srv.MAGIC + bytes([srv.FORWARD]) +
-                                          struct.pack(">IIHIH", pa.id, 0, 0, 0, 0) +
-                                          struct.pack(">HH", 1, 2) + b"hi")])
-        status = self.server.status()
-        self.assertEqual((status["via_proxy"], status["via_proxy_address"]), (1, 0))
-        self.assertEqual(status["proxy_protocol"],
-                         {"udp_headers": 0, "http_headers": 0, "rejected": 0, "flows": 0})
+    def test_injection_mid_flow_is_ignored(self):
+        """The review's PoC (review/inject.py, poc_inject.py): a tunnelled player sends a
+        header of its own, which a 0.16+ agent passes on unchanged from its flow's socket."""
+        for genuine in (None, REAL_A):  # a flow without a header (setting off), and with one
+            with self.subTest(genuine=genuine):
+                server, net = self.new_server()
+                s, d = (AGENT, 40001), ("203.0.113.50", 5555)
+                attacker = self.join(s, 1, genuine, server=server)
+                direct = self.join(d, 2, server=server)
+                self.send(proxy.header(FORGED, TUNNEL), s, server)
+                self.send(proxy.header(FORGED, TUNNEL) + hello(1, "P1"), s, server)
+                self.send(relay(direct.id), s, server)
+                self.assertEqual(attacker.real_addr, genuine)
+                self.assertEqual(forwards(net, d)[-1][1:3], genuine or ("0.0.0.0", 0))
+                self.send(hello(1, "P1"), s, server)
+                self.assertEqual(welcome_public(net, s), genuine or ("0.0.0.0", 0))
+                self.assertEqual(server.proxy_stats["rejected"], 2)
+                self.assertNotIn(FORGED[0], json.dumps(server.snapshot()))
 
-    def test_pre_existing_flow_gets_a_header_later(self):
-        """A flow from before the setting (or a restart) stays relayed; when the agent opens
-        it again (after 60 to 90 s idle, or an agent restart) its header arrives first."""
+    def test_no_header_is_relayed_as_before(self):
         a, b = (AGENT, 40001), ("203.0.113.50", 5555)
         pa, pb = self.join(a, 1), self.join(b, 2)
-        for _ in range(3):
-            self.send(hello(1, "P1"), a)
-            self.send(relay(pb.id), a)
+        self.assertIsNone(pa.real_addr)
+        self.assertEqual(self.server.proxy_flows[a].mode, srv.FLOW_PLAIN)
         self.assertEqual(welcome_public(self.net, a), ("0.0.0.0", 0))
-        self.assertEqual(forwards(self.net, b)[-1][1:], ("0.0.0.0", 0, "0.0.0.0", 0))
-        self.server.state_dirty = False
-        self.send(proxy.header(REAL_A, TUNNEL), a)
-        self.assertIs(self.server.by_addr[a], pa)
-        self.assertEqual(pa.real_addr, REAL_A)
-        self.assertTrue(self.server.state_dirty)
+        self.assertEqual(self.server.forward_header(pa), struct.pack(">IIHIH", pa.id, 0, 0, 0, 0))
         self.send(relay(pb.id), a)
-        self.assertEqual(forwards(self.net, b)[-1][1:3], REAL_A)
-        self.send(hello(1, "P1"), a)
+        self.assertEqual(forwards(self.net, b)[-1][1:], ("0.0.0.0", 0, "0.0.0.0", 0))
+
+    def test_a_flow_from_before_gets_its_header_when_the_agent_opens_it_again(self):
+        """A flow older than the setting stays relayed; once it was silent long enough for the
+        agent to close it, the new flow's header is the first datagram again."""
+        a = (AGENT, 40001)
+        pa = self.join(a, 1)
+        self.send(proxy.header(REAL_A, TUNNEL), a)  # 0 s later: mid-flow
+        self.assertIsNone(pa.real_addr)
+        aged(self.server, a, 70)  # the agent may still have it (up to 106 s)
+        self.send(proxy.header(REAL_A, TUNNEL), a)
+        self.assertNotIn(a, [x for x, f in self.server.proxy_flows.items() if f.public])
+        aged(self.server, a, srv.PROXY_FLOW_IDLE + 1)
+        self.server.drop(pa, "timed out")
+        self.send(proxy.header(REAL_A, TUNNEL), a)  # a new flow
+        back = self.join(a, 1)
+        self.assertEqual(back.id, pa.id)
+        self.assertEqual(back.real_addr, REAL_A)
         self.assertEqual(welcome_public(self.net, a), REAL_A)
 
-    def test_players_on_both_sides_of_the_flip(self):
-        old, new = (AGENT, 40001), (AGENT, 40002)
-        p_old, p_new = self.join(old, 1), self.join(new, 2, REAL_B)
-        self.assertEqual(welcome_public(self.net, old), ("0.0.0.0", 0))
-        self.assertEqual(welcome_public(self.net, new), REAL_B)
-        self.assertEqual(self.server.status()["via_proxy_address"], 1)
-        self.assertIsNone(p_old.real_addr)
-        self.assertEqual(p_new.real_addr, REAL_B)
+    def test_headers_in_the_servers_first_minutes_are_not_taken(self):
+        """A flow seen in the server's first PROXY_FLOW_IDLE s may be older than the server (its
+        header went to the one before): its first datagram here may be the player's."""
+        server, net = self.new_server(started=False)
+        a = (AGENT, 40001)
+        self.send(proxy.header(FORGED, TUNNEL), a, server)
+        peer = self.join(a, 1, server=server)
+        self.assertIsNone(peer.real_addr)
+        self.assertEqual(server.proxy_flows[a].mode, srv.FLOW_PLAIN)
+        self.assertEqual(server.proxy_stats["rejected"], 1)
+        server.proxy_unsure_until = 0
+        b = (AGENT, 40002)
+        self.assertEqual(self.join(b, 2, REAL_B, server=server).real_addr, REAL_B)
+        self.send(proxy.header(FORGED, TUNNEL), a, server)  # still mid-flow
+        self.assertIsNone(peer.real_addr)
+
+    def test_header_datagrams_count_against_the_flows_rate(self):
+        a = (AGENT, 40001)
+        header = proxy.header(REAL_A, TUNNEL)
+        for _ in range(srv.PACKETS_PER_IP[1] + 100):
+            self.send(header, a)
+        self.assertGreater(self.server.dropped_packets, 0)
+        self.assertIn(a, self.server.packet_buckets)
+        before = self.server.dropped_packets
+        b = self.join((AGENT, 40002), 2, REAL_B)  # another flow is not affected
+        self.assertEqual(self.server.dropped_packets, before)
+        self.assertEqual(b.real_addr, REAL_B)
+
+    def test_malformed_header_from_the_agent(self):
+        a = (AGENT, 40001)
+        bad = bytearray(proxy.header(REAL_A, TUNNEL))
+        bad[12] = 0x11  # version 1
+        self.send(bytes(bad), a)
+        self.send(bytes(bad) + hello(1, "P1"), a)  # mid-flow now: dropped
+        self.assertEqual(self.net.sent, [])
+        self.assertEqual(self.server.proxy_stats["rejected"], 2)
+        self.join(a, 1)
+        self.assertEqual(welcome_public(self.net, a), ("0.0.0.0", 0))
+        self.assertEqual(self.server.proxy_flows[a].mode, srv.FLOW_PLAIN)
 
     def test_untrusted_header_is_never_believed(self):
         x = ("203.0.113.99", 7000)
@@ -294,181 +394,231 @@ class UdpTest(unittest.TestCase):
         self.send(proxy.header(REAL_A, TUNNEL) + hello(1, "P1"), x)  # dropped, as before
         self.assertEqual(self.net.sent, [])
         self.assertEqual(self.server.proxy_flows, {})
-        self.assertEqual(self.server.proxy_stats["rejected"], 2)
         peer = self.join(x, 1)
         self.assertFalse(peer.proxied)
         self.assertEqual(welcome_public(self.net, x), x)  # its own address, as for any direct player
 
-    def test_malformed_header_from_the_agent_is_ignored(self):
-        a = (AGENT, 40001)
-        bad = bytearray(proxy.header(REAL_A, TUNNEL))
-        bad[12] = 0x11  # version 1
-        self.send(bytes(bad), a)
-        self.send(bytes(bad) + hello(1, "P1"), a)  # where the datagram starts is unknown: dropped
-        self.send(proxy.header(REAL_A, TUNNEL)[:20], a)  # cut short
-        self.assertEqual(self.net.sent, [])
-        self.assertEqual(self.server.proxy_flows, {})
-        self.assertEqual(self.server.proxy_stats["rejected"], 3)
-        self.join(a, 1)
-        self.assertEqual(welcome_public(self.net, a), ("0.0.0.0", 0))
-
     def test_version_1_on_udp_is_ignored(self):
         a = (AGENT, 40001)
-        v1 = b"PROXY UDP4 203.0.113.7 192.0.2.10 40001 56677\r\n"
+        v1 = b"PROXY UDP4 81.2.69.142 192.0.2.10 40001 56677\r\n"
         self.send(v1, a)
         self.send(v1 + hello(1, "P1"), a)
-        self.assertEqual((self.net.sent, self.server.proxy_flows), ([], {}))
+        self.assertEqual(self.net.sent, [])
         self.join(a, 1)
         self.assertEqual(welcome_public(self.net, a), ("0.0.0.0", 0))
 
     def test_header_without_a_usable_address(self):
-        a = (AGENT, 40001)
-        peer = self.join(a, 1, REAL_A)
-        self.assertEqual(peer.real_addr, REAL_A)
         for header in (proxy.header(REAL_A, TUNNEL, command=proxy.LOCAL),
-                       playit_v6(("2001:db8::7", 40001), ("2001:db8::1", 56677)),
+                       playit_v6(("2a02:26f0::7", 40001), ("2a02:26f0::1", 56677)),
                        proxy.header(("127.0.0.1", 40001), TUNNEL),
-                       proxy.header((AGENT, 40001), TUNNEL),
-                       proxy.header(("0.0.0.0", 40001), TUNNEL)):
-            self.send(proxy.header(REAL_A, TUNNEL), a)
-            self.assertEqual(peer.real_addr, REAL_A)
-            self.send(header, a)  # a new flow on that socket, with no address: relayed
+                       proxy.header(("10.1.2.3", 40001), TUNNEL),
+                       proxy.header(("100.64.1.2", 40001), TUNNEL),
+                       proxy.header((AGENT, 40001), TUNNEL)):
+            server, net = self.new_server()
+            a = (AGENT, 40001)
+            self.send(header, a, server)
+            peer = self.join(a, 1, server=server)
             self.assertIsNone(peer.real_addr)
-            self.assertNotIn(a, self.server.proxy_flows)
-            self.assertEqual(self.server.forward_header(peer), struct.pack(">IIHIH", peer.id, 0, 0, 0, 0))
-        mapped = playit_v6(("::ffff:203.0.113.7", 40001), ("::ffff:192.0.2.10", 56677))
-        self.send(mapped, a)
-        self.assertEqual(peer.real_addr, REAL_A)
+            self.assertEqual(welcome_public(net, a), ("0.0.0.0", 0))
+        mapped = playit_v6(("::ffff:81.2.69.142", 40001), ("::ffff:192.0.2.10", 56677))
+        self.send(mapped, (AGENT, 40009))
+        self.assertEqual(self.join((AGENT, 40009), 9).real_addr, REAL_A)
 
-    def test_a_new_header_replaces_the_old_one(self):
-        a = (AGENT, 40001)
-        first = self.join(a, 1, REAL_A)
-        self.send(proxy.header(REAL_B, TUNNEL), a)  # the socket now carries another player
-        self.send(hello(2, "P2"), a)  # its game: another token, the old registration goes
-        second = self.server.by_addr[a]
-        self.assertIsNot(second, first)
-        self.assertEqual(second.real_addr, REAL_B)
-        self.assertEqual(welcome_public(self.net, a), REAL_B)
-        self.assertEqual(len(self.server.proxy_flows), 1)
+    def test_the_address_belongs_to_the_flows_first_game(self):
+        """review/stale_flow.py: A leaves, B's game says HELLO on the same socket with no new
+        header (setting turned off, or the header lost): B gets no address, not A's."""
+        s = (AGENT, 40001)
+        a = self.join(s, 1, REAL_A)
+        self.send(srv.MAGIC + bytes([srv.BYE]), s)
+        b = self.join(s, 2)
+        self.assertIsNone(b.real_addr)
+        self.assertEqual(welcome_public(self.net, s), ("0.0.0.0", 0))
+        self.assertEqual(struct.unpack(">IIHIH", self.server.forward_header(b)), (b.id, 0, 0, 0, 0))
+        self.assertIsNone(self.server.proxy_flows[s].public)  # dropped, for A too
+        self.send(hello(1, "P1"), s)
+        self.assertIsNone(self.server.by_addr[s].real_addr)
+        self.assertNotEqual(a.id, b.id)
 
-    def test_flows_expire(self):
-        a, b = (AGENT, 40001), (AGENT, 40002)
-        self.send(proxy.header(REAL_A, TUNNEL), a)  # a header, no player yet
-        peer = self.join(b, 2, REAL_B)
-        old = time.monotonic() - srv.PROXY_FLOW_TTL - 1
-        for addr in (a, b):
-            self.server.proxy_flows[addr] = (self.server.proxy_flows[addr][0], old)
-        self.server.expire()
-        self.assertNotIn(a, self.server.proxy_flows)
-        self.assertIn(b, self.server.proxy_flows)  # a registered player keeps its flow
-        self.send(hello(2, "P2"), b)  # each HELLO refreshes it
-        self.assertGreater(self.server.proxy_flows[b][1], old)
-        self.server.drop(peer, "timed out")
-        self.server.expire()
-        self.assertIn(b, self.server.proxy_flows)  # for a while: the agent keeps its flow 60-90 s
-        self.server.proxy_flows[b] = (REAL_B, old)
-        self.server.expire()
-        self.assertEqual(self.server.proxy_flows, {})
-
-    def test_back_after_a_silence_on_the_same_flow(self):
-        """A game silent for longer than PEER_TIMEOUT but not long enough for the agent to
-        forget its flow comes back without a new header: it keeps its address."""
+    def test_same_game_back_after_a_silence_keeps_its_address(self):
+        """Silent longer than PEER_TIMEOUT, not long enough for the agent to close the flow:
+        the same game (token) comes back on it without a new header."""
         a = (AGENT, 40001)
         peer = self.join(a, 1, REAL_A)
         self.server.drop(peer, "timed out")
+        aged(self.server, a, 50)
         back = self.join(a, 1)
         self.assertEqual(back.id, peer.id)
         self.assertEqual(back.real_addr, REAL_A)
-        self.assertEqual(welcome_public(self.net, a), REAL_A)
+
+    def test_flows_expire(self):
+        a, b = (AGENT, 40001), (AGENT, 40002)
+        self.send(proxy.header(REAL_A, TUNNEL), a)  # a header, no player
+        self.join(b, 2, REAL_B)
+        aged(self.server, a, srv.PROXY_FLOW_IDLE + 1)
+        self.send(hello(2, "P2"), b)  # each datagram keeps b's
+        self.server.expire()
+        self.assertNotIn(a, self.server.proxy_flows)
+        self.assertIn(b, self.server.proxy_flows)
 
     def test_flow_map_is_capped(self):
         self.server.proxy_flows_max = 8
-        players = [self.join((AGENT, 41000 + i), 1 + i, ("203.0.113.%d" % (10 + i), 40000))
-                   for i in range(3)]
-        for i in range(40):  # headers of flows that never register
-            self.send(proxy.header(("198.51.100.%d" % (i + 1), 40000), TUNNEL), (AGENT, 42000 + i))
-            self.assertLessEqual(len(self.server.proxy_flows), 8)
-        for p in players:
-            self.assertIn(p.addr, self.server.proxy_flows)
-        self.assertIn((AGENT, 42039), self.server.proxy_flows)  # the newest kept, the oldest gone
-        self.assertNotIn((AGENT, 42000), self.server.proxy_flows)
-        more = [self.join((AGENT, 43000 + i), 100 + i, ("203.0.113.%d" % (100 + i), 40000))
-                for i in range(5)]
-        self.assertEqual(len(self.server.proxy_flows), 8)  # all of them registered players
-        last = self.join((AGENT, 44000), 200, ("203.0.113.200", 40000))
-        self.assertIsNone(last.real_addr)  # no room: relayed, as before
-        self.assertEqual(welcome_public(self.net, last.addr), ("0.0.0.0", 0))
-        self.assertTrue(all(p.real_addr for p in players + more))
+        players = [self.join((AGENT, 41000 + i), 1 + i, ("81.2.69.%d" % (10 + i), 40000))
+                   for i in range(8)]
+        self.assertEqual(len(self.server.proxy_flows), 8)
+        late = (AGENT, 42000)
+        self.send(proxy.header(REAL_B, TUNNEL), late)  # full: no address, nothing remembered
+        self.assertEqual(len(self.server.proxy_flows), 8)
+        self.assertEqual(self.server.proxy_stats["rejected"], 1)
+        last = self.join(late, 200)
+        self.assertIsNone(last.real_addr)
+        self.send(proxy.header(REAL_B, TUNNEL), late)  # never believed while it is unknown
+        self.assertIsNone(last.real_addr)
+        self.assertTrue(all(p.real_addr for p in players))
+        for p in players[:2]:  # room again
+            aged(self.server, p.addr, srv.PROXY_FLOW_IDLE + 1)
+        self.send(proxy.header(FORGED, TUNNEL), late)  # but late is mid-flow: not taken
+        self.assertIsNone(last.real_addr)
+        self.assertEqual(self.server.proxy_flows[late].mode, srv.FLOW_PLAIN)
+        self.server.proxy_unsure_until = 0  # PROXY_FLOW_IDLE s later
+        fresh = (AGENT, 42001)
+        self.assertEqual(self.join(fresh, 300, REAL_B).real_addr, REAL_B)
+        self.assertNotIn(players[0].addr, self.server.proxy_flows)
 
     def test_limits_stay_those_of_the_agents_socket(self):
         # 20 players behind one public address (a CGNAT) through the agent: no per-address cap
         # by their real address, as before (MAX_PEERS_PER_IP is 16)
-        peers = [self.join((AGENT, 45000 + i), 1 + i, ("203.0.113.7", 40000 + i)) for i in range(20)]
+        peers = [self.join((AGENT, 45000 + i), 1 + i, (REAL_A[0], 40000 + i)) for i in range(20)]
         self.assertTrue(all(p is not None and p.real_addr for p in peers))
         self.assertEqual(self.server.limit_key(peers[0].addr), peers[0].addr)
         self.assertEqual(self.server.per_ip, {AGENT: 20})
 
-    def test_restart_keeps_the_address(self):
-        """The agent's flow goes on through a restart without a new header: the address
-        is kept with the registration (#93)."""
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, srv.STATE_FILE)
-            a, c = (AGENT, 40001), (AGENT, 40003)
-            self.server.state_path = path
-            self.join(a, 1, REAL_A)
-            self.join(c, 3)
-            self.assertTrue(self.server.save_state())
-            with open(path) as f:
-                saved = {d["addr"][1]: d["real"] for d in json.load(f)["peers"]}
-            self.assertEqual(saved, {40001: list(REAL_A), 40003: None})
-            again, net = self.new_server(), FakeTransport()
-            again.connection_made(net)
-            again.state_path = path
-            self.assertEqual(again.load_state(), 2)
-            self.assertEqual(again.by_addr[a].real_addr, REAL_A)
-            again.datagram_received(hello(1, "P1"), a)  # no header: the flow went on
-            again.datagram_received(hello(3, "P3"), c)
-            self.assertEqual(welcome_public(net, a), REAL_A)
-            self.assertEqual(welcome_public(net, c), ("0.0.0.0", 0))
-            # a state file written before this feature has no "real": relayed, as before
-            with open(path) as f:
-                state = json.load(f)
-            for d in state["peers"]:
-                del d["real"]
-            with open(path, "w") as f:
-                json.dump(state, f)
-            # the agent opened a new flow during the restart: another socket, with a header
-            # (or without one, the setting off)
-            again = self.new_server()
-            again.connection_made(net)
-            again.state_path = path
-            again.load_state()
-            moved, plain = (AGENT, 40011), (AGENT, 40013)
-            again.datagram_received(proxy.header(REAL_B, TUNNEL), moved)
-            again.datagram_received(hello(1, "P1"), moved)
-            again.datagram_received(hello(3, "P3"), plain)
-            self.assertEqual(again.by_addr[moved].real_addr, REAL_B)
-            self.assertEqual(welcome_public(net, moved), REAL_B)
-            again.datagram_received(hello(1, "P1"), a)  # its old socket no longer has it
-            self.assertNotEqual(again.by_addr[a].id, again.by_addr[moved].id)
-            self.assertIsNone(again.by_addr[plain].real_addr)
-            self.assertEqual(again.by_addr[plain].id, self.server.by_addr[c].id)  # rebound
-            old = self.new_server()
-            old.state_path = path
-            self.assertEqual(old.load_state(), 2)
-            self.assertIsNone(old.by_addr[a].real_addr)
-            self.assertEqual(old.proxy_flows, {})
+
+class RestartTest(ProxyServerTest):
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, srv.STATE_FILE)
+        self.server.state_path = self.path
+
+    def tearDown(self):
+        super().tearDown()
+        self.tmp.cleanup()
+
+    def restarted(self, udp=True):
+        server, net = self.new_server(udp=udp, started=False)  # its first minutes
+        server.state_path = self.path
+        server.load_state()
+        return server, net
+
+    def test_restart_keeps_the_address_of_the_flows_owner(self):
+        a, c = (AGENT, 40001), (AGENT, 40003)
+        self.join(a, 1, REAL_A)
+        self.join(c, 3)
+        self.assertTrue(self.server.save_state())
+        with open(self.path) as f:
+            state = json.load(f)
+        self.assertEqual(state["proxy_flows"], [[AGENT, 40001, srv.FLOW_HEADER, list(REAL_A), 1]])
+        self.assertNotIn("real", state["peers"][0])
+        again, net = self.restarted()
+        self.assertEqual(again.by_addr[a].real_addr, REAL_A)
+        self.send(hello(1, "P1"), a, again)  # no header: the flow went on
+        self.send(hello(3, "P3"), c, again)
+        self.assertEqual(welcome_public(net, a), REAL_A)
+        self.assertEqual(welcome_public(net, c), ("0.0.0.0", 0))
+        self.send(proxy.header(FORGED, TUNNEL), a, again)  # restored flows are mid-flow
+        self.assertEqual(again.by_addr[a].real_addr, REAL_A)
+
+    def test_restart_with_another_game_on_the_socket(self):
+        """review/restart_reuse.py: the agent's socket of a restored player now carries another
+        game (its header went to the stopped server): it gets no address, not the old one's."""
+        s = (AGENT, 40001)
+        self.join(s, 1, REAL_A)
+        self.server.save_state()
+        again, net = self.restarted()
+        self.send(hello(2, "P2"), s, again)
+        newcomer = again.by_addr[s]
+        self.assertEqual(newcomer.token, 2)
+        self.assertIsNone(newcomer.real_addr)
+        self.assertEqual(welcome_public(net, s), ("0.0.0.0", 0))
+        self.send(hello(1, "P1"), (AGENT, 40002), again)  # the first comes back elsewhere
+        self.assertIsNone(again.by_addr[(AGENT, 40002)].real_addr)
+
+    def test_a_restored_flow_owned_by_another_game(self):
+        s = (AGENT, 40001)
+        self.join(s, 1, REAL_A)
+        self.server.save_state()
+        with open(self.path) as f:
+            state = json.load(f)
+        state["proxy_flows"][0][4] = 99  # the flow's address belongs to another token
+        with open(self.path, "w") as f:
+            json.dump(state, f)
+        again, net = self.restarted()
+        self.assertIsNone(again.by_addr[s].real_addr)
+        self.send(hello(1, "P1"), s, again)
+        self.assertEqual(welcome_public(net, s), ("0.0.0.0", 0))
+
+    def test_flows_opened_while_the_server_was_down(self):
+        """Their header went to the stopped server: the first datagram the new one hears
+        may be the player's, so none is taken in its first minutes."""
+        self.server.save_state()
+        again, net = self.restarted()
+        s = (AGENT, 40005)
+        self.send(proxy.header(FORGED, TUNNEL), s, again)
+        self.send(hello(5, "P5"), s, again)
+        self.assertIsNone(again.by_addr[s].real_addr)
+
+    def test_a_restored_player_moved_to_a_new_flow(self):
+        s, moved = (AGENT, 40001), (AGENT, 40011)
+        first = self.join(s, 1, REAL_A)
+        self.server.save_state()
+        again, net = self.restarted()
+        again.proxy_unsure_until = 0  # later: a new flow, with its header
+        self.send(proxy.header(REAL_B, TUNNEL), moved, again)
+        self.send(hello(1, "P1"), moved, again)
+        self.assertEqual(again.by_addr[moved].id, first.id)  # rebound (#93)
+        self.assertEqual(again.by_addr[moved].real_addr, REAL_B)
+
+    def test_without_the_option_the_state_is_as_before(self):
+        a = (AGENT, 40001)
+        self.join(a, 1, REAL_A)
+        self.server.save_state()
+        old, _ = self.restarted(udp=False)
+        self.assertIsNone(old.by_addr[a].real_addr)
+        self.assertEqual(old.proxy_flows, {})
+        self.assertNotIn("proxy_flows", old.snapshot())
+        # a state file of an older server (no proxy_flows) with the option on: relayed
+        with open(self.path) as f:
+            state = json.load(f)
+        del state["proxy_flows"]
+        with open(self.path, "w") as f:
+            json.dump(state, f)
+        again, _ = self.restarted()
+        self.assertIsNone(again.by_addr[a].real_addr)
+
+    def test_a_bad_proxy_flows_entry_keeps_the_registrations(self):
+        self.join((AGENT, 40001), 1, REAL_A)
+        self.server.save_state()
+        with open(self.path) as f:
+            state = json.load(f)
+        state["proxy_flows"] = [[AGENT, 40001, "header"], "junk"]
+        with open(self.path, "w") as f:
+            json.dump(state, f)
+        with self.assertLogs("forza-live", "WARNING"):
+            again, _ = self.restarted()
+        self.assertEqual(len(again.peers), 1)
+        self.assertIsNone(again.by_addr[(AGENT, 40001)].real_addr)
 
 
 class HttpTest(unittest.IsolatedAsyncioTestCase):
     """The title servers' port through the agent (the test connects from 127.0.0.1, the
-    trusted proxy)."""
+    trusted proxy), with --proxy-protocol-tcp unless a test turns it off."""
 
     async def asyncSetUp(self):
         limits.configure_proxies("127.0.0.1")
         srv.http_conns.clear()
         self.writers = []
         self.server = srv.ForzaLive("test", 16)
+        self.server.proxy_tcp = True
         self.http = await asyncio.start_server(lambda r, w: srv.http_handler(self.server, r, w),
                                                "127.0.0.1", 0)
         self.port = self.http.sockets[0].getsockname()[1]
@@ -521,35 +671,44 @@ class HttpTest(unittest.IsolatedAsyncioTestCase):
         await reader.readexactly(length)
         return reader, writer
 
-    async def test_with_and_without_a_header(self):
-        status, body = await self.call(proxy.header(REAL_A, TUNNEL, proxy.STREAM))
+    def stream(self, source=REAL_A, **kw):
+        return proxy.header(source, TUNNEL, proxy.STREAM, **kw)
+
+    async def test_the_header_is_required(self):
+        status, body = await self.call(self.stream())
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["proxy_protocol"]["http_headers"], 1)
-        status, body = await self.call()  # the setting off: as before
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["proxy_protocol"],
-                         {"udp_headers": 0, "http_headers": 1, "rejected": 0, "flows": 0})
-        status, _ = await self.call(proxy.header(REAL_A, TUNNEL, proxy.STREAM), pieces=7)
+        self.assertEqual(await self.call(), (None, b""))  # no header from the agent: refused
+        self.assertEqual(self.server.proxy_stats["rejected"], 1)
+        status, _ = await self.call(self.stream(), pieces=7)
         self.assertEqual(status, 200)  # a header that arrives in pieces
+        status, _ = await self.call(self.stream(command=proxy.LOCAL))
+        self.assertEqual(status, 200)  # LOCAL: the agent's own, as itself
+
+    async def test_off_is_as_before(self):
+        self.server.proxy_tcp = False
+        status, body = await self.call()
+        self.assertEqual(status, 200)
+        self.assertNotIn("proxy_protocol", json.loads(body))
+        self.assertEqual(await self.call(self.stream()), (None, b""))  # not an HTTP request
+        # review/inject.py: a client's own header is never counted under its forged address
+        _, w = await self.keep_open()
+        self.assertEqual(srv.http_conns, {"127.0.0.1": 1})
+        w.close()
 
     async def test_log_names_the_player_and_admin_is_not_granted(self):
         with self.assertLogs("forza-live", "INFO") as logs:
-            status, _ = await self.call(proxy.header(REAL_A, TUNNEL, proxy.STREAM),
-                                        "/gift?to=x&credits=1")
+            status, _ = await self.call(self.stream(), "/gift?to=x&credits=1")
             self.assertEqual(status, 403)  # a tunnelled request is never "this machine"
-            status, _ = await self.call(proxy.header(("127.0.0.1", 40001), TUNNEL, proxy.STREAM),
-                                        "/gift?to=x&credits=1")
+            status, _ = await self.call(self.stream(("127.0.0.1", 40001)), "/gift?to=x&credits=1")
             self.assertEqual(status, 403)  # nor is a header that claims loopback
-            status, _ = await self.call(b"", "/gift?to=x&credits=1")
-            self.assertEqual(status, 403)
         lines = [line for line in logs.output if "http  " in line]
-        self.assertIn("http  203.0.113.7 GET /gift", lines[0])
+        self.assertIn("http  81.2.69.142 GET /gift", lines[0])
         self.assertIn("http  127.0.0.1 GET /gift", lines[1])
-        self.assertIn("http  127.0.0.1 GET /gift", lines[2])
 
     async def test_connections_count_under_the_real_address(self):
-        _, w1 = await self.keep_open(proxy.header(REAL_A, TUNNEL, proxy.STREAM))
-        _, w2 = await self.keep_open()
+        _, w1 = await self.keep_open(self.stream())
+        _, w2 = await self.keep_open(self.stream(command=proxy.LOCAL))
         self.assertEqual(srv.http_conns, {REAL_A[0]: 1, "127.0.0.1": 1})
         for w in (w1, w2):
             w.close()
@@ -562,32 +721,30 @@ class HttpTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_per_address_cap_applies_to_the_real_address(self):
         with patch.object(srv, "HTTP_PER_IP", 3):
-            header_a = proxy.header(REAL_A, TUNNEL, proxy.STREAM)
-            kept = [await self.keep_open(header_a) for _ in range(3)]
-            self.assertEqual(await self.call(header_a), (None, b""))  # a 4th from the same player
-            self.assertEqual((await self.call(proxy.header(REAL_B, TUNNEL, proxy.STREAM)))[0], 200)
-            kept += [await self.keep_open() for _ in range(4)]  # no header: the agent is exempt
-            self.assertEqual((await self.call())[0], 200)
+            kept = [await self.keep_open(self.stream()) for _ in range(3)]
+            self.assertEqual(await self.call(self.stream()), (None, b""))  # a 4th from that player
+            self.assertEqual((await self.call(self.stream(REAL_B)))[0], 200)
+            kept += [await self.keep_open(self.stream(command=proxy.LOCAL)) for _ in range(4)]
             for _, w in kept:
                 w.close()
                 await w.wait_closed()
 
     async def test_refused_headers(self):
-        good = proxy.header(REAL_A, TUNNEL, proxy.STREAM)
-        v1 = b"PROXY TCP4 203.0.113.7 192.0.2.10 40001 56678\r\n"
+        good = self.stream()
+        v1 = b"PROXY TCP4 81.2.69.142 192.0.2.10 40001 56678\r\n"
         for prefix in (good[:12] + b"\x11" + good[13:],  # version 1 in a binary header
                        good[:13] + b"\x12" + good[14:],  # a UDP header on TCP
                        good[:6] + b"\x00" + good[7:],  # signature
-                       v1):
+                       v1, b"\r\n\r\n"):
             self.assertEqual(await self.call(prefix), (None, b""))
-        self.assertEqual(self.server.proxy_stats["rejected"], 4)
-        self.assertEqual((await self.call())[0], 200)
+        self.assertEqual(self.server.proxy_stats["rejected"], 5)
+        self.assertEqual((await self.call(good))[0], 200)
 
-    async def test_untrusted_header_is_refused_as_before(self):
+    async def test_untrusted_connections_need_no_header(self):
         limits.configure_proxies("10.9.9.9")  # 127.0.0.1 is no proxy now
-        self.assertEqual(await self.call(proxy.header(REAL_A, TUNNEL, proxy.STREAM)), (None, b""))
-        self.assertEqual(self.server.proxy_stats["http_headers"], 0)
         self.assertEqual((await self.call())[0], 200)
+        self.assertEqual(await self.call(self.stream()), (None, b""))  # as before
+        self.assertEqual(self.server.proxy_stats["http_headers"], 0)
 
 
 if __name__ == "__main__":
