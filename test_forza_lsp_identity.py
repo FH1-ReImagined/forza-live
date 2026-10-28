@@ -83,16 +83,27 @@ class IdentityTest(unittest.TestCase):
                           {"maxCategoryResults": 2, "maxHopperResults": 32}, "EF" * 16)
         self.assertEqual(self.status(reply), (0, 0))
 
-    def test_calls_without_a_key_are_accepted_unverified(self):
-        with self.assertLogs("forza-live", "INFO") as logs:
-            self.assertEqual(self.status(self.race_stats(2)), (0, 0))
-            self.race_stats(2)
-        self.assertEqual(self.last_race()["verified"], False)
-        self.assertEqual(sum("accepted as unverified" in m for m in logs.output), 1)
-        # an XUID that never signed in with a key cannot be checked either
+    def test_calls_without_a_key_cannot_write_for_a_player_with_one(self):
+        # DriverA signed in with a key, and its game sends it on every call: a write without
+        # it is someone else using the XUID (public on /status), so it is refused.
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            self.assertEqual(self.status(self.race_stats(2)), (2, 5))
+        self.assertIsNone(self.last_race())
+        self.assertTrue(any("without its friends key" in m for m in logs.output))
+        # reads are still answered
+        reply = self.call("Hopper", "GetList", x.HopperGetList_Params,
+                          {"maxCategoryResults": 2, "maxHopperResults": 32})
+        self.assertEqual(self.status(reply), (0, 0))
+
+    def test_calls_without_a_key_are_accepted_unverified_for_xuids_without_one(self):
+        # an XUID that never signed in with a key (an older game) cannot be checked
         other = 0x0009000000000099
-        self.assertEqual(self.status(self.race_stats(4, "AB" * 16, other)), (0, 0))
+        with self.assertLogs("forza-live", "INFO") as logs:
+            self.assertEqual(self.status(self.race_stats(4, None, other)), (0, 0))
+            self.race_stats(4, None, other)
         self.assertEqual(self.last_race(other)["verified"], False)
+        self.assertEqual(sum("accepted as unverified" in m for m in logs.output), 1)
+        self.assertEqual(self.status(self.race_stats(4, "AB" * 16, other)), (0, 0))
 
     def test_caller_trusted_is_per_call(self):
         seen = []
@@ -100,7 +111,7 @@ class IdentityTest(unittest.TestCase):
         lsp.SERVICES[("User", "WriteRaceStatsEx")] = lambda xuid, body: (seen.append(lsp.caller_trusted()), real(xuid, body))[1]
         try:
             self.race_stats(1, KEY.hex())
-            self.race_stats(1)
+            self.race_stats(1, None, 0x0009000000000099)  # an XUID with no key on record
         finally:
             lsp.SERVICES[("User", "WriteRaceStatsEx")] = real
         self.assertEqual(seen, [True, False])

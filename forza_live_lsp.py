@@ -585,10 +585,12 @@ SERVICES = {
 # connection and every UDP datagram come from the tunnel agent's address, and the TCP source
 # ports have nothing to do with the players' UDP ports.
 #   TRUSTED     the key matches the XUID's
-#   UNVERIFIED  no key (games before the key, or someone else), or an XUID with no key on
-#               record (it never signed in with one): accepted for now, logged, and never
-#               taken as the player's word where it matters (caller_trusted())
-#   FORGED      a key that is not the XUID's: calls that change anything are refused
+#   UNVERIFIED  an XUID with no key on record (it never signed in with a game that sends one):
+#               accepted for now, logged, and never taken as the player's word where it
+#               matters (caller_trusted())
+#   FORGED      a key that is not the XUID's, or no key for an XUID that has one on record
+#               (its game always sends it, so a call without it is someone else's): calls that
+#               change anything are refused, reads are answered
 TRUSTED, UNVERIFIED, FORGED = "trusted", "unverified", "forged"
 _caller = contextvars.ContextVar("lsp_caller", default=UNVERIFIED)
 READ_PREFIXES = ("Get", "Search", "Download")
@@ -606,11 +608,11 @@ def caller_trusted():
 def verify_caller(server, xuid, headers):
     """TRUSTED, UNVERIFIED or FORGED for a call's X-UserId and X-Friends-Key."""
     given = headers.get("x-friends-key")
-    if given is None:
-        return UNVERIFIED
     record = server.friends.store.get(xuid) if server is not None and xuid else None
     if not record or not record.get("key"):
         return UNVERIFIED
+    if given is None:
+        return FORGED
     try:
         key = bytes.fromhex(given.strip())
     except ValueError:
@@ -642,8 +644,9 @@ def service_call(headers, body, server=None):
         fn = lambda xuid, body: hopper_get_game_options(server, xuid, body)  # noqa: E731
     state = verify_caller(server, xuid, headers)
     if state == FORGED and changes_state(short, method):
-        log.warning("title: %s.%s for %016X with another player's friends key: refused", cls,
-                    method, xuid)
+        log.warning("title: %s.%s for %016X %s: refused", cls, method, xuid,
+                    "without its friends key" if "x-friends-key" not in headers
+                    else "with another player's friends key")
         return x.failure(5, "not this player's call")
     if state == UNVERIFIED and xuid:
         now = time.monotonic()
