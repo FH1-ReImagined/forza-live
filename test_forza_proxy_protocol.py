@@ -244,9 +244,11 @@ class OffTest(ProxyServerTest):
         self.server.http_port, self.server.proxy_http_port = 21201, 56678
         pa = self.join((AGENT, 40001), 1)
         welcome = [d for ad, d in self.net.sent if ad == pa.addr and d[4] == srv.WELCOME][0]
-        self.assertEqual(welcome, srv.MAGIC + bytes([srv.WELCOME]) +
-                         struct.pack(">IHIHH", pa.id, self.server.epoch, 0, 0, 2) + b"hi" +
-                         struct.pack(">H", 56678))
+        # Everything up to the HTTP port is as before; the signing part (forza_auth) follows it.
+        before = (srv.MAGIC + bytes([srv.WELCOME]) +
+                  struct.pack(">IHIHH", pa.id, self.server.epoch, 0, 0, 2) + b"hi" +
+                  struct.pack(">H", 56678))
+        self.assertEqual(welcome[:len(before)], before)
 
 
 class UdpTest(ProxyServerTest):
