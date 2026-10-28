@@ -91,10 +91,9 @@ class IdentityTest(unittest.TestCase):
         self.assertIsNone(self.last_race())
         self.assertTrue(any("without its friends key" in m for m in logs.output))
         # reads are still answered
-        reply = self.call("User", "GetRaceStats", x.UserGetRaceStats_Params, {"id": 1}) \
-            if hasattr(x, "UserGetRaceStats_Params") else None
-        if reply is not None:
-            self.assertEqual(self.status(reply)[0], 0)
+        reply = self.call("Hopper", "GetList", x.HopperGetList_Params,
+                          {"maxCategoryResults": 2, "maxHopperResults": 32})
+        self.assertEqual(self.status(reply), (0, 0))
 
     def test_calls_without_a_key_are_accepted_unverified_for_xuids_without_one(self):
         # an XUID that never signed in with a key (an older game) cannot be checked
