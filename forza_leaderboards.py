@@ -74,6 +74,12 @@ def configure(data_dir=None):
         _names = (None, {})
 
 
+def forget_answers():
+    """The cached answers go (forza_scores.admin changed the rows)."""
+    with _lock:
+        _cache.clear()
+
+
 def salt():
     """A secret kept beside the data, so a player id cannot be worked back to an XUID."""
     global _salt

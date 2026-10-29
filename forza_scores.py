@@ -5,24 +5,40 @@ the scoreboard id of the event, the time or score, the car, its class and perfor
 index, assists and tuning) and reads scoreboards for its leaderboard screens and for
 Rivals (GetRows, GetRival, GetRivalAndPersonalBest, GetBestScores). The answer to a
 submission asks for the ghost (uploadFiles) when the score is the player's new best; the
-game then uploads it (UploadFile, an opaque blob of up to 250 KB that we keep as it is)
-and another player racing that score as a rival downloads it (DownloadFile, by the row's
-ghostFileId). docs/title_services.md has the details.
+game then uploads it (UploadFile: the lap's recording, up to 250 KB, checked by forza_ghost.py
+and kept without its driver's name) and another player racing that score as a rival
+downloads it (DownloadFile, by the row's ghostFileId). docs/title_services.md has the details.
 
 The 1000 Club (Title Update 4) reports each car challenge a player completes
 (Challenge.ChallengeCompleted: the car and the challenge's thumbprint); its leaderboard
 (GetRows type 5) ranks the players by the challenges (medals) they completed.
 
+Integrity (FH1 #517). The boards (the game's and the public JSON, forza_leaderboards.py) take
+results only from players signed in to this server: a call that carries its player's own key
+(forza_live_lsp.caller_trusted). Each new row keeps the server that took it (SERVER_ID) and
+the build the game names (X-Forza-Build). A result kept off the boards is "unranked", as osu!
+does: kept for review (STORE.unranked, the player's best one per board) but never shown. That
+is a result from an unverified caller, one whose ghost fails the checks (forza_ghost.py; the
+player's previous row stays), and rows an operator unranks. /admin/scores (admin()) lists,
+unranks, ranks again or deletes rows by server, build or player. Rows from before the tags
+stay as they are.
+
 Everything is kept in DATA_DIR/scoreboards.json (the best score of each player on each
-scoreboard, the 1000 Club medals) and DATA_DIR/ghosts/<id>.bin.
+scoreboard, the unranked ones, the 1000 Club medals), DATA_DIR/ghosts/<id>.bin and
+DATA_DIR/ghosts/review/<scoreId>.bin (refused ghosts, kept with their unranked rows).
 """
 
+import contextvars
 import json
 import logging
 import os
+import re
+import secrets
 import time
+import urllib.parse
 import uuid
 
+import forza_ghost as ghostfile
 import forza_limits as limits
 import forza_xtsw as x
 import forza_xtsw_all as A
@@ -31,7 +47,7 @@ import forza_durable as durable
 log = logging.getLogger("forza-live")
 
 DATA_DIR = "forza_live_data"
-GHOST_MAX = 256000           # the game's download buffer (DownloadFile maxSize)
+GHOST_MAX = ghostfile.GHOST_MAX  # the game's download buffer (DownloadFile maxSize)
 RIVAL_BOUNTY = 1000          # credits for beating a rival, shown as BOUNTY BONUS
 
 # Score types: SubmitScore's `type`, GetRows' `type`, GetBestScores' scoreType, NotifyRival's
@@ -83,6 +99,57 @@ SPEED_TRAP_LIMIT_KMH = {
     230: 348.3,   # Rt. 29
 }
 MAX_BOARDS = 4096   # boards on the server (the game has about 160)
+MAX_PENDING_GHOSTS = 4096  # new bests waiting for their ghost (UploadFile follows at once)
+
+# The server that takes a row (--server-id; without it an id made at the first start and kept
+# in DATA_DIR/server_id.txt) and who the call is from (forza_live_lsp.service_call sets it for
+# each call: whether it carries its player's own key, and the build the game names). Outside a
+# call (tests, tools) a submission is the server's own: trusted, no build.
+SERVER_ID = ""
+_server_id = None
+_source = contextvars.ContextVar("score_source", default=None)
+ID_CHARS = re.compile(r"[^A-Za-z0-9._+/-]")
+
+
+def clean_id(text, limit=64):
+    """A server id or build as kept: printable ASCII from a short set, at most `limit` chars."""
+    return ID_CHARS.sub("_", text.strip())[:limit] if isinstance(text, str) else ""
+
+
+def server_id():
+    global _server_id
+    if _server_id is None:
+        _server_id = clean_id(SERVER_ID)
+        path = os.path.join(DATA_DIR, "server_id.txt")
+        if not _server_id:
+            try:
+                with open(path) as f:
+                    _server_id = clean_id(f.read())
+            except OSError:
+                pass
+        if not _server_id:
+            _server_id = "server-" + secrets.token_hex(4)
+            try:
+                os.makedirs(DATA_DIR, exist_ok=True)
+                with open(path, "w") as f:
+                    f.write(_server_id + "\n")
+            except OSError as e:
+                log.warning("scoreboards: cannot keep the server id in %s: %s", path, e)
+    return _server_id
+
+
+def set_source(trusted, build):
+    """Who the title service call being handled is from; returns the token for reset_source."""
+    return _source.set((bool(trusted), clean_id(build or "")))
+
+
+def reset_source(token):
+    _source.reset(token)
+
+
+def source():
+    """(trusted, build) of the call being handled."""
+    return _source.get() or (True, "")
 
 
 def board_key(kind, sbid, stt):
@@ -94,7 +161,9 @@ class Store:
 
     def __init__(self):
         self.boards = {}       # "type:sbid:stt" -> {xuid hex: entry}
-        self.ghosts = {}       # scoreId hex -> (board key, xuid hex): waiting for UploadFile
+        self.unranked = {}     # the same, of the results kept off the boards (for review)
+        # scoreId hex -> (board key, xuid hex, the row it replaced or None): waiting for UploadFile
+        self.ghosts = {}
         self.club = {}         # 1000 Club: xuid hex -> {gamertag, cars: {carId: [thumbprints]}}
         self.next_file = 1
         self.loaded = False
@@ -109,6 +178,7 @@ class Store:
         try:
             data = durable.load(self.path())
             self.boards = migrate(data.get("boards", {}))
+            self.unranked = data.get("unranked", {})
             self.club = data.get("club1000", {})
             self.next_file = data.get("nextFileId", 1)
         except (OSError, ValueError):
@@ -122,7 +192,7 @@ class Store:
         os.makedirs(DATA_DIR, exist_ok=True)
         tmp = self.path() + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"boards": self.boards, "club1000": self.club,
+            json.dump({"boards": self.boards, "unranked": self.unranked, "club1000": self.club,
                        "nextFileId": self.next_file}, f, indent=1)
         durable.replace(tmp, self.path())
 
@@ -164,9 +234,12 @@ def migrate(boards):
 STORE = Store()
 
 
-def configure(data_dir):
-    global DATA_DIR
+def configure(data_dir, server=None):
+    global DATA_DIR, SERVER_ID, _server_id
     DATA_DIR = data_dir
+    if server is not None:
+        SERVER_ID = server
+    _server_id = None
     STORE.__init__()
 
 
@@ -238,41 +311,100 @@ def public_id(xuid):
     return forza_leaderboards.player_id(xuid if isinstance(xuid, str) else "%016X" % xuid)
 
 
+def tag(entry, trusted, build):
+    """The row's source: this server, the build the game named, whether the call was its own."""
+    entry.update(server=server_id(), build=build, verified=trusted)
+    return entry
+
+
+def unrank(key, entry, reason, ghost=None):
+    """Keeps a result off the boards, for review: the player's best unranked one on the board
+    (a better one replaces it), with its refused ghost (DATA_DIR/ghosts/review). False when it is
+    not kept (not better, or the server has too many)."""
+    STORE.load()
+    review = STORE.unranked.get(key)
+    if review is None:
+        if len(STORE.unranked) >= MAX_BOARDS:
+            return False
+        review = STORE.unranked[key] = {}
+    old = review.get(entry["xuid"])
+    if old and not better(entry["score"], old["score"], int(key.split(":")[0]) in BIGGER_IS_BETTER):
+        return False
+    if not old and len(review) >= limits.MAX_PLAYERS:
+        return False
+    if old:
+        remove_review_ghost(old)
+    entry = dict(entry, unranked=reason, unrankedAt=int(time.time()), ghostFileId=-1)
+    entry.pop("reviewGhost", None)
+    if ghost and len(ghost) <= GHOST_MAX:
+        try:
+            limits.accept(len(ghost))
+            os.makedirs(os.path.dirname(review_ghost_path(entry["scoreId"])), exist_ok=True)
+            with open(review_ghost_path(entry["scoreId"]), "wb") as f:
+                f.write(ghost)
+            entry["reviewGhost"] = True
+        except (OSError, ValueError) as e:
+            log.info("title: refused ghost of score %s not kept: %s", entry["scoreId"], e)
+    review[entry["xuid"]] = entry
+    return True
+
+
 def submit(xuid, gamertag, kind, data, extra=None):
     """Keeps a submission if it is the player's best; returns the reply (scoreId, and
-    uploadFiles when we want its ghost)."""
+    uploadFiles when we want its ghost). A submission from an unverified caller is kept
+    unranked."""
     sbid, stt, score = data["gameScoreboardId"], data["isServerTimeTrial"], data["score"]
     score_id = uuid.uuid4().bytes
-    log.info("title: score %016X '%s': board %d%s type %d score %.3f car %d class %d PI %.3f%s",
+    trusted, build = source()
+    log.info("title: score %016X '%s': board %d%s type %d score %.3f car %d class %d PI %.3f%s%s",
              xuid, gamertag, sbid, " (time trial)" if stt else "", kind, score, data["carId"],
              data["carClassId"], data["carPerformanceIndex"],
-             " passed %d" % extra if extra is not None else "")
+             " passed %d" % extra if extra is not None else "",
+             (" build %s" % build if build else "") + ("" if trusted else " (unverified)"))
+    nothing = x.reply(x.ScoreboardSubmitScore_Results, {"scoreId": score_id, "uploadFiles": False})
     if implausible_speed(xuid, kind, sbid, score):
-        return x.reply(x.ScoreboardSubmitScore_Results, {"scoreId": score_id, "uploadFiles": False})
+        return nothing
     # Online races submit board -1 (type 4, the XP of the game): not kept.
-    board = STORE.board(kind, sbid, stt, create=True) if kind in KEPT_TYPES and sbid >= 0 \
-        and 0 < score < 1e9 else None
-    if board is None:
-        return x.reply(x.ScoreboardSubmitScore_Results, {"scoreId": score_id, "uploadFiles": False})
+    if kind not in KEPT_TYPES or sbid < 0 or not 0 < score < 1e9:
+        return nothing
     key = "%016X" % xuid
-    old = board.get(key)
-    bigger = kind in BIGGER_IS_BETTER
-    if old and not better(score, old["score"], bigger):
-        return x.reply(x.ScoreboardSubmitScore_Results, {"scoreId": score_id, "uploadFiles": False})
-    if not old and len(board) >= limits.MAX_PLAYERS:
-        return x.reply(x.ScoreboardSubmitScore_Results, {"scoreId": score_id, "uploadFiles": False})
     entry = {"xuid": key, "gamertag": limits.clean_gamertag(gamertag, xuid), "type": kind, "score": score,
              "submitted": int(time.time()), "scoreId": score_id.hex(),
              "carId": data["carId"], "carClassId": data["carClassId"],
              "carPerformanceIndex": data["carPerformanceIndex"], "ghostFileId": -1}
     for k in ("usedSTM", "usedTCS", "usedABS", "usedAutoBrake", "usedAutoShifting", "usedClutch"):
         entry[k] = data[k]
-    if old and old.get("ghostFileId", -1) >= 0:
-        remove_ghost(old["ghostFileId"])
+    tag(entry, trusted, build)
+    if not trusted:
+        # Not this server's player (an older game, or someone else): the boards are for players
+        # signed in here.
+        if unrank(board_key(kind, sbid, stt), entry, "unverified"):
+            STORE.save()
+            log.info("title: score %016X: unverified caller, kept unranked", xuid)
+        return nothing
+    board = STORE.board(kind, sbid, stt, create=True)
+    if board is None:
+        return nothing
+    old = board.get(key)
+    bigger = kind in BIGGER_IS_BETTER
+    if old and not better(score, old["score"], bigger):
+        return nothing
+    if not old and len(board) >= limits.MAX_PLAYERS:
+        return nothing
     board[key] = entry
     ghost = kind in GHOST_TYPES
     if ghost:
-        STORE.ghosts[score_id.hex()] = (board_key(kind, sbid, stt), key)
+        # The row it replaces stays (with its ghost) until the new one's ghost passes: a refused
+        # ghost puts it back. A row still waiting for its own ghost passes on the one before it.
+        pending = STORE.ghosts.pop(old["scoreId"], None) if old else None
+        previous = pending[2] if pending else old
+        if len(STORE.ghosts) >= MAX_PENDING_GHOSTS:  # uploads that never came
+            dropped = STORE.ghosts.pop(next(iter(STORE.ghosts)))[2]
+            if dropped and dropped.get("ghostFileId", -1) >= 0:
+                remove_ghost(dropped["ghostFileId"])
+        STORE.ghosts[score_id.hex()] = (board_key(kind, sbid, stt), key, previous)
+    elif old and old.get("ghostFileId", -1) >= 0:
+        remove_ghost(old["ghostFileId"])
     STORE.save()
     log.info("title: score %016X: new best on board %d type %d%s", xuid, sbid, kind,
              ", asking for the ghost" if ghost else "")
@@ -283,6 +415,10 @@ def ghost_path(file_id):
     return os.path.join(DATA_DIR, "ghosts", "%d.bin" % file_id)
 
 
+def review_ghost_path(score_id):
+    return os.path.join(DATA_DIR, "ghosts", "review", "%s.bin" % score_id)
+
+
 def remove_ghost(file_id):
     try:
         os.remove(ghost_path(file_id))
@@ -290,28 +426,64 @@ def remove_ghost(file_id):
         pass
 
 
+def remove_review_ghost(entry):
+    if entry.get("reviewGhost") and re.fullmatch(r"[0-9a-f]{32}", entry.get("scoreId", "")):
+        try:
+            os.remove(review_ghost_path(entry["scoreId"]))
+        except OSError:
+            pass
+
+
 def upload_file(xuid, body):
+    """UploadFile(scoreId, data): the ghost of a new best (submit asked for it). A ghost that
+    fails the checks (forza_ghost.check) is refused: the row goes unranked with it, the player's
+    previous row comes back, and the game gets a failure (it carries on to the results as after
+    a success; it does not upload again). A ghost that passes is kept without its driver's name."""
     params, _ = x.decode(x.ScoreboardUploadFile_Params, body)
     sid = params["scoreId"].hex()
-    found = STORE.ghosts.pop(sid, None)
     data = params["data"]
-    if not found:
+    found = STORE.ghosts.get(sid)
+    if not found or found[1] != "%016X" % xuid:
         log.info("title: UploadFile %016X: unknown score %s (%d bytes)", xuid, sid, len(data))
         return x.reply()
-    board_key, key = found
-    limits.accept(len(data))
-    entry = STORE.boards.get(board_key, {}).get(key)
+    del STORE.ghosts[sid]
+    key, player, previous = found
+    board = STORE.boards.get(key, {})
+    entry = board.get(player)
     if not entry or entry["scoreId"] != sid:
         return x.reply()  # beaten again since
+    problem, kept = ghostfile.check(data, entry["score"], entry["carId"], tracks_of(key))
+    if problem is None:
+        try:
+            limits.accept(len(data))  # the disk quota: the row stays, without a ghost
+        except ValueError:
+            if previous and previous.get("ghostFileId", -1) >= 0:
+                remove_ghost(previous["ghostFileId"])
+            raise
+    else:
+        if previous:
+            board[player] = previous
+        else:
+            del board[player]
+            if not board:
+                del STORE.boards[key]
+        unrank(key, entry, "ghost: " + problem, data)
+        STORE.save()
+        log.warning("title: ghost from %016X for board %s refused (%d bytes): %s; the score "
+                    "%.3f is unranked%s", xuid, key, len(data), problem, entry["score"],
+                    ", the previous one stays" if previous else "")
+        return x.failure(2, "ghost refused: " + problem)
+    if previous and previous.get("ghostFileId", -1) >= 0:
+        remove_ghost(previous["ghostFileId"])
     file_id = STORE.next_file
     STORE.next_file += 1
     os.makedirs(os.path.dirname(ghost_path(file_id)), exist_ok=True)
     with open(ghost_path(file_id), "wb") as f:
-        f.write(data)
+        f.write(kept)
     entry["ghostFileId"] = file_id
     STORE.save()
-    log.info("title: ghost %d from %016X for board %s (%d bytes)", file_id, xuid, board_key,
-             len(data))
+    log.info("title: ghost %d from %016X for board %s (%d bytes, %d kept)", file_id, xuid, key,
+             len(data), len(kept))
     return x.reply()
 
 
@@ -382,6 +554,11 @@ def challenge_completed(gamertag_of):
     def handler(xuid, body):
         p, _ = x.decode(A.ForzaChallengeChallengeCompleted_Params, body)
         car, thumb = p["carId"], p["challengeThumbprint"]
+        trusted, build = source()
+        if not trusted:  # the board is for players signed in here
+            log.info("title: 1000 Club %016X: challenge %08X in car %d from an unverified caller: "
+                     "not counted", xuid, thumb, car)
+            return x.reply()
         STORE.load()
         key = "%016X" % xuid
         entry = STORE.club.setdefault(key, {"xuid": key, "cars": {}})
@@ -392,7 +569,7 @@ def challenge_completed(gamertag_of):
             (str(car) in cars or len(cars) < CLUB_MAX_CARS)
         if new:
             cars[str(car)] = done + [thumb]
-            entry.update(carId=car, submitted=int(time.time()))
+            entry.update(carId=car, submitted=int(time.time()), server=server_id(), build=build)
             STORE.save()
         log.info("title: 1000 Club %016X '%s': challenge %08X in car %d%s, %d medals", xuid,
                  entry["gamertag"], thumb, car, "" if new else " (already counted)",
@@ -485,6 +662,31 @@ def events():
             except sqlite3.Error as e:
                 log.warning("scoreboards: game database: %s", e)
     return EVENTS
+
+
+RACE_TRACKS = None  # event Id -> {track ids of its races} (the game's database, Races)
+
+
+def tracks_of(key):
+    """The tracks a board's ghost may be on: a time trial's, or an event's races' (from the game's
+    database); None when the server does not know them."""
+    global RACE_TRACKS
+    kind, sbid, stt = (int(v) for v in key.split(":"))
+    if stt:
+        return {t[4] for t in TIME_TRIALS if t[0] == sbid} or None
+    if RACE_TRACKS is None:
+        RACE_TRACKS = {}
+        import forza_world
+        if forza_world.GAME_DB and os.path.isfile(forza_world.GAME_DB):
+            import sqlite3
+            try:
+                db = sqlite3.connect("file:%s?mode=ro" % forza_world.GAME_DB, uri=True)
+                for event, track in db.execute("select EventId, TrackId from Races"):
+                    RACE_TRACKS.setdefault(event, set()).add(track)
+                db.close()
+            except sqlite3.Error as e:
+                log.warning("scoreboards: game database: %s", e)
+    return RACE_TRACKS.get(sbid)
 
 
 def in_rollup(key, event_type, pivot):
@@ -678,6 +880,173 @@ def get_time_trials(xuid, body):
     return x.reply(x.ScoreboardGetTimeTrials_Results, {
         "timeTrialCategories": cats[:p["maxTimeTrialCategories"]],
         "timeTrials": trials[:p["maxTimeTrialResults"]]})
+
+
+# ---- /admin/scores: rows by source (operators only: forza_live_server.py, lsp.is_admin) ----
+#   GET  /admin/scores?<filters>         the matching rows (at most ADMIN_LIST_MAX), their count
+#   POST /admin/scores/unrank?<filters>  ranked rows off the boards, kept for review (and ghosts)
+#   POST /admin/scores/rank?<filters>    unranked rows back on their boards, where better than
+#                                        the player's row there (a kept ghost that passes too)
+#   POST /admin/scores/delete?<filters>  rows and their ghosts removed
+# Filters: server, build ("none": rows from before the tags), verified (0 or 1), player (an XUID in
+# hex), board ("3:199:0" or the public id, event-199), reason (part of an unranked row's reason),
+# state (ranked, unranked or all, the default). A change needs one filter besides state.
+ADMIN_LIST_MAX = 500
+ADMIN_FILTERS = ("server", "build", "verified", "player", "board", "reason")
+
+
+def admin_filter(query):
+    """(predicate over (state, board key, entry), state) of a query; ValueError when bad."""
+    arg = {k: v[0] for k, v in query.items() if v}
+    unknown = set(arg) - set(ADMIN_FILTERS) - {"state", "token"}
+    if unknown:
+        raise ValueError("unknown filter: " + ", ".join(sorted(unknown)))
+    state = arg.get("state", "all")
+    if state not in ("ranked", "unranked", "all"):
+        raise ValueError("state: ranked, unranked or all")
+    board = arg.get("board")
+    if board is not None and not re.fullmatch(r"\d+:-?\d+:[01]", board):
+        import forza_leaderboards
+        parsed = forza_leaderboards.parse_board(board)
+        if parsed is None:
+            raise ValueError("board: 3:199:0 or event-199")
+        board = board_key(*parsed)
+    if "verified" in arg and arg["verified"] not in ("0", "1"):
+        raise ValueError("verified: 0 or 1")
+    player = arg.get("player", "").upper().removeprefix("0X")
+
+    def tagged(entry, name):
+        value = entry.get(name)
+        return arg[name] == "none" if value is None else value == arg[name]
+
+    def matches(where, key, entry):
+        return ((state == "all" or state == where) and (board is None or key == board) and
+                ("server" not in arg or tagged(entry, "server")) and
+                ("build" not in arg or tagged(entry, "build")) and
+                ("verified" not in arg or
+                 bool(entry.get("verified", True)) == (arg["verified"] == "1")) and
+                ("player" not in arg or entry.get("xuid") == player.zfill(16)) and
+                ("reason" not in arg or arg["reason"] in entry.get("unranked", "")))
+    return matches, any(k in arg for k in ADMIN_FILTERS)
+
+
+def admin_rows(matches):
+    STORE.load()
+    for where, stored in (("ranked", STORE.boards), ("unranked", STORE.unranked)):
+        for key, board in list(stored.items()):
+            for player, entry in list(board.items()):
+                if matches(where, key, entry):
+                    yield where, key, entry
+
+
+def admin_row(where, key, entry):
+    return {"state": where, "board": key, "xuid": entry["xuid"],
+            "gamertag": entry.get("gamertag"), "score": entry["score"],
+            "carId": entry.get("carId"), "classId": entry.get("carClassId"),
+            "submitted": entry.get("submitted"), "server": entry.get("server"),
+            "build": entry.get("build"), "verified": entry.get("verified"),
+            "unranked": entry.get("unranked"),
+            "ghost": entry.get("ghostFileId", -1) >= 0 or bool(entry.get("reviewGhost"))}
+
+
+def read_file(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def take_off_board(key, entry):
+    """Removes a ranked row (and a pending ghost of it); returns its ghost's bytes."""
+    board = STORE.boards.get(key, {})
+    if board.get(entry["xuid"]) is entry:
+        del board[entry["xuid"]]
+        if not board:
+            del STORE.boards[key]
+    STORE.ghosts.pop(entry.get("scoreId"), None)
+    data = None
+    if entry.get("ghostFileId", -1) >= 0:
+        data = read_file(ghost_path(entry["ghostFileId"]))
+        remove_ghost(entry["ghostFileId"])
+    return data
+
+
+def admin_change(action, key, where, entry):
+    """One row through an action; True when it changed."""
+    if action == "unrank" and where == "ranked":
+        if not unrank(key, entry, "operator", take_off_board(key, entry)):
+            log.info("title: /admin/scores/unrank: %s's %.3f on board %s removed (a better "
+                     "unranked one of the player's is kept)", entry["xuid"], entry["score"], key)
+        return True
+    if action == "rank" and where == "unranked":
+        board = STORE.board(*(int(v) for v in key.split(":")), create=True)
+        if board is None:
+            return False
+        old = board.get(entry["xuid"])
+        bigger = int(key.split(":")[0]) in BIGGER_IS_BETTER
+        if old and not better(entry["score"], old["score"], bigger):
+            return False
+        del STORE.unranked[key][entry["xuid"]]
+        if not STORE.unranked[key]:
+            del STORE.unranked[key]
+        data = read_file(review_ghost_path(entry["scoreId"])) if entry.get("reviewGhost") else None
+        remove_review_ghost(entry)
+        if old:
+            take_off_board(key, old)
+        row = {k: v for k, v in entry.items() if k not in ("unranked", "unrankedAt", "reviewGhost")}
+        row["ghostFileId"] = -1
+        problem, kept = ghostfile.check(data, row["score"], row["carId"], tracks_of(key)) \
+            if data is not None else ("none", None)
+        if problem is None:
+            row["ghostFileId"] = STORE.next_file
+            STORE.next_file += 1
+            os.makedirs(os.path.dirname(ghost_path(row["ghostFileId"])), exist_ok=True)
+            with open(ghost_path(row["ghostFileId"]), "wb") as f:
+                f.write(kept)
+        board[entry["xuid"]] = row
+        return True
+    if action == "delete":
+        if where == "ranked":
+            take_off_board(key, entry)
+        else:
+            del STORE.unranked[key][entry["xuid"]]
+            if not STORE.unranked[key]:
+                del STORE.unranked[key]
+            remove_review_ghost(entry)
+        return True
+    return False
+
+
+def admin(method, path, query):
+    """(status, content type, body) for /admin/scores..., the caller already an operator."""
+    action = path[len("/admin/scores"):].strip("/")
+    if action not in ("", "unrank", "rank", "delete"):
+        return 404, "text/plain", b"not found"
+    if (method == "POST") != bool(action):
+        return 405, "text/plain", b"GET lists rows, POST /admin/scores/<unrank|rank|delete> changes"
+    try:
+        matches, filtered = admin_filter(query)
+    except ValueError as e:
+        return 400, "application/json", json.dumps({"error": str(e)}).encode()
+    rows = list(admin_rows(matches))
+    if not action:
+        return 200, "application/json", json.dumps({
+            "server": server_id(), "matched": len(rows),
+            "rows": [admin_row(*r) for r in rows[:ADMIN_LIST_MAX]]}, indent=1).encode()
+    if not filtered:
+        return 400, "application/json", json.dumps(
+            {"error": "a change needs a filter: " + ", ".join(ADMIN_FILTERS)}).encode()
+    changed = sum(admin_change(action, key, where, entry) for where, key, entry in rows)
+    if changed:
+        STORE.save()
+        import forza_leaderboards
+        forza_leaderboards.forget_answers()
+    log.warning("title: /admin/scores/%s %s: %d of %d rows", action,
+                urllib.parse.urlencode({k: v[0] for k, v in query.items() if k != "token"}),
+                changed, len(rows))
+    return 200, "application/json", json.dumps({"action": action, "matched": len(rows),
+                                                "changed": changed}).encode()
 
 
 def submit_score(gamertag_of, ex):

@@ -42,6 +42,8 @@ X-ClassName: Forza.WebServices.Hopper, Forza.WebServices
 X-Method: GetList
 X-UserId: 0x9a7b6b0a63bf2                               (the caller's XUID)
 X-TransactionId: <GUID as hex>                          (transactional calls only)
+X-Friends-Key: <32 hex digits>                          (our game, below)
+X-Forza-Build: 0.2.0/tu4                                (our game, below)
 
 <parameters>
 ```
@@ -57,7 +59,10 @@ same way). The server (`forza_live_lsp.verify_caller`) refuses a call that chang
 world's event along) when the key is not the XUID's, and takes a call without a key, from a
 game before the key or for an XUID that never signed in with one, as unverified: accepted
 and logged (once per XUID every 10 minutes), its race stats marked `verified: false`, and
-never the player's word where it matters (`caller_trusted()`). Addresses can't do this job:
+never the player's word where it matters (`caller_trusted()`; its scores are kept unranked,
+off the boards). Our game also names its build, `X-Forza-Build: <id>/tu<0|4>` (the
+launcher's version, or `git-<commit>` for a source build; CMake's `FORZA_BUILD_ID`), which the
+server keeps with each leaderboard row so the rows of a bad build can be found (FH1 #517). Addresses can't do this job:
 behind a tunnel ([`hosting.md`](hosting.md)) every HTTP connection and UDP datagram arrive from the
 tunnel agent's address, and a connection's TCP port says nothing about the player's UDP one.
 
@@ -496,8 +501,10 @@ kept apart (before 2026-10-15 boards were keyed by id alone; an old store is spl
 entry's type when loaded). Types 1 and 2 (speeds) and 4 (XP) rank bigger first, 3 (times)
 smaller first; only types 1-3 are kept (online races submit type 4 on board -1), at most
 4096 boards. A new best of an event (type 3) is answered with a fresh `scoreId` and
-`uploadFiles` true; the ghost the game then uploads is kept as it is in
-`DATA_DIR/ghosts/<id>.bin` (the row's `ghostFileId`) and served by `DownloadFile`. Views:
+`uploadFiles` true; the ghost the game then uploads is checked (below) and kept in
+`DATA_DIR/ghosts/<id>.bin` (the row's `ghostFileId`), served by `DownloadFile`. Results from
+callers that are not signed in here, and times whose ghost fails, are kept unranked
+([`hosting.md`](hosting.md), "Which results count"). Views:
 0 the top from `startAt`, 1 around the caller, others (friends are everyone here) like 0;
 `isClubBoard` keeps the caller's car club's members; `userRow` is the caller's row
 (position 0 when they have none). Rollups rank players by the event boards they lead. The
@@ -617,6 +624,38 @@ Unit tests: `test_forza_scores.py` (`python3 -m unittest discover -p
 The thumbprint names the challenge: the Aventador's ONE EIGHTY SKILL sent `carId 1398,
 challengeThumbprint 0xAE6828D3` both times it was completed (the second time after a
 restart had lost the medal: the career must be saved, [`dlc.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/dlc.md)).
+
+#### Rivals ghosts (`forza_ghost.py`, FH1 #517)
+
+The game builds the upload (`sub_82C82A58`, base game addresses) from two streams of its lap
+recorder and reads it back the same way (`sub_82C83AC0`, which extracts them to
+`cache:\<name>ReplayInitExtract` and `...ReplayDataExtract`):
+
+    u32 init size, u32 data size, the ReplayInit block, the ReplayData block (8 + both = all)
+    a block: chunks of u32 compressed size, u32 size (4096 at most), then raw deflate
+             (`sub_82C77E00` writes, `sub_82C7B4A8` reads; each chunk its own stream)
+
+ReplayInit (`sub_8258A678`): u32 version `0x178C`, the race's 720-byte settings (+4 the track
+id), f64 the lap time, u8, u32 n and n u32s, u8 cars (1) and a 1504-byte entry each (+544 the
+driver's gamertag in UTF-16, +1060 the car id), u8 items and each a length-prefixed name
+(`base:1398,1>ingame_lodn`) and a length-prefixed livery. ReplayData is records of f32 time,
+u8 type, the body and u32 the body's size (read from the end): type 0x40 is the car's state,
+about 5 a second; 0x20 a full keyframe at the start and every 40-55 s; 0x45 the lap's end
+(with the lap time as f64). Seen in ghosts uploaded by a local game (Clear Springs Circuit,
+track 156): two Rivals laps, the Aventador in 138.513 s (20,577 bytes, 853 records, the
+ReplayInit 2,748 bytes) and the Saleen S7, car 432, in 138.412 s (20,280 bytes, 2,747), and the
+4-lap race's best lap, lap 2 in 117.704 s (18,349 bytes, 733 records). The records start at
+0.002-0.015 s and end within 0.012 s of the score: a race's lap is recorded from its own start.
+
+`forza_ghost.check` refuses a ghost over 256,000 bytes (the game's download buffer) or whose
+sizes, chunks or records do not add up, with another version or more than one car, another
+car than the row's, another track than the event's races (`Races`, when the server has the
+game's database), a lap time more than 0.01 s from the score, records spanning more than
+0.5 s + 0.5% from it, fewer than one car sample a second or more than 60, or two of them more
+than 2 s apart. The game takes a refused upload's failure (status 2) like a success: no
+retry, no message, the results go on. The kept copy has the driver's gamertag cleared and
+its ReplayInit deflated again by Python's zlib: raced as a rival, the game loaded it and drove
+the ghost car with the row's gamertag over it.
 
 ### Car clubs and the club garage (`forza_clubs.py`)
 
