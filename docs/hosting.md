@@ -245,7 +245,8 @@ same one as the status page; 56678 on the public tunnel):
   `carId`, `car`, `classId`, `class` (D to R1) and `date`.
 - `GET /leaderboards/snapshot`: every board with the top 50 of each class, in one document.
 
-No XUIDs are in the output. The player id is a hash with a secret salt kept in the data folder
+Only ranked rows are in the output (below). No XUIDs are in the output. The player id is a
+hash with a secret salt kept in the data folder
 (`leaderboards_salt.txt`; keep it so ids stay the same across restarts). Answers are cached for
 60 s and the server builds at most 120 answers a minute (429 beyond). Replies carry
 `Access-Control-Allow-Origin: *`, like the rest of the HTTP port.
@@ -276,6 +277,41 @@ day (06:23 UTC; run the workflow by hand for a fresh copy sooner), and the websi
 server fails and leaves the published site as it was. Nothing else is needed at deploy but the
 tunnel publishing the HTTP port. To try the page against a local server:
 `leaderboards.html?api=http://127.0.0.1:21201`.
+
+### Which results count (FH1 #517)
+
+The boards (the game's and this JSON) take results only from players signed in to this server:
+a title service call that carries its player's own key (`forza_live_lsp.caller_trusted`). A
+result from any other caller (a game before the friends key, or an XUID nobody signed in with
+here) is kept **unranked**: off the boards, for review, the player's best one per board. So is a
+Rivals time whose ghost fails the checks (`forza_ghost.py`: sizes, chunks, the version, one
+car and the row's, the event's track when the server has the game's database, a lap time and
+records that match the score; the game gets a failure and carries on, and the player's previous
+row stays). A ghost that passes is kept with its driver's gamertag cleared; the refused ones are
+kept in `ghosts/review/` with their unranked rows.
+
+Each new row carries the server's id (`--server-id NAME` or `FORZA_SERVER_ID`; without it an id
+is made at the first start and kept in `server_id.txt`) and the build the game names on its calls
+(`X-Forza-Build: 0.2.0/tu4`, the launcher's version or `git-<commit>`, and the title update;
+empty for games before it), and whether the caller was verified. Rows from before the tags stay
+as they were. The 1000 Club counts medals from signed-in players only, and keeps the same tags
+on each player's row.
+
+`/admin/scores` (operator only, like `/gift`) finds and moves rows by source:
+
+- `GET /admin/scores?<filters>`: the matching rows (at most 500) and how many there are;
+- `POST /admin/scores/unrank?<filters>`: ranked rows off the boards, kept for review with
+  their ghosts;
+- `POST /admin/scores/rank?<filters>`: unranked rows back on their boards, where they are
+  better than the player's row there (a kept ghost too, when it passes the checks);
+- `POST /admin/scores/delete?<filters>`: rows and their ghosts removed.
+
+Filters: `server`, `build` (`none`: the rows from before the tags), `verified` (0 or 1),
+`player` (an XUID in hex), `board` (`3:199:0` or `event-199`), `reason` (part of an unranked
+row's reason), and `state` (`ranked`, `unranked` or `all`, the default). A change needs a
+filter besides `state`, and a browser's cross-origin request (an `Origin` header) is refused.
+To take a bad build off the boards:
+`curl -X POST -H "X-Admin-Token: <token>" "http://host:21201/admin/scores/unrank?build=0.2.1/tu4"`.
 
 ### The map (#316, #324)
 

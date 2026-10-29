@@ -75,12 +75,25 @@ class ServerTest(unittest.TestCase):
 
     def test_admin_endpoints_refuse_proxied_requests(self):
         proxied = {"X-Forwarded-For": "203.0.113.9"}
-        for path in ("/gift?to=x&credits=1", "/notify?to=x", "/world/event?session=all"):
+        for path in ("/gift?to=x&credits=1", "/notify?to=x", "/world/event?session=all",
+                     "/admin/scores?state=all"):
             self.assertEqual(get(self.base + path, proxied), 403, path)
             self.assertEqual(get(self.base + path + "&token=wrong", proxied), 403, path)
             self.assertNotEqual(get(self.base + path + "&token=tok123", proxied), 403, path)
         # from this machine (no proxy header) without a token
         self.assertEqual(get(self.base + "/gift?to=nobody&credits=1"), 404)
+        self.assertEqual(get(self.base + "/admin/scores?build=none"), 200)
+
+    def test_score_changes_refuse_browser_requests(self):
+        def post(path, headers):
+            req = urllib.request.Request(self.base + path, data=b"", method="POST", headers=headers)
+            try:
+                return urllib.request.urlopen(req, timeout=3).status
+            except urllib.error.HTTPError as e:
+                return e.code
+        self.assertEqual(post("/admin/scores/delete?build=x", {"Origin": "https://example.org"}), 403)
+        self.assertEqual(post("/admin/scores/delete?build=x", {}), 200)
+        self.assertEqual(post("/admin/scores/delete", {}), 400)  # no filter
 
     def test_status_page_has_no_addresses(self):
         text = urllib.request.urlopen(self.base + "/status", timeout=3).read().decode()

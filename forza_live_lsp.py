@@ -162,6 +162,9 @@ def add_arguments(parser):
                         help="queue a sample Message Center notification of each kind, a "
                              "credits gift and a car gift for every player who signs in (once "
                              "per server run)")
+    parser.add_argument("--server-id", default=os.environ.get("FORZA_SERVER_ID", ""),
+                        help="the name this server's leaderboard rows are tagged with (default: "
+                             "an id made at the first start, kept in DATA_DIR/server_id.txt)")
     parser.add_argument("--time-trials", action="store_true",
                         help="offer the server's Monthly Rivals time trials "
                              "(forza_scores.TIME_TRIALS; a trial needs a score on its board "
@@ -194,7 +197,8 @@ def configure(args):
         PLAYGROUND_ROUNDS[:] = [by_preset[p] for p in wanted if p in by_preset]
     os.makedirs(DATA_DIR, exist_ok=True)
     limits.configure(DATA_DIR)
-    scores.configure(DATA_DIR)
+    scores.configure(DATA_DIR, args.server_id)
+    log.info("scoreboards: rows are tagged with server id %s", scores.server_id())
     stats.configure(DATA_DIR)
     market.configure(DATA_DIR)
     clubs.configure(DATA_DIR, load_player)
@@ -627,6 +631,15 @@ def verify_caller(server, xuid, headers):
     return TRUSTED if hmac.compare_digest(record["key"], friends.key_hash(key)) else FORGED
 
 
+BUILD_MAX = 64
+
+
+def client_build(headers):
+    """The build the game names (X-Forza-Build: "0.2.0/tu4", forza-recomp live_tcp.cpp); "" for
+    a game before the header. The game's word only: rows keep it so a bad build's can be found."""
+    return scores.clean_id(headers.get("x-forza-build", ""), BUILD_MAX)
+
+
 def changes_state(short, method):
     return not method.startswith(READ_PREFIXES) or (short, method) in STATE_CHANGING
 
@@ -666,12 +679,14 @@ def service_call(headers, body, server=None):
                  len(body))
         return x.reply() + bytes(EMPTY_ANSWER)
     token = _caller.set(state)
+    source = scores.set_source(state == TRUSTED, client_build(headers))  # rows' tags (#517)
     try:
         return fn(xuid, body)
     except ValueError as e:  # parameters that don't parse
         log.warning("title: %s.%s: bad parameters (%s): %s", cls, method, e, body.hex())
         return x.failure(2, "bad parameters")
     finally:
+        scores.reset_source(source)
         _caller.reset(token)
 
 

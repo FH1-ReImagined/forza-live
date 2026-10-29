@@ -35,6 +35,7 @@ import forza_events as events
 import forza_limits as limits
 import forza_live_lsp as lsp
 import forza_proxy as proxy
+import forza_scores as scores
 import forza_stats as stats
 import forza_campaign as campaign
 import forza_coop_ledger as coop_ledger
@@ -1390,7 +1391,7 @@ async def read_proxy_header(server, reader, idle):
 
 def response(status, body, content_type="application/octet-stream", extra=()):
     reason = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
-              500: "Internal Server Error"}
+              405: "Method Not Allowed", 500: "Internal Server Error"}
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
             f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *", *extra]
     return ("\r\n".join(head) + "\r\n\r\n").encode() + body
@@ -1435,6 +1436,14 @@ async def http_handler(server, reader, writer):
                 query = urllib.parse.parse_qs(url.query)
                 if not lsp.is_admin(peer, headers, query):
                     reply = response(403, b"forbidden", "text/plain", conn)
+                elif url.path == "/admin/scores" or url.path.startswith("/admin/scores/"):
+                    # Leaderboard rows by source (forza_scores.admin, #517).
+                    if method == "POST" and "origin" in headers:
+                        reply = response(403, b"use curl, not a cross-origin browser request",
+                                         "text/plain", conn)
+                    else:
+                        status, content_type, data = scores.admin(method, url.path, query)
+                        reply = response(status, data, content_type, conn)
                 elif url.path == "/admin/events" or url.path.startswith("/admin/events/"):
                     try:
                         if "origin" in headers:
