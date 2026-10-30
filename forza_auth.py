@@ -56,7 +56,8 @@ env FORZA_RAW_KEY_CUTOFF); counters of their use are logged and on the status pa
 
 Cost: a check is about 1 ms (forza_ed25519). A proven player's keep-alive HELLOs that change
 nothing are checked once a minute (HELLO_RECHECK), not every 5 s; VERIFY_RATE bounds the whole
-server's checks and HELLO_CHECKS each player's, so floods of bad signatures cannot take the CPU."""
+server's checks and HELLO_CHECKS each player's, so floods of bad signatures cannot take the CPU.
+A HELLO left unchecked by them proves nothing, unless it is such an unchanged keep-alive."""
 
 import collections
 import hashlib
@@ -427,6 +428,12 @@ def hello_block(seed, name, xuid, nonce, signed, when=None, upgrade=None):
     return out + (bytes(upgrade) if upgrade else b"")
 
 
+def proved(peer, same):
+    """A checked HELLO proved the peer's XUID: what it proved, for its keep-alives."""
+    peer.auth_proved, peer.auth_proved_at = same, time.monotonic()
+    return True
+
+
 def hello(store, peer, data, signed, now=None):
     """Whether the HELLO's friends key slot (`data`) proves the peer's XUID. `signed`: the
     HELLO up to and including its features byte. Binds an XUID with no key on record, and
@@ -454,10 +461,13 @@ def hello(store, peer, data, signed, now=None):
         refused("clock", xuid, what, " %+d s" % (when - now))
         return False
     # A keep-alive HELLO (every 5 s) that changes nothing the last checked one proved: the same
-    # HELLO fields, key, name and challenge (so the same address).
+    # HELLO fields (XUID, gamertag...), key, name and challenge (so the same address). It is
+    # checked again every HELLO_RECHECK, and stays proven when the budgets leave no check for
+    # it. Any other HELLO keeps nothing of what the peer proved before: left unchecked (no
+    # budget), it does not prove the peer.
     same = (signed, pub, name, nonce)
-    if getattr(peer, "friends_ok", False) and getattr(peer, "auth_proved", None) == same and \
-            time.monotonic() - getattr(peer, "auth_proved_at", 0.0) < HELLO_RECHECK:
+    unchanged = bool(getattr(peer, "friends_ok", False)) and getattr(peer, "auth_proved", None) == same
+    if unchanged and time.monotonic() - getattr(peer, "auth_proved_at", 0.0) < HELLO_RECHECK:
         COUNTS["hello unchanged"] += 1
         return True
     budget = getattr(peer, "auth_budget", None)
@@ -465,10 +475,10 @@ def hello(store, peer, data, signed, now=None):
         budget = peer.auth_budget = [float(HELLO_CHECKS[1]), time.monotonic()]
     if not spend(budget, HELLO_CHECKS):
         COUNTS["hello checks skipped"] += 1
-        return bool(getattr(peer, "friends_ok", False))  # unchanged
+        return unchanged
     good = checked_signature(pub, hello_text(name, xuid, when, nonce, signed), sig)
     if good is None:
-        return bool(getattr(peer, "friends_ok", False))
+        return unchanged
     if not good:
         refused("signature", xuid, what)
         return False
@@ -476,8 +486,7 @@ def hello(store, peer, data, signed, now=None):
     if have is not None:
         if hmac.compare_digest(have, pub):
             COUNTS["signed hello"] += 1
-            peer.auth_proved, peer.auth_proved_at = same, time.monotonic()
-            return True
+            return proved(peer, same)
         peer.auth_conflict = True
         refused("another installation", xuid, what, " (bound to another public key)")
         return False
@@ -485,20 +494,20 @@ def hello(store, peer, data, signed, now=None):
     if old is None:
         rebind(store, xuid, pub, "registered")
         log.info("auth: %016X bound to its public key (%s)", xuid, name)
-        return True
+        return proved(peer, same)
     if flags & F_UPGRADE:
         if hmac.compare_digest(old, hashlib.sha256(raw).hexdigest()):
             rebind(store, xuid, pub, "upgraded")
             log.info("auth: %016X upgraded from its friends key to its public key (%s); raw keys "
                      "are refused for it from now on", xuid, name)
-            return True
+            return proved(peer, same)
         refused("upgrade", xuid, what, " (not the friends key on record)")
         return False
     if REBIND_LEGACY:
         rebind(store, xuid, pub, "rebound")
         log.info("auth: %016X bound to its public key in place of its friends key (%s, "
                  "--rebind-legacy)", xuid, name)
-        return True
+        return proved(peer, same)
     refused("legacy", xuid, what, " (bound to a friends key; no upgrade)")
     return False
 

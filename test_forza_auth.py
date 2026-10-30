@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import forza_auth as auth
 import forza_ed25519 as ed25519
@@ -24,8 +25,10 @@ import forza_xtsw as x
 
 SEED = bytes(range(32))   # DriverA's signing seed (live_identity.txt signing_seed)
 KEY = bytes(range(16))    # DriverA's friends key (games before signed requests sent it)
+SEED_B = bytes([0xB0] * 32)  # DriverB's signing seed
 XUID = 0x0009000000000001
 OTHER = 0x0009000000000002
+THIRD = 0x0009000000000003
 MAIN = "forza-reimagined.playit.plus"
 TITLE = "/Services.Horizon/o.xtsw"
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
@@ -388,7 +391,8 @@ class UdpSignInTest(Base):
         for _ in range(5):
             block = auth.hello_block(SEED, MAIN, XUID, nonce, self.hello_body())
             self.assertTrue(self.hello(block)[0].friends_ok)
-        self.assertEqual((auth.COUNTS["registered"] + auth.COUNTS["signed hello"], auth.COUNTS["hello unchanged"]), (2, 3))
+        # checked once, when it binds the key: what that proved covers the keep-alives after it
+        self.assertEqual((auth.COUNTS["registered"] + auth.COUNTS["signed hello"], auth.COUNTS["hello unchanged"]), (1, 4))
         # a changed HELLO is checked: a bad signature with another gamertag is refused
         bad = bytearray(auth.hello_block(SEED, MAIN, XUID, nonce, self.hello_body(name=b"Mallory")))
         bad[40] ^= 1
@@ -402,6 +406,197 @@ class UdpSignInTest(Base):
             self.hello(bytes(junk))
         self.assertLessEqual(auth.COUNTS["refused signature"], auth.HELLO_CHECKS[1] + 1)
         self.assertGreater(auth.COUNTS["hello checks skipped"], 20)
+
+
+class TwoDrivers(Base):
+    """DriverB signed in with its own key and enrolled in community events; DriverA proven,
+    and its keep-alive checked."""
+
+    ADDR_A, ADDR_B = ("127.0.0.1", 20001), ("127.0.0.1", 20002)
+    DRIVER_B = dict(xuid=OTHER, token=2, name=b"DriverB")
+
+    def setUp(self):
+        super().setUp()
+        # DriverB: bound to its own key, signed in, enrolled in community events
+        _, (_, _, nonce) = self.hello(b"", self.ADDR_B, **self.DRIVER_B)
+        self.b, _ = self.hello(auth.hello_block(SEED_B, MAIN, OTHER, nonce, self.hello_body(**self.DRIVER_B)),
+                               self.ADDR_B, **self.DRIVER_B)
+        self.assertTrue(self.b.friends_ok)
+        self.server.events.enroll(self.b)
+        # DriverA: proven, and its keep-alive checked (what it proved is on record)
+        self.a, (_, _, self.nonce) = self.sign_in()
+        self.assertTrue(self.keep_alive()[0].friends_ok)
+        self.assertIsNotNone(self.a.auth_proved)
+
+    def keep_alive(self):
+        return self.hello(auth.hello_block(SEED, MAIN, XUID, self.nonce, self.hello_body()), self.ADDR_A)
+
+    def changed(self, xuid=OTHER, name=b"DriverB", seed=SEED, nonce=None, slot=None):
+        """DriverA's game (its address and token) says HELLO as `xuid` with `name`, signed by
+        `seed` for its address's challenge (or `nonce`), or with `slot` as it is."""
+        body = dict(xuid=xuid, token=1, name=name)
+        if slot is None:
+            slot = auth.hello_block(seed, MAIN, xuid, nonce or self.nonce, self.hello_body(**body))
+        return self.hello(slot, self.ADDR_A, **body)
+
+    def assert_unproven(self, peer, welcome, xuid=OTHER):
+        self.assertIs(peer, self.a)  # the same registration, now claiming xuid
+        self.assertEqual(peer.xuid, xuid)
+        self.assertFalse(peer.friends_ok)
+        self.assertIsNone(peer.events_identity)
+        self.assertFalse(welcome[0] & auth.W_PROVEN)
+        self.assertNotIn(peer, self.server.friends.users(xuid))
+        self.assertNotIn(peer, self.server.chat.chatters())
+        self.assertFalse(self.server.events.authenticated(peer))
+        self.assertTrue(self.server.events.authenticated(self.b))  # DriverB's own game
+
+    def refill(self, checks=auth.HELLO_CHECKS[1]):
+        """Full budgets: DriverA's (`checks`) and the server's."""
+        self.a.auth_budget[:] = [float(checks), time.monotonic()]
+        auth._budget[:] = [float(auth.VERIFY_RATE[1]), time.monotonic()]
+
+    def spend_player_budget(self):
+        self.a.auth_budget[:] = [0.0, time.monotonic()]
+        return mock.patch.object(auth, "HELLO_CHECKS", (0.001, auth.HELLO_CHECKS[1]))
+
+    @staticmethod
+    def spend_server_budget():
+        auth._budget[:] = [0.0, time.monotonic()]
+        return mock.patch.object(auth, "VERIFY_RATE", (0.001, auth.VERIFY_RATE[1]))
+
+
+class ChangedHelloTest(TwoDrivers):
+    """A proven game whose HELLO changes (another XUID, another gamertag) keeps nothing it
+    proved unless the changed HELLO is checked and proves itself: not when its player's or the
+    server's budget of signature checks is spent, nor with a bad signature, a stale challenge,
+    no proof or another key. Only the unchanged keep-alive goes unchecked. (Sean O'Connor's
+    review of #12: DriverA's game took DriverB's friends, chat and events with a HELLO for
+    DriverB signed by DriverA's key while the budget was spent.)"""
+
+    def test_a_spent_player_budget_proves_nothing(self):
+        with self.spend_player_budget():
+            peer, welcome = self.changed()
+        self.assertEqual(auth.COUNTS["hello checks skipped"], 1)
+        self.assert_unproven(peer, welcome)
+
+    def test_a_spent_server_budget_proves_nothing(self):
+        with self.spend_server_budget():
+            peer, welcome = self.changed()
+        self.assertEqual(auth.COUNTS["checks over budget"], 1)
+        self.assert_unproven(peer, welcome)
+
+    def test_a_spent_budget_binds_no_new_xuid(self):
+        """An XUID with no key on record is neither bound nor proven by a HELLO left unchecked."""
+        for spend in (self.spend_player_budget, self.spend_server_budget):
+            with self.subTest(spend.__name__):
+                self.assertTrue(self.keep_alive()[0].friends_ok)
+                with spend():
+                    peer, welcome = self.changed(xuid=THIRD, name=b"DriverC")
+                self.assert_unproven(peer, welcome, THIRD)
+                self.assertFalse(auth.bound(self.store, THIRD))
+                self.refill()
+
+    def test_a_changed_gamertag_needs_its_check(self):
+        for spend in (self.spend_player_budget, self.spend_server_budget):
+            with self.subTest(spend.__name__):
+                self.assertTrue(self.keep_alive()[0].friends_ok)
+                with spend():
+                    peer, welcome = self.changed(xuid=XUID, name=b"Mallory")
+                self.assert_unproven(peer, welcome, XUID)
+                self.refill()
+
+    def test_other_unproven_changes_prove_nothing(self):
+        bad = bytearray(auth.hello_block(SEED, MAIN, OTHER, self.nonce, self.hello_body(xuid=OTHER, name=b"DriverB")))
+        bad[40] ^= 1
+        cases = {"bad signature": dict(slot=bytes(bad)),
+                 "stale challenge": dict(nonce=os.urandom(16)),
+                 "no proof": dict(slot=b""),
+                 "a raw key": dict(slot=KEY),
+                 "DriverA's key, checked": dict()}
+        for why, kw in cases.items():
+            with self.subTest(why):
+                self.refill()
+                self.assertTrue(self.keep_alive()[0].friends_ok)
+                self.assert_unproven(*self.changed(**kw))
+
+    def test_a_restored_peer_proves_its_new_challenge(self):
+        """After a restart a restored peer is proven until its next HELLO, whose challenge is
+        stale (the new server's is new, and so is its address after a NAT change): left
+        unchecked, it proves nothing; checked with the new challenge, it is proven again."""
+        self.server.state_path = os.path.join(self.tmp.name, srv.STATE_FILE)
+        self.assertTrue(self.server.save_state())
+        players = self.store.players
+        self.server = srv.ForzaLive("test", 64)
+        self.server.transport = SimpleNamespace(sendto=lambda data, addr: self.sent.append((addr, data)))
+        self.server.friends.store.players = players
+        self.store = self.server.friends.store
+        self.server.state_path = os.path.join(self.tmp.name, srv.STATE_FILE)
+        self.assertEqual(self.server.load_state(), 2)
+        moved = ("127.0.0.1", 20011)
+        stale = auth.hello_block(SEED, MAIN, XUID, self.nonce, self.hello_body())
+        with self.spend_server_budget():
+            peer, (flags, _, nonce) = self.hello(stale, moved)
+        self.assertEqual(peer.id, self.a.id)  # rebound to its new address
+        self.assertFalse(peer.friends_ok)
+        self.assertFalse(flags & auth.W_PROVEN)
+        self.assertNotEqual(nonce, self.nonce)
+        auth._budget[:] = [float(auth.VERIFY_RATE[1]), time.monotonic()]
+        peer, _ = self.hello(auth.hello_block(SEED, MAIN, XUID, nonce, self.hello_body()), moved)
+        self.assertTrue(peer.friends_ok)
+
+    def test_the_new_xuid_is_never_seen_proven(self):
+        """The HELLO's XUID replaces the old one only once nothing the old one proved is left:
+        not even while the new HELLO is being checked."""
+        seen, real = [], auth.hello
+
+        def spy(store, peer, *args, **kw):
+            seen.append((peer.xuid, peer.friends_ok, peer.events_identity))
+            return real(store, peer, *args, **kw)
+        with mock.patch.object(auth, "hello", spy):
+            self.changed()
+            self.keep_alive()
+        self.assertEqual(seen, [(OTHER, False, None), (XUID, False, None)])
+        self.assertTrue(self.a.friends_ok)
+
+    # --- what still works ---
+
+    def test_a_changed_hello_that_proves_itself(self):
+        peer, welcome = self.changed(xuid=XUID, name=b"DriverA2")  # a new gamertag
+        self.assertTrue(peer.friends_ok)
+        self.assertTrue(welcome[0] & auth.W_PROVEN)
+        # another profile of the same installation: bound to the same key on first use
+        peer, welcome = self.changed(xuid=THIRD, name=b"DriverC")
+        self.assertTrue(peer.friends_ok)
+        self.assertEqual(peer.events_identity[0], THIRD)
+        self.assertEqual(self.store.get(THIRD)["pub"], VECTOR_PUB)
+        self.assertIn(peer, self.server.friends.users(THIRD))
+        self.assertTrue(self.keep_alive()[0].friends_ok)  # and back
+        self.assertEqual(self.a.xuid, XUID)
+
+    def test_unchanged_keep_alives_need_no_budget(self):
+        with self.spend_player_budget(), self.spend_server_budget(), \
+                mock.patch.object(ed25519, "verify", side_effect=AssertionError("checked")):
+            self.assertTrue(self.keep_alive()[0].friends_ok)  # within HELLO_RECHECK
+            self.a.auth_proved_at -= auth.HELLO_RECHECK + 1  # a recheck is due: no budget for it
+            peer, welcome = self.keep_alive()
+            self.assertTrue(peer.friends_ok)
+            self.assertTrue(welcome[0] & auth.W_PROVEN)
+            self.server.events.enroll(peer)
+            self.assertTrue(self.server.events.authenticated(peer))
+        self.assertEqual(auth.COUNTS["hello checks skipped"], 1)
+
+    def test_spent_budgets_still_skip_the_checks(self):
+        with mock.patch.object(ed25519, "verify", wraps=ed25519.verify) as verify:
+            with self.spend_player_budget():
+                for i in range(10):
+                    self.assertFalse(self.changed(name=b"DriverB%d" % i)[0].friends_ok)
+            self.assertEqual((verify.call_count, auth.COUNTS["hello checks skipped"]), (0, 10))
+            self.refill()
+            with self.spend_server_budget():
+                self.assertFalse(self.changed()[0].friends_ok)
+            self.assertEqual((verify.call_count, auth.COUNTS["checks over budget"]), (0, 1))
+        self.refill()
+        self.assertTrue(self.keep_alive()[0].friends_ok)  # checked again once there is budget
 
 
 class UpgradeTest(Base):

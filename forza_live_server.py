@@ -527,9 +527,13 @@ class ForzaLive(asyncio.DatagramProtocol):
         if ((peer.name, peer.xuid, peer.room, peer.local, peer.features) !=
                 (name, xuid, room, (local_ip, local_port), features)):
             self.state_dirty = True
+        was_ok = peer.friends_ok
+        if (peer.xuid, peer.name) != (xuid, name):
+            # What the peer proved (friends, chat, events) was for the XUID and gamertag it had:
+            # nothing of it is left before it takes others, which this HELLO proves or not.
+            peer.friends_ok, peer.events_identity, peer.auth_proved = False, None, None
         peer.name, peer.xuid, peer.room, peer.local = name, xuid, room, (local_ip, local_port)
         peer.features = features
-        was_ok = peer.friends_ok
         self.friends.hello(peer, friend_key, signed)
         peer.events_identity = (peer.xuid, self.events.credential(peer)) if peer.friends_ok else None
         if peer.friends_ok != was_ok:
