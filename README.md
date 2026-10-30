@@ -50,6 +50,33 @@ tunnels (playit.gg), the operator endpoints, the leaderboards and the data folde
 | `tools/server_probe.py` | checks a server from outside (status page, UDP HELLO -> WELCOME) |
 | `tools/xtsw_decode.py` | decodes the requests a server saved with `--dump-requests` |
 
+## Plugins
+
+Trusted Python plugins are loaded from [`plugins/`](plugins/) when the server starts. To install a
+plugin, copy its `.py` file into that directory (or pass `--plugins-dir PATH`) and restart the
+server. A plugin has unrestricted access to the server process, so only install code you trust.
+A broken plugin is logged and skipped without stopping the server.
+
+Each plugin must define `register(server)`. During registration it can add lifecycle hooks and
+exact HTTP routes through `server.plugins`:
+
+```python
+import json
+
+
+def register(server):
+    server.plugins.on_start(lambda server: print("example plugin started"))
+
+    def status(server, url, headers, body, peer):
+        return 200, "application/json", json.dumps({"ok": True}).encode()
+
+    server.plugins.route("GET", "/plugins/example", status)
+```
+
+Route handlers receive `(server, url, headers, body, peer)`, where `url` is the parsed request URL (including query parameters), and return
+`(status_code, content_type, bytes)`. Hooks registered with `on_start` run once after all
+plugins load; hooks registered with `on_tick` run once per second. A plugin may use synchronous
+or `async` route and lifecycle handlers.
 ## Tests
 
     python3 -m unittest discover -p 'test_*.py'
@@ -90,3 +117,5 @@ General Public License, version 3 or later.
 Forza Horizon is (c) Microsoft. This project is not affiliated with, endorsed by
 or sponsored by Microsoft, Playground Games or Turn 10 Studios, and the server talks to none of
 their services.
+
+
