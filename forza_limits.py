@@ -16,7 +16,7 @@ MAX_BLOB = 2 << 20
 DISK_CAP = int(os.environ.get("FORZA_DISK_CAP_MB", "4096")) << 20
 MAX_PLAYERS = int(os.environ.get("FORZA_MAX_PLAYERS", "20000"))  # player records on disk
 PER_PLAYER = {"auctions": 30, "shared_cars": 100, "gifts": 50}  # open items per player
-BLOB_DIRS = ("ghosts", "market", "clubs", "photos", "designs")
+BLOB_DIRS = ("ghosts", "market", "clubs", "photos", "designs", "community")
 
 _data_dir = "forza_live_data"
 _cache = [0.0, 0]  # time of the last scan, bytes found
@@ -45,8 +45,8 @@ def usage():
     return _cache[1] + _added[0]
 
 
-def accept(nbytes):
-    if nbytes > MAX_BLOB:
+def accept(nbytes, limit=MAX_BLOB):
+    if nbytes > limit:
         raise ValueError("upload of %d bytes refused" % nbytes)
     if usage() + nbytes > DISK_CAP:
         raise ValueError("server disk quota reached")

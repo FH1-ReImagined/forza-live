@@ -126,6 +126,8 @@ starts with a header). And never leave an option on once its tunnel's setting is
 
 ## Operator endpoints
 
+(Community photos' moderation has stricter rules: [below](#community-photos).)
+
 `GET /gift?to=<gamertag|XUID>&credits=<n>[&message=..]` or `&car=<id>`,
 `GET /notify?to=..&type=..`, and `GET /world/event?session=all|<id>[&event=<id>]` are
 operator-only. They are answered for requests from the server's own machine (loopback, not
@@ -160,7 +162,8 @@ that was requested but not taken.
   (they stay open while idle: the game needs that);
 - per player: relay budget 256 KB/s (`--rate-limit`), 30 open auctions, 50 unretrieved
   gifts, 100 shared cars, 4 game invites per 30 s (the rest are dropped and logged);
-  one upload at most 2 MB, HTTP bodies at most 8 MB;
+  one upload at most 2 MB (a signed game's photo mode big shot: 32 MiB, in 256 KiB requests),
+  HTTP bodies at most 8 MB;
 - whole server: ghosts, cars and market blobs at most `FORZA_DISK_CAP_MB` (default 4096) MB,
   at most `FORZA_MAX_PLAYERS` (20000) player records;
 - the status page lists gamertags and XUIDs but no IP addresses.
@@ -331,6 +334,61 @@ are checked on load). Nothing else is needed at deploy: the module ships with th
 `*.py` files (the Dockerfile copies them), and a tunnel must publish the HTTP port as for
 the other title services (the launcher reaches it at the server's UDP port plus one, 56678 for
 the public server).
+
+## Community photos
+
+Photo mode's BIG SHOT ("upload it to ForzaMotorsport.net") becomes a community photo on the
+website when the game signs its requests ([signed requests](#signed-requests-515)): the server
+publishes a 1920x1080 PNG it makes from the 3840x2160 BMP the game sends, credited by gamertag,
+with no XUID anywhere in the public output. Details, limits and the feed format:
+[title services](title_services.md#community-photos-forza_communitypy). Nothing to set up: the
+routes are on the HTTP port with the rest.
+
+- Public: `GET /community/gallery.json` (live photos, newest first, at most 500) and
+  `GET /community/img/<id>.png`. The website's `pages` workflow (its `tools/build_gallery.py`,
+  `GALLERY_FEED_URL=http://forza-reimagined.playit.plus:56678`) copies them, re-encoded, into the
+  site; a photo hidden or deleted here leaves the site at its next build.
+- Published at once, unless `FORZA_COMMUNITY_HOLD=1` (new photos wait as `held` for a screening
+  worker or the operator to release them). `FORZA_COMMUNITY_MAX_WIDTH` (default 1920) is the
+  width a big shot's copy is halved down to. Caps: 10 photos a day and 200 in all per player, 60
+  an hour on the server, 60 big shot uploads started an hour; copies count in
+  `FORZA_DISK_CAP_MB`. Converting a big shot takes the server about 0.2 s.
+- Big shots are not kept as private files (only the published copy), and the game sends no
+  removal: a player who wants a photo gone asks the operator.
+- Games built from game main up to 3896de8 capture the big shot's tiles wrongly with the default
+  `--readback_resolve=some` (nine copies of the loading screen); the server sees that and
+  publishes nothing. `--readback_resolve=full` in the game gives the real photo.
+
+Moderation is for the operator only, from the LAN or an ssh tunnel: the routes refuse anything
+that came through the tunnel or a reverse proxy, even with the token, because the token would
+cross the internet in plain HTTP. That is every request from a `--trusted-proxy` address and
+every request with `X-Forwarded-For`, `X-Real-IP` or `Forwarded`. On a server set up as above
+(127.0.0.1 and the host's LAN IP are trusted proxies) that includes the host itself and `docker
+exec`: moderate from another machine on the LAN, or through an ssh tunnel that ends at an address
+that is not a trusted proxy. The routes take `FORZA_ADMIN_TOKEN` only in the `X-Admin-Token`
+header (never `?token=`; this machine's loopback, when it is not a trusted proxy, needs none, as
+for the other operator endpoints), and refuse any request with an `Origin` header (a web page
+cannot drive them). With `T='X-Admin-Token: <token>'` and `S=http://192.168.1.x:21201`:
+
+```
+curl -H "$T" $S/admin/photos                    # every photo: id, owner XUID, gamertag, title,
+                                                # status, banned, public, sizes, sha256
+curl -H "$T" "$S/admin/photos?status=hidden"     # live, held or hidden only
+curl -H "$T" $S/admin/photos/img/<id>.png -o p.png   # look at one, whatever its status
+curl -H "$T" -X POST $S/admin/photos/<id>/hide   # out of the feed and the image route
+curl -H "$T" -X POST $S/admin/photos/<id>/unhide
+curl -H "$T" -X POST $S/admin/photos/<id>/delete # gone (the same picture is not published again)
+curl -H "$T" -X POST $S/admin/photos/<id>/ban    # bans the photo's owner
+curl -H "$T" -X POST $S/admin/photos/ban/<XUID>  # or by XUID; unban/<XUID> lifts it
+```
+
+A ban goes into `banned_xuids.json` in the data folder (the list the design storefront uses
+too, a JSON list of hex XUIDs that can also be edited by hand): the player's new uploads are not
+published and their photos are served to nobody until the ban is lifted. For a screening worker
+(a separate container on the LAN with the token): `GET /admin/photos/queue` lists the held
+photos, oldest first; `POST /admin/photos/<id>/hold` takes a live photo back to the queue,
+`POST .../release` publishes a held one (a photo the operator hid cannot be released, 409), and
+both take an optional `{"note": "..."}` kept for the operator.
 
 ## Signed requests (#515)
 

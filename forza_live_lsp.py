@@ -23,6 +23,8 @@ services). This answers the ones online play needs:
                                photo uploads and their downloads (forza_photos.py)
     Forza.WebServices.StorefrontLivery, StorefrontLayerGroup, Storefront (designs)
                                the design storefront: paint jobs and vinyl groups (forza_designs.py)
+    GET /community/..., /admin/photos  community photos: signed photo mode uploads published
+                               for the website's gallery (forza_community.py)
     Xls.WebServices.Notifications  the Message Center (forza_notifications.py): Rivals,
                                gifts, auctions and car club messages
 
@@ -46,6 +48,7 @@ import urllib.parse
 import forza_auth as auth
 import forza_campaign as campaign
 import forza_clubs as clubs
+import forza_community as community
 import forza_coop_ledger as coop_ledger
 import forza_designs as designs
 import forza_friends as friends
@@ -205,7 +208,9 @@ def configure(args):
     market.configure(DATA_DIR)
     clubs.configure(DATA_DIR, load_player)
     notifications.configure(DATA_DIR)
-    photos.configure(DATA_DIR)
+    community.configure(DATA_DIR, gamertag=lambda xuid: load_player(xuid).get("gamertag", ""))
+    photos.configure(DATA_DIR, proven=caller_signed, finished=community.photo_uploaded,
+                     removed=community.photo_removed)
     designs.configure(DATA_DIR, proven=caller_signed, trusted=caller_trusted)
     shader_lists.configure(DATA_DIR)
     leaderboards.configure(DATA_DIR)
@@ -715,6 +720,20 @@ def is_admin(peer, headers, query):
             and not limits.is_trusted_proxy(peer[0]))
 
 
+def came_through_proxy(peer, headers):
+    """The request came through the tunnel agent (--trusted-proxy) or a reverse proxy."""
+    return ("x-forwarded-for" in headers or "x-real-ip" in headers or "forwarded" in headers
+            or bool(peer) and limits.is_trusted_proxy(peer[0]))
+
+
+def is_local_admin(peer, headers):
+    """is_admin for the operator endpoints that must never be used from the internet (community
+    photos' moderation, forza_community.py): the token only in its header (a query string ends
+    up in logs and browser history), and nothing that came through the tunnel or a proxy (the
+    token would cross it in plain text). From the LAN, an ssh tunnel or this machine."""
+    return not came_through_proxy(peer, headers) and is_admin(peer, headers, {})
+
+
 def find_player(who):
     """A player's XUID from a gamertag or a hex XUID (players who signed in here)."""
     folder = os.path.join(DATA_DIR, "players")
@@ -773,7 +792,8 @@ def gift_request(query):
 
 
 def handle(server, method, path, headers, body, peer):
-    """Returns (HTTP status, content type, body bytes)."""
+    """Returns (HTTP status, content type, body bytes), or with a fourth item: extra header
+    lines."""
     if DUMP:
         dump(method, path, headers, body)
     url = urllib.parse.urlsplit(path)
@@ -794,6 +814,9 @@ def handle(server, method, path, headers, body, peer):
         answer = leaderboards.handle(method, path)
         if answer is not None:
             return answer
+    if community.handles(url.path):  # community photos (forza_community.py)
+        return community.handle(method, path, headers, body,
+                                lambda: is_local_admin(peer, headers))
     if url.path in ("/notify", "/gift"):
         query = urllib.parse.parse_qs(url.query)
         if not is_admin(peer, headers, query):
