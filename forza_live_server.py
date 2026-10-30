@@ -24,6 +24,7 @@ import random
 import signal
 import sqlite3
 import struct
+import sys
 import time
 import urllib.parse
 
@@ -127,6 +128,33 @@ PROXY_FLOWS_MAX = 16384
 # How a socket's first datagram began: with the agent's header alone (agents from 0.16),
 # with a header in front of the payload (up to 0.15.26: every datagram has one), or with none.
 FLOW_HEADER, FLOW_PREFIXED, FLOW_PLAIN = "header", "prefixed", "plain"
+# Windows answers a datagram sent to a port nobody listens on any more (a game that quit) with an
+# ICMP port unreachable, and the UDP socket's next receive fails with WSAECONNRESET. When that is
+# the receive asyncio's proactor loop posts next, the loop stops reading the socket for good
+# (proactor_events._ProactorDatagramTransport._loop_reading only reports the error): the server
+# would hear no game until it restarts. SIO_UDP_CONNRESET off: such ICMP messages are dropped,
+# as Linux does for an unconnected socket.
+SIO_UDP_CONNRESET = 0x9800000C  # _WSAIOW(IOC_VENDOR, 12)
+
+
+def ignore_port_unreachable(sock):
+    """SIO_UDP_CONNRESET off for a UDP socket on Windows (nothing to do elsewhere). False when
+    it could not be done."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ioctl = ctypes.WinDLL("ws2_32").WSAIoctl
+        ioctl.argtypes = (ctypes.c_size_t, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                          ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                          ctypes.c_void_p, ctypes.c_void_p)
+        ioctl.restype = ctypes.c_int
+        off, returned = wintypes.BOOL(False), wintypes.DWORD()
+        return ioctl(sock.fileno(), SIO_UDP_CONNRESET, ctypes.byref(off), ctypes.sizeof(off),
+                     None, 0, ctypes.byref(returned), None, None) == 0
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def take(buckets, key, limit, cost=1.0):
@@ -1580,6 +1608,9 @@ async def main():
     loop = asyncio.get_running_loop()
     transport, server = await loop.create_datagram_endpoint(
         lambda: ForzaLive(args.motd, args.max_peers), local_addr=(args.host, args.port))
+    if not ignore_port_unreachable(transport.get_extra_info("socket")):
+        log.warning("cannot turn off SIO_UDP_CONNRESET: a datagram to a game that quit may stop "
+                    "this server's UDP port until it restarts")
     server.proxy_udp, server.proxy_tcp = args.proxy_protocol_udp, args.proxy_protocol_tcp
     for on, what in ((server.proxy_udp, "UDP"), (server.proxy_tcp, "TCP")):
         if on:
