@@ -35,6 +35,7 @@ import forza_events as events
 import forza_limits as limits
 import forza_live_lsp as lsp
 import forza_proxy as proxy
+import forza_plugins as plugins
 import forza_stats as stats
 import forza_campaign as campaign
 import forza_coop_ledger as coop_ledger
@@ -196,7 +197,8 @@ def u32_to_ip(v):
 
 
 class ForzaLive(asyncio.DatagramProtocol):
-    def __init__(self, motd, max_peers):
+    def __init__(self, motd, max_peers, plugins_dir):
+        self.plugins = plugins.PluginManager(plugins_dir)
         self.motd = motd.encode()[:MAX_MOTD]
         self.packet_buckets = {}  # ip -> token bucket of datagrams accepted
         self.hello_buckets = {}
@@ -1318,7 +1320,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                    if proxy_on else {}),
                 "relayed_packets": self.relayed_packets,
                 "dropped_packets": self.dropped_packets, "rooms": rooms, "worlds": worlds,
-                **self.challenges.status(), **self.friends.status(),
+                "plugins": self.plugins.status(), **self.challenges.status(), **self.friends.status(),
                 "chat": {"with_chat": len(self.chat.chatters()), "kept": len(self.chat.ring)}}
 
 
@@ -1486,12 +1488,17 @@ async def http_handler(server, reader, writer):
                 reply = response(200, json.dumps(result, indent=2).encode(), "application/json",
                                  conn)
             else:
-                try:
-                    status, content_type, data = lsp.handle(server, method, path, headers, body,
-                                                            peer)
-                except Exception:  # a bad request must not take the server down
-                    log.exception("LSP %s %s failed", method, path)
-                    status, content_type, data = 500, "text/plain", b"error"
+                plugin_reply = await server.plugins.dispatch_http(
+                    server, method, path, headers, body, peer)
+                if plugin_reply is None:
+                    try:
+                        status, content_type, data = lsp.handle(server, method, path, headers, body,
+                                                                peer)
+                    except Exception:  # a bad request must not take the server down
+                        log.exception("LSP %s %s failed", method, path)
+                        status, content_type, data = 500, "text/plain", b"error"
+                else:
+                    status, content_type, data = plugin_reply
                 log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, path, status,
                          len(data))
                 reply = response(status, data, content_type, conn)
@@ -1518,6 +1525,8 @@ async def main():
                         help="TCP port for the game's title servers (LSP) and a JSON status "
                              "page (default: off)")
     parser.add_argument("--motd", default="Welcome to Forza Live", help="message sent to clients")
+    parser.add_argument("--plugins-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins"),
+                        help="directory containing trusted Python plugins (default: plugins)")
     parser.add_argument("--max-peers", type=int, default=1024)
     parser.add_argument("--event-unlocks", action="store_true",
                         help="require TU4 event-unlock clients; enrolled event rewards permit unicorns online")
@@ -1570,7 +1579,7 @@ async def main():
 
     loop = asyncio.get_running_loop()
     transport, server = await loop.create_datagram_endpoint(
-        lambda: ForzaLive(args.motd, args.max_peers), local_addr=(args.host, args.port))
+        lambda: ForzaLive(args.motd, args.max_peers, args.plugins_dir), local_addr=(args.host, args.port))
     server.proxy_udp, server.proxy_tcp = args.proxy_protocol_udp, args.proxy_protocol_tcp
     for on, what in ((server.proxy_udp, "UDP"), (server.proxy_tcp, "TCP")):
         if on:
@@ -1586,6 +1595,8 @@ async def main():
     server.events = events.Events(server, os.path.join(args.data_dir, "events.sqlite3"), args.event_unlocks)
     server.chat.path = os.path.join(args.data_dir, chat.FILE)
     server.chat.load()
+    server.plugins.load(server)
+    await server.plugins.start(server)
     log.info("Forza Live listening on UDP %s:%d (epoch %04X)", args.host, args.port, server.epoch)
     if args.http_port:
         server.http_port = args.http_port
@@ -1600,6 +1611,7 @@ async def main():
             await asyncio.sleep(1)
             ticks += 1
             server.challenges.tick()
+            await server.plugins.tick(server)
             if ticks % 2 == 0:
                 server.world_tick()
                 stats.settle()
@@ -1634,3 +1646,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
+
+
