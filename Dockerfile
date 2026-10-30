@@ -4,6 +4,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 COPY *.py *.xml ./
+COPY LICENSE NOTICE.md ./
 EXPOSE 21200/udp 21201/tcp
 VOLUME /data
 ENTRYPOINT ["python3", "forza_live_server.py", "--port", "21200", "--http-port", "21201", "--data-dir", "/data"]
