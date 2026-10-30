@@ -24,9 +24,11 @@ import random
 import signal
 import sqlite3
 import struct
+import sys
 import time
 import urllib.parse
 
+import forza_auth as auth
 import forza_challenge as challenge
 import forza_chat as chat
 import forza_discord_status as discord_status
@@ -56,8 +58,9 @@ INVITE_LIMIT, INVITE_WINDOW = 4, 30.0
 # (#90). Invites from or to a game without it are dropped.
 FEATURE_INVITE_PICK = 0x01
 # FEATURE_FRIENDS: the game shows the server's friends list (FRIEND messages,
-# forza_friends.py, #92) instead of everyone in the room; its friends key follows the
-# features byte (u8 length + bytes).
+# forza_friends.py, #92) instead of everyone in the room; its signed auth block (or, from games
+# before signed requests, its friends key) follows the features byte (u8 length + bytes;
+# forza_auth.py, which also adds the server's time and a challenge to the WELCOME).
 FEATURE_FRIENDS = friends.FEATURE
 FRIEND = friends.KIND  # 22
 # FEATURE_CHAT: the game has text chat (CHAT messages, forza_chat.py, #92).
@@ -125,6 +128,33 @@ PROXY_FLOWS_MAX = 16384
 # How a socket's first datagram began: with the agent's header alone (agents from 0.16),
 # with a header in front of the payload (up to 0.15.26: every datagram has one), or with none.
 FLOW_HEADER, FLOW_PREFIXED, FLOW_PLAIN = "header", "prefixed", "plain"
+# Windows answers a datagram sent to a port nobody listens on any more (a game that quit) with an
+# ICMP port unreachable, and the UDP socket's next receive fails with WSAECONNRESET. When that is
+# the receive asyncio's proactor loop posts next, the loop stops reading the socket for good
+# (proactor_events._ProactorDatagramTransport._loop_reading only reports the error): the server
+# would hear no game until it restarts. SIO_UDP_CONNRESET off: such ICMP messages are dropped,
+# as Linux does for an unconnected socket.
+SIO_UDP_CONNRESET = 0x9800000C  # _WSAIOW(IOC_VENDOR, 12)
+
+
+def ignore_port_unreachable(sock):
+    """SIO_UDP_CONNRESET off for a UDP socket on Windows (nothing to do elsewhere). False when
+    it could not be done."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ioctl = ctypes.WinDLL("ws2_32").WSAIoctl
+        ioctl.argtypes = (ctypes.c_size_t, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                          ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                          ctypes.c_void_p, ctypes.c_void_p)
+        ioctl.restype = ctypes.c_int
+        off, returned = wintypes.BOOL(False), wintypes.DWORD()
+        return ioctl(sock.fileno(), SIO_UDP_CONNRESET, ctypes.byref(off), ctypes.sizeof(off),
+                     None, 0, ctypes.byref(returned), None, None) == 0
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def take(buckets, key, limit, cost=1.0):
@@ -461,7 +491,8 @@ class ForzaLive(asyncio.DatagramProtocol):
         name = limits.clean_gamertag(body[pos + 1:pos + 1 + name_len].decode("utf-8", "replace"), xuid)
         pos += 1 + name_len
         features = body[pos] if pos < len(body) else 0
-        friend_key = b""  # after the features byte: u8 length + the friends key
+        signed = body[:pos + 1]  # what a HELLO's signature covers (forza_auth.py)
+        friend_key = b""  # after the features byte: u8 length + an auth block or the friends key
         if pos + 1 < len(body):
             friend_key = body[pos + 2:pos + 2 + body[pos + 1]]
         if version != VERSION:
@@ -524,10 +555,14 @@ class ForzaLive(asyncio.DatagramProtocol):
         if ((peer.name, peer.xuid, peer.room, peer.local, peer.features) !=
                 (name, xuid, room, (local_ip, local_port), features)):
             self.state_dirty = True
+        was_ok = peer.friends_ok
+        if (peer.xuid, peer.name) != (xuid, name):
+            # What the peer proved (friends, chat, events) was for the XUID and gamertag it had:
+            # nothing of it is left before it takes others, which this HELLO proves or not.
+            peer.friends_ok, peer.events_identity, peer.auth_proved = False, None, None
         peer.name, peer.xuid, peer.room, peer.local = name, xuid, room, (local_ip, local_port)
         peer.features = features
-        was_ok = peer.friends_ok
-        self.friends.hello(peer, friend_key)
+        self.friends.hello(peer, friend_key, signed)
         peer.events_identity = (peer.xuid, self.events.credential(peer)) if peer.friends_ok else None
         if peer.friends_ok != was_ok:
             self.state_dirty = True
@@ -542,6 +577,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         welcome = body + self.motd + struct.pack(">H", http_port)
         if peer.features & events.FEATURE:
             welcome += bytes([self.events.required])
+        welcome += auth.welcome(self.friends.store, peer)  # last: signed requests (forza_auth.py)
         self.send(addr, WELCOME, welcome)
         self.events.hello(peer)
 
@@ -1318,7 +1354,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                    if proxy_on else {}),
                 "relayed_packets": self.relayed_packets,
                 "dropped_packets": self.dropped_packets, "rooms": rooms, "worlds": worlds,
-                **self.challenges.status(), **self.friends.status(),
+                **self.challenges.status(), **self.friends.status(), **auth.status(),
                 "chat": {"with_chat": len(self.chat.chatters()), "kept": len(self.chat.ring)}}
 
 
@@ -1392,7 +1428,8 @@ def response(status, body, content_type="application/octet-stream", extra=()):
     reason = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
               500: "Internal Server Error"}
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
-            f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *", *extra]
+            f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *",
+            f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (forza_auth.py)
     return ("\r\n".join(head) + "\r\n\r\n").encode() + body
 
 
@@ -1571,6 +1608,9 @@ async def main():
     loop = asyncio.get_running_loop()
     transport, server = await loop.create_datagram_endpoint(
         lambda: ForzaLive(args.motd, args.max_peers), local_addr=(args.host, args.port))
+    if not ignore_port_unreachable(transport.get_extra_info("socket")):
+        log.warning("cannot turn off SIO_UDP_CONNRESET: a datagram to a game that quit may stop "
+                    "this server's UDP port until it restarts")
     server.proxy_udp, server.proxy_tcp = args.proxy_protocol_udp, args.proxy_protocol_tcp
     for on, what in ((server.proxy_udp, "UDP"), (server.proxy_tcp, "TCP")):
         if on:

@@ -11,6 +11,7 @@ import struct
 import time
 import uuid
 
+import forza_auth as auth
 import forza_market as market
 import forza_notifications as notifications
 
@@ -40,6 +41,9 @@ def hx(xuid):
 class Events:
     def __init__(self, server, path=None, required=False, clock=time.time):
         self.server, self.required, self.clock = server, required, clock
+        rebinds = server.friends.store.on_rebind  # one Events per server
+        rebinds[:] = [f for f in rebinds if not isinstance(getattr(f, "__self__", None), Events)]
+        rebinds.append(self.rebind)
         self.db = sqlite3.connect(path or ":memory:")
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
@@ -75,7 +79,15 @@ class Events:
 
     def credential(self, peer):
         row = self.server.friends.store.get(peer.xuid)
-        return row.get("key", "") if row and peer.friends_ok else ""
+        return auth.binding(row) if row and peer.friends_ok else ""
+
+    def rebind(self, xuid, old, new):
+        """The player's binding moved to its public key (forza_auth.rebind): its enrollment,
+        attendance and grants follow."""
+        with self.db:
+            for table in ("identities", "attendance", "grants"):
+                self.db.execute("UPDATE %s SET credential=? WHERE xuid=? AND credential=?" % table,
+                                (new, hx(xuid), old))
 
     def authenticated(self, peer):
         row = self.db.execute("SELECT credential FROM identities WHERE xuid=?", (hx(peer.xuid),)).fetchone()

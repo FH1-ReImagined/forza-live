@@ -9,10 +9,10 @@ code, and every field is checked against the list format (tools/pipeline_list.py
 microcode cannot hide in an upload.
 
     POST /shader-lists/upload     JSON {"version": "fbo:20260228/20261018", "pipelines": [...],
-                                  "shaders": {hash: recipe}}; headers X-Xuid (16 hex) and
-                                  X-Friends-Key (32 hex): the player's XUID and the friends key
-                                  of its live_identity.txt (forza_friends.py), which the XUID
-                                  has been bound to by a HELLO. Answers {"accepted": n}.
+                                  "shaders": {hash: recipe}}; signed with the friends key of
+                                  the player's live_identity.txt (X-Forza-Auth, forza_auth.py),
+                                  which the XUID has been bound to by a HELLO. Answers
+                                  {"accepted": n}.
     GET  /shader-lists?version=V  the merged list of that storage version (list format 2): the
                                   entries MIN_PLAYERS players reported, plus the seed list
                                   DATA_DIR/shader_lists_seed.json when the operator provides one.
@@ -24,7 +24,6 @@ Everything is in DATA_DIR/shader_lists.json (atomic writes).
 """
 
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -33,7 +32,7 @@ import threading
 import time
 import urllib.parse
 
-import forza_friends as friends
+import forza_auth as auth
 import forza_durable as durable
 
 log = logging.getLogger("forza-live")
@@ -116,19 +115,21 @@ def player_id(xuid):
     return hashlib.sha256(b"shader-lists|%016X" % xuid).hexdigest()[:16]
 
 
-def authenticate(store, headers):
-    """The XUID of the player that sent X-Xuid and X-Friends-Key, or None. Same proof as the
-    friends list: the friends key must be the one the XUID was bound to (forza_friends.Store.claim,
-    at a HELLO). An XUID that never joined the server is refused, so uploads come from players."""
+def authenticate(store, headers, method="POST", path="/shader-lists/upload", body=b""):
+    """The XUID of the player that signed the request (X-Forza-Auth, forza_auth.py), or None.
+    Same proof as the friends list: the signature is that of the key the XUID was bound to
+    (forza_friends.Store, at a HELLO). An XUID that never joined the server is refused, so
+    uploads come from players. Launchers before signed requests send X-Xuid and the friends
+    key itself (X-Friends-Key), taken for an XUID still bound to it until --raw-key-cutoff."""
+    checked = auth.check_request(store, method, path, headers, body)
+    if checked is not None:
+        return checked.xuid if checked.ok else None
     try:
         xuid = int(headers.get("x-xuid", ""), 16)
         key = bytes.fromhex(headers.get("x-friends-key", ""))
     except ValueError:
         return None
-    p = store.get(xuid)
-    if len(key) != friends.KEY_SIZE or not p or not p.get("key"):
-        return None
-    return xuid if hmac.compare_digest(p["key"], friends.key_hash(key)) else None
+    return xuid if auth.raw_key_ok(store, xuid, key, "http") else None
 
 
 def _uint(v, count):
@@ -351,7 +352,7 @@ def handle(server, method, path, headers, body):
             return reply(400, {"error": "version"})
         return 200, "application/json", list_bytes(version)
     if url.path == "/shader-lists/upload" and method == "POST":
-        xuid = authenticate(server.friends.store, headers)
+        xuid = authenticate(server.friends.store, headers, method, path, body)
         if xuid is None:
             return reply(403, {"error": "unknown player"})
         return reply(*upload(xuid, body))

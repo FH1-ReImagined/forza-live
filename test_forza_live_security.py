@@ -14,6 +14,7 @@ import urllib.request
 
 import forza_limits
 import forza_live_lsp as lsp
+import forza_live_server as srv
 import forza_xtsw as x
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -64,8 +65,18 @@ class ServerTest(unittest.TestCase):
             [getattr(sys, "_base_executable", sys.executable), os.path.join(HERE, "forza_live_server.py"), "--host", "127.0.0.1",
              "--port", str(cls.port), "--http-port", str(cls.http), "--data-dir", cls.data.name],
             stderr=subprocess.DEVNULL, env=env)
-        time.sleep(0.8)
         cls.base = "http://127.0.0.1:%d" % cls.http
+        # Ready when the status page answers (the UDP port is bound before the HTTP one).
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                urllib.request.urlopen(cls.base + "/status", timeout=2).read()
+                break
+            except (urllib.error.URLError, OSError):
+                if cls.proc.poll() is not None or time.monotonic() > deadline:
+                    cls.tearDownClass()
+                    raise RuntimeError("the server did not start")
+                time.sleep(0.05)
 
     @classmethod
     def tearDownClass(cls):
@@ -104,6 +115,27 @@ class ServerTest(unittest.TestCase):
             s.close()
         self.assertEqual(get(self.base + "/"), 200)
 
+    def test_the_udp_port_outlives_replies_to_closed_ports(self):
+        """Answers to a socket closed meanwhile (a game that quit) come back as ICMP port
+        unreachable, which on Windows once stopped the server's UDP port for good
+        (forza_live_server.ignore_port_unreachable); test_garbage_udp_and_http closes its socket
+        so too. Registers no player (test_welcome_is_small_and_peers_per_ip_capped counts them
+        from this address): a HELLO of another protocol version is answered with an ERROR."""
+        other = MAGIC + b"\x01" + struct.pack(">HQQIH", 0xFFFF, 7, 0x0009000000000399, 0, 1) + b"\0\2Pn"
+        for _ in range(10):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                for _ in range(40):
+                    s.sendto(other, ("127.0.0.1", self.port))
+        time.sleep(0.5)  # their ERRORs went to closed ports
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(3)
+            s.sendto(other, ("127.0.0.1", self.port))
+            try:
+                reply, _ = s.recvfrom(4096)
+            except socket.timeout:
+                self.fail("the server's UDP port stopped answering")
+            self.assertEqual(reply[:5], MAGIC + b"\x03")  # ERROR (protocol version)
+
     def test_welcome_is_small_and_peers_per_ip_capped(self):
         welcomes = 0
         with ExitStack() as sockets:
@@ -134,6 +166,27 @@ class ServerTest(unittest.TestCase):
             reply, _ = first.recvfrom(4096)
             self.assertEqual(reply[:5], MAGIC + b"\x02")
             self.assertLess(len(reply), 3 * len(hello))
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows' UDP sockets")
+class PortUnreachableTest(unittest.TestCase):
+    """A datagram to a closed port makes a Windows UDP socket's next receive fail
+    (WSAECONNRESET), which stopped the server's UDP port: ignore_port_unreachable."""
+
+    def test_a_closed_port_fails_no_receive(self):
+        gone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        gone.bind(("127.0.0.1", 0))
+        closed = gone.getsockname()
+        gone.close()
+        for ignore in (False, True):
+            with self.subTest(ignore=ignore), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.bind(("127.0.0.1", 0))
+                s.settimeout(0.5)
+                if ignore:
+                    self.assertTrue(srv.ignore_port_unreachable(s))
+                s.sendto(b"x", closed)
+                with self.assertRaises(socket.timeout if ignore else ConnectionResetError):
+                    s.recvfrom(16)
 
 
 class LimitsTest(unittest.TestCase):

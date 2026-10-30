@@ -169,7 +169,8 @@ that was requested but not taken.
   8 storage versions and 200000 pipelines per version.
 
 Players are not authenticated (the XUID is whatever the client claims), except for the friends
-list and the shader lists, which need the friends key bound to the XUID.
+list, the shader lists and the title service writes, which need a signature by the key bound to
+the XUID ([signed requests](#signed-requests-515)).
 
 ### Names are plain ASCII
 
@@ -195,11 +196,11 @@ capped at 4 per 30 s. `--no-invites` (env `FORZA_INVITES=0`) drops every invite;
 older than this check needs it while v0.1.12 games are around.
 
 Friends (#92) are kept per player (XUID) in `friends.json` in the data folder: each
-player's gamertag, when it was last seen, a SHA-256 of its friends key, and its friends,
+player's gamertag, when it was last seen, the public key of its game (or, until the player
+upgrades, a SHA-256 of the friends key of a game before signed requests), and its friends,
 requests both ways and blocks (written at most every 2 s after a change and on shutdown;
-keep the data folder). The first game that uses an XUID's friends binds them to its friends
-key (`friends_key` in the player's `live_identity.txt`); another game claiming that XUID
-gets no list. A player with no friends, requests or blocks is forgotten after 180 days.
+keep the data folder). The first game that uses an XUID's friends binds them to its key
+([signed requests](#signed-requests-515)); another game claiming that XUID gets no list. A player with no friends, requests or blocks is forgotten after 180 days.
 Limits: 200 friends, 50 requests waiting each way, 200 blocks per player; 10 requests a
 minute (bursts of 5), 60 other changes a minute, 30 searches a minute; searches answer at
 most 20 players. A request to a player who blocked the sender looks sent but is dropped,
@@ -314,9 +315,9 @@ players saw ([shader prebuild](https://github.com/FH1-ReImagined/ForzaHorizon1-R
 are on `--http-port` (`forza_shader_lists.py`):
 
 - `POST /shader-lists/upload`: JSON `{"version", "pipelines", "shaders"}` in the list format
-  (`tools/pipeline_list.py check`). Needs `X-Xuid` (16 hex) and `X-Friends-Key` (32 hex, the
-  `friends_key` of `live_identity.txt`): the XUID must have joined the server and be bound to that
-  key (a 403 otherwise). Every field is checked against the list format and its enum ranges; a bad
+  (`tools/pipeline_list.py check`). Needs a signature ([signed requests](#signed-requests-515);
+  launchers before them send `X-Xuid` and the friends key itself, `X-Friends-Key`): the XUID must have
+  joined the server and be bound to that key (a 403 otherwise). Every field is checked against the list format and its enum ranges; a bad
   entry rejects the request (400). Over the size caps: 413, 400; over the daily cap: 429.
 - `GET /shader-lists?version=fbo:20260228/20261018`: the merged list of one storage version, for
   anybody. It holds the pipelines reported by at least `MIN_PLAYERS` (3) different players (a
@@ -330,6 +331,53 @@ are checked on load). Nothing else is needed at deploy: the module ships with th
 `*.py` files (the Dockerfile copies them), and a tunnel must publish the HTTP port as for
 the other title services (the launcher reaches it at the server's UDP port plus one, 56678 for
 the public server).
+
+## Signed requests (#515)
+
+Games and launchers with signed requests have an Ed25519 key pair (`signing_seed` in the
+player's `live_identity.txt`) and sign every HELLO and HTTP request with it (`forza_auth.py`,
+`forza_ed25519.py`). The server keeps only the public key: nothing it receives or stores can
+sign. Games up to 0.2.x sent their friends key itself in every HELLO and title service call
+instead, so a tunnel, anyone on the path or another server's operator could copy it, and this
+server kept its SHA-256.
+
+- Binding: an XUID with no key on record is bound to the public key of its first signed HELLO.
+  An XUID bound to a friends key moves to a public key with one upgrade: the game sends the raw
+  friends key once, in a signed HELLO, and the server checks it against the SHA-256 on record.
+  From then on that XUID's friends key is refused, so a copied key stops working when its owner
+  upgrades. Games send the upgrade only to the main server's names; on other servers an XUID
+  bound to a friends key stays off friends and chat until the operator lets the new game in
+  (`--rebind-legacy`, or by clearing `key` in the player's `friends.json` record while the
+  server is stopped). An upgrade or sign-in with another public key than the one on record is
+  refused, and the game is told the account is linked to another installation: recovery is by
+  hand.
+- `--server-name HOST` (repeatable; env `FORZA_SERVER_NAMES`, comma separated): the names
+  players type to reach this server, without the port. Signatures name the server they were
+  made for, and the server refuses other names, so a signature made for one server is no use on
+  another. Players use the same key on every server: without the option every name is taken, and
+  a server whose players reach it by name should always list it (the log warns). The main server
+  runs with `--server-name forza-reimagined.playit.plus --server-name forza.dyotson.dev`.
+- `--rebind-legacy` (env `FORZA_REBIND_LEGACY=1`): an XUID bound to a friends key goes to the
+  first signed game that signs in with it, without an upgrade. Only for a server nobody else
+  uses: the launcher's "This PC" server runs with it.
+- `--raw-key-cutoff UNIX_TIME` (env `FORZA_RAW_KEY_CUTOFF`): from then on, games and launchers
+  that still send the friends key are refused for XUIDs that have a key on record: their friends
+  list and chat stay off and their title service writes fail (reads still work). Default: taken
+  until each player upgrades. `auth: raw friends keys ... since start` in the log every 10
+  minutes, and `auth` on the status page (`raw_http`, `raw_hello`, `raw_key_players`,
+  `upgraded`, `registered`), count them, so the cutoff can wait until old games are rare.
+
+Every HTTP answer carries the server's clock (`X-Forza-Time`), and the WELCOME carries it too: a
+signature more than 120 s off the server's clock is refused, and a nonce is taken once. A check
+costs about 1 ms of CPU; at most 500 a second are made for the whole server and a few a second
+for each player, so floods of bad signatures cannot take the CPU. A reverse proxy in front of
+`--http-port` must pass the request line and body unchanged.
+
+Rollout: the server first (it takes signed requests and friends keys alike), then the game and
+launcher release, then `--raw-key-cutoff` on a date announced to the players. A game with signed
+requests against a server without them keeps its keys to itself: on the main server's names
+friends and chat stay off; any other server gets a key made from the friends key and its name,
+useless anywhere else.
 
 ## Players online in Discord (optional)
 

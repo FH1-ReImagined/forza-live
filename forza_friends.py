@@ -9,9 +9,11 @@ the roster still lists the whole room (matchmaking, QoS and stats need it), and 
 neither send nor get FRIEND messages.
 
 Who is who: the XUID a game reports is not proven, so the first game that uses the friends
-of an XUID binds them to its friends key (16 random bytes in its live_identity.txt, sent
-after the HELLO features byte; the server keeps a SHA-256 of it). A game with the same XUID
-and another key gets no friends list and cannot change it.
+of an XUID binds them to its key: games with signed requests sign the HELLO with their Ed25519
+key and the server keeps the public key ("pub", forza_auth.py); games before them sent their
+friends key (16 random bytes in live_identity.txt) after the HELLO features byte and the server
+kept a SHA-256 of it ("key"), until that game's player upgrades. A game with the same XUID and
+another key gets no friends list and cannot change it.
 
 Message FRIEND (UDP kind 22), body op u8 then (big endian; strings u8 length + UTF-8):
   client -> server
@@ -46,6 +48,7 @@ import struct
 import time
 import zlib
 
+import forza_auth as auth
 import forza_limits as limits
 import forza_durable as durable
 
@@ -102,6 +105,7 @@ class Store:
         self.players = {}
         self.dirty = False
         self.saved = 0.0
+        self.on_rebind = []  # fn(xuid, old binding, new binding): forza_auth.rebind
 
     @staticmethod
     def hx(xuid):
@@ -144,10 +148,13 @@ class Store:
             self.dirty = True
 
     def claim(self, xuid, key):
-        """True if this friends key may use the XUID's friends (binding it on first use)."""
+        """True if this raw friends key may use the XUID's friends (binding it on first use).
+        Never for an XUID bound to a public key (forza_auth.py)."""
         if len(key) != KEY_SIZE:
             return False
         p = self.get(xuid, create=True)
+        if p.get("pub"):
+            return False
         h = key_hash(key)
         if not p["key"]:
             p["key"] = h
@@ -276,18 +283,24 @@ class Friends:
 
     # --- HELLO ---
 
-    def hello(self, peer, key):
-        """A HELLO with FEATURE: records the gamertag and checks the friends key."""
+    def hello(self, peer, key, signed=b""):
+        """A HELLO with FEATURE: checks what its friends key slot holds (`key`: a signed auth
+        block, forza_auth.py, or the raw key of an older game; `signed`: the HELLO up to its
+        features byte, which the signature covers) and records the gamertag if it proves the
+        XUID."""
         if not peer.features & FEATURE:
             peer.friends_ok = False
             return
-        self.store.seen(peer.xuid, peer.name)
-        ok = self.store.claim(peer.xuid, key)
+        ok = auth.hello(self.store, peer, key, signed)
+        if ok:  # the gamertag friends see: only from a game that proves the XUID
+            self.store.seen(peer.xuid, peer.name)
         if ok != getattr(peer, "friends_ok", None):
-            if not ok:
+            if not ok and len(key) == KEY_SIZE:
                 log.info("friends #%d %r: XUID %016X has another friends key", peer.id,
                          peer.name, peer.xuid)
             peer.friends_ok = ok
+        if getattr(peer, "auth_conflict", False) and not self.limited(peer.xuid, "linked", 1):
+            self.tell(peer, auth.refusal(peer, "Friends and chat are off"))
 
     def came_or_went(self, xuid):
         """A player signed in or out: its friends' lists show it."""
@@ -310,7 +323,7 @@ class Friends:
                 x = int(k, 16)
                 state, status = 0, ""
                 if rel == FRIEND:
-                    on = self.online(x)
+                    on = self.users(x)  # games that prove the XUID: any game can name it
                     if on:
                         state, status = on[0].state or 1, on[0].status
                 rows.append((rel, 0 if state else 1, self.store.name(x).lower(), x, state,
@@ -357,9 +370,11 @@ class Friends:
         if not peer.features & FEATURE:
             return
         if not getattr(peer, "friends_ok", False):
-            if not self.limited(peer.xuid, "denied", 2):
-                self.tell(peer, "Friends are off: this XUID's friends belong to another "
-                                "installation (live_identity.txt)")
+            # A game that signs sends its first FRIEND messages before its answer to the
+            # challenge arrives (forza_auth.py): no notice for those.
+            if not getattr(peer, "auth_pending", False) and not self.limited(peer.xuid, "denied", 2):
+                self.tell(peer, auth.refusal(peer, "Friends are off") or "Friends are off: this XUID's "
+                                "friends belong to another installation (live_identity.txt)")
             return
         op, me = body[0], peer.xuid
         if op == LIST:
