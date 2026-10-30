@@ -284,14 +284,16 @@ class Friends:
     # --- HELLO ---
 
     def hello(self, peer, key, signed=b""):
-        """A HELLO with FEATURE: records the gamertag and checks what its friends key slot
-        holds (`key`: a signed auth block, forza_auth.py, or the raw key of an older game;
-        `signed`: the HELLO up to its features byte, which the signature covers)."""
+        """A HELLO with FEATURE: checks what its friends key slot holds (`key`: a signed auth
+        block, forza_auth.py, or the raw key of an older game; `signed`: the HELLO up to its
+        features byte, which the signature covers) and records the gamertag if it proves the
+        XUID."""
         if not peer.features & FEATURE:
             peer.friends_ok = False
             return
-        self.store.seen(peer.xuid, peer.name)
         ok = auth.hello(self.store, peer, key, signed)
+        if ok:  # the gamertag friends see: only from a game that proves the XUID
+            self.store.seen(peer.xuid, peer.name)
         if ok != getattr(peer, "friends_ok", None):
             if not ok and len(key) == KEY_SIZE:
                 log.info("friends #%d %r: XUID %016X has another friends key", peer.id,
@@ -321,7 +323,7 @@ class Friends:
                 x = int(k, 16)
                 state, status = 0, ""
                 if rel == FRIEND:
-                    on = self.online(x)
+                    on = self.users(x)  # games that prove the XUID: any game can name it
                     if on:
                         state, status = on[0].state or 1, on[0].status
                 rows.append((rel, 0 if state else 1, self.store.name(x).lower(), x, state,

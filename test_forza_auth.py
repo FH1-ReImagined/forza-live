@@ -599,6 +599,69 @@ class ChangedHelloTest(TwoDrivers):
         self.assertTrue(self.keep_alive()[0].friends_ok)  # checked again once there is budget
 
 
+class UnprovenClaimTest(TwoDrivers):
+    """What friends see of an XUID comes only from games that prove it: a HELLO that names
+    DriverB's XUID without proving it neither renames DriverB nor shows it online."""
+
+    IMPOSTOR = ("127.0.0.1", 20009)
+
+    def setUp(self):
+        super().setUp()
+        self.store.befriend(XUID, OTHER)
+
+    def claim(self, slot=b"", name=b"Mallory", xuid=OTHER, addr=IMPOSTOR, token=9):
+        return self.hello(slot, addr, xuid=xuid, token=token, name=name)
+
+    def presence(self, addr, state, status):
+        status = status.encode()
+        self.server.datagram_received(srv.MAGIC + bytes([srv.PRESENCE]) + struct.pack(">I", state) +
+                                      bytes(srv.SESSION_INFO_SIZE) + bytes([len(status)]) + status, addr)
+
+    def seen_by_a(self, xuid=OTHER):
+        """(state, status) of xuid in DriverA's friends list."""
+        for entry in self.server.friends.entries(XUID):
+            x, _, state = struct.unpack_from(">QBI", entry)
+            if x == xuid:
+                _, pos = friends.read8(entry, 13)
+                return state, friends.read8(entry, pos)[0]
+        return None
+
+    def test_an_unproven_hello_renames_no_one(self):
+        self.assertEqual(self.store.name(OTHER), "DriverB")
+        for slot in (b"", KEY, bytes(range(1, 17))):
+            self.assertFalse(self.claim(slot)[0].friends_ok)
+        with self.spend_player_budget():  # DriverA's game as DriverB, left unchecked
+            self.assertFalse(self.changed(name=b"Mallory")[0].friends_ok)
+        self.assertEqual(self.store.name(OTHER), "DriverB")
+        # nor does an XUID nobody proved get a record
+        nobody = 0x00090000000000AA
+        self.claim(xuid=nobody, name=b"Nobody", addr=("127.0.0.1", 20010), token=10)
+        self.assertIsNone(self.store.get(nobody))
+
+    def test_a_proven_hello_still_names_its_xuid(self):
+        body = dict(xuid=OTHER, token=2, name=b"DriverB2")
+        _, (_, _, nonce) = self.hello(b"", self.ADDR_B, **body)
+        block = auth.hello_block(SEED_B, MAIN, OTHER, nonce, self.hello_body(**body))
+        self.assertTrue(self.hello(block, self.ADDR_B, **body)[0].friends_ok)
+        self.assertEqual(self.store.name(OTHER), "DriverB2")
+        # and an old game's raw key binds and names an XUID on first use
+        self.assertTrue(self.claim(KEY, name=b"Oldie", xuid=THIRD)[0].friends_ok)
+        self.assertEqual(self.store.name(THIRD), "Oldie")
+
+    def test_presence_comes_from_proven_games(self):
+        self.presence(self.ADDR_B, 1, "Racing")
+        self.assertEqual(self.seen_by_a(), (1, "Racing"))
+        self.server.datagram_received(srv.MAGIC + bytes([srv.BYE]), self.ADDR_B)  # DriverB quits
+        self.claim(name=b"DriverB")
+        self.presence(self.IMPOSTOR, 1, "Impostor")
+        self.assertEqual(self.seen_by_a(), (0, ""))
+        # DriverA's game as DriverB, left unchecked: no presence for DriverB either
+        with self.spend_player_budget():
+            self.changed()
+        self.presence(self.ADDR_A, 1, "Impostor too")
+        self.assertEqual(self.seen_by_a(), (0, ""))
+
+
 class UpgradeTest(Base):
     """An XUID bound to its raw friends key by a game before signed requests."""
 
