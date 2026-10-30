@@ -21,6 +21,8 @@ services). This answers the ones online play needs:
                                club garage (forza_clubs.py)
     Forza.WebServices.LargeFileUpload, StorefrontPhoto.Create, Storefront (photos); Xls.WebServices.Content
                                photo uploads and their downloads (forza_photos.py)
+    Forza.WebServices.StorefrontLivery, StorefrontLayerGroup, Storefront (designs)
+                               the design storefront: paint jobs and vinyl groups (forza_designs.py)
     Xls.WebServices.Notifications  the Message Center (forza_notifications.py): Rivals,
                                gifts, auctions and car club messages
 
@@ -45,6 +47,7 @@ import forza_auth as auth
 import forza_campaign as campaign
 import forza_clubs as clubs
 import forza_coop_ledger as coop_ledger
+import forza_designs as designs
 import forza_friends as friends
 import forza_limits as limits
 import forza_leaderboards as leaderboards
@@ -203,6 +206,7 @@ def configure(args):
     clubs.configure(DATA_DIR, load_player)
     notifications.configure(DATA_DIR)
     photos.configure(DATA_DIR)
+    designs.configure(DATA_DIR, proven=caller_signed, trusted=caller_trusted)
     shader_lists.configure(DATA_DIR)
     leaderboards.configure(DATA_DIR)
 
@@ -581,6 +585,7 @@ SERVICES = {
     **clubs.services(),
     **notifications.services(),
     **photos.services(),
+    **designs.services(),  # after photos: its calls shared with photos hand photo ids on
 }
 
 
@@ -604,6 +609,7 @@ SERVICES = {
 #               refused, reads are answered
 TRUSTED, UNVERIFIED, FORGED = "trusted", "unverified", "forged"
 _caller = contextvars.ContextVar("lsp_caller", default=UNVERIFIED)
+_signed = contextvars.ContextVar("lsp_signed", default=False)
 READ_PREFIXES = ("Get", "Search", "Download")
 # Reads by name that change state: the session host's next round (a world's event).
 STATE_CHANGING = {("Hopper", "GetGameOptions")}
@@ -614,6 +620,12 @@ _unverified_logged = {}  # xuid -> when its last unverified call was logged
 def caller_trusted():
     """The title service call being handled is signed by its player's own friends key."""
     return _caller.get() == TRUSTED
+
+
+def caller_signed():
+    """The title service call being handled carries a signature (X-Forza-Auth) by its player's
+    own key: not a raw friends key, which a game sent in the clear to every server it used."""
+    return _signed.get()
 
 
 def verify_caller(server, xuid, headers, method="POST", path="", body=b""):
@@ -674,12 +686,14 @@ def service_call(headers, body, server=None, http_method="POST", path="/Services
                  len(body))
         return x.reply() + bytes(EMPTY_ANSWER)
     token = _caller.set(state)
+    signed = _signed.set(state == TRUSTED and auth.HEADER in headers)
     try:
         return fn(xuid, body)
     except ValueError as e:  # parameters that don't parse
         log.warning("title: %s.%s: bad parameters (%s): %s", cls, method, e, body.hex())
         return x.failure(2, "bad parameters")
     finally:
+        _signed.reset(signed)
         _caller.reset(token)
 
 
