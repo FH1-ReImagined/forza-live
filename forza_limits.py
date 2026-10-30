@@ -16,7 +16,7 @@ MAX_BLOB = 2 << 20
 DISK_CAP = int(os.environ.get("FORZA_DISK_CAP_MB", "4096")) << 20
 MAX_PLAYERS = int(os.environ.get("FORZA_MAX_PLAYERS", "20000"))  # player records on disk
 PER_PLAYER = {"auctions": 30, "shared_cars": 100, "gifts": 50}  # open items per player
-BLOB_DIRS = ("ghosts", "market", "clubs", "photos")
+BLOB_DIRS = ("ghosts", "market", "clubs", "photos", "designs")
 
 _data_dir = "forza_live_data"
 _cache = [0.0, 0]  # time of the last scan, bytes found
@@ -26,6 +26,8 @@ _added = [0]       # bytes accepted since
 def configure(data_dir):
     global _data_dir
     _data_dir = data_dir
+    _cache[:] = [0.0, 0]  # another folder: scan it at the next upload
+    _added[0] = 0
 
 
 def usage():

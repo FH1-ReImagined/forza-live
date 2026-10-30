@@ -771,6 +771,46 @@ gives the slot back (25/25 on reopening). The thumbnails of the photo saved on a
 session are black. Not seen: other players' photos (no second account), ratings, search
 results with a match, `Purchase`, the 27 KB request (a photo of the player's own).
 
+### The design storefront (`forza_designs.py`)
+
+Paint Shop > DESIGN STOREFRONT: paint jobs (liveries) and vinyl groups that players share,
+browse, buy and apply. Forza Horizon has no tune or replay sharing (MY UPGRADE SETUPS offers
+LOAD and RENAME only), so the server answers paint jobs (page 1) and vinyl groups (page 2) only;
+reporting tuning (0) or replays (4) in the page list gives MY SHARED DESIGNS unnamed tabs.
+
+| Call | What the game sends and needs |
+| --- | --- |
+| `StorefrontLivery.Create` | From LOAD DESIGN > a paint job of the car the player is in > UPLOAD TO STOREFRONT, after `Auction.UploadAuctionTextures` (the livery as a 1024x1024 JPEG texture, `forza_market.py`). `fileHeader` Type 2, Quantity -1 (no limit), SubmissionTime "now" with milliseconds; `liveryDesc` MakeId, ModelId, TextureId; `previewData` the paint job's 288x160 `cxds` thumbnail (the bytes of its `thumb.xdc`). Answer `contentFileId`; the payload follows in `UploadContent`: the plaintext `crlv` design (not encrypted or compressed; it holds the creator's online XUID) |
+| `StorefrontLayerGroup.Create` | From MY VINYL GROUPS > UPLOAD TO STOREFRONT: Type 1, `layerGroupDesc` NumLayers, a 256x128 `cxds` preview; the payload is the plaintext `lvyg` group |
+| `GetDesignPageList`, `GetFileListForPage` | MY SHARED DESIGNS: pages 1 and 2 with their slots, then one file at a time |
+| `GetFeaturedDesigns`, `GetMostDownloadedDesigns`, `GetTopRatedDesigns` | Entering the storefront (PG PICKS and the other tabs; paint jobs and vinyl groups together). `clientContentFlag` is always `{High 0x800000000, Low 1}` |
+| `SearchLiveryFiles`, `SearchLayergroupFiles` | DESIGNS FOR MY CAR (the car's make and model, -1 elsewhere), SEARCH ALL DESIGNS (a gamertag field), SEARCH ALL VINYL GROUPS (a text field, `ManualSearchKeywords`); then `GetFileHeavyWeightData` for the ids found |
+| `DownloadContent`, `Purchase` | The detail screen downloads the payload to show the design on the player's car; BUY is `Purchase(fileId, price, maxPayloadSize, maxPreviewSize)` with the record's sizes. The buyer's game saves it encrypted with its own profile keys, locked (it can be applied, not uploaded again), with the creator's name and the file id as its `StorefrontID` |
+| `SubmitFileRating`, `ReportContent`, `RemoveFile`, `ChangeFileDescription`, `ChangeFilePriceQuantity`, `GetStats` | RATE (1-5 stars), REPORT OFFENSIVE CONTENT, the owner's REMOVE, CHANGE DESCRIPTION and CHANGE PRICE/QUANTITY, PLAYER DETAILS > STATS |
+
+A file record's `Ordinal` is the car's ModelId for a paint job (0 shows CONTENT NOT
+AVAILABLE) and the number of layers for a vinyl group; an empty `SubmissionTime` fails the
+whole list ("Failed to retrieve featured files").
+
+The server's rules: uploads only from a game that signs its requests (`X-Forza-Auth`, the
+player's own key; an unsigned call, or one with a raw friends key, gets failure 5); downloads,
+lists and searches are open. 25 files per player and kind, 10 uploads a day per player, 120 an
+hour on the whole server, a payload with its kind's magic of at most 1 MiB, a `cxds` preview of
+at most 153,600 bytes, and nothing from an XUID in `DATA_DIR/banned_xuids.json` (a JSON list of
+hex XUIDs, read again when it changes; a banned player's files are listed to nobody else).
+Everything is free (Price 0, Quantity -1, whatever the player chose). One download count and
+one rating per player, never the owner's, only from proven callers; three distinct reporters
+hide a file at once. Each file has a six-character share code: typed into a search's gamertag
+or text field, it finds that file alone. A `held` state (listed to its owner only) is ready for
+screening uploads later; nothing is held for now. Files: `DATA_DIR/designs.json` and
+`DATA_DIR/designs/<id>.bin` / `.prev`, in the disk quota; design ids start at 100,000,000, so the
+calls shared with photos (`Purchase`, `RemoveFile`, `DownloadContent`...) tell them apart by id.
+
+Seen in a game (two identities with different profile keys, a local server): A uploaded a paint
+job and a vinyl group with signed requests; B found each by its share code, bought, rated and
+applied it ("Successfully applied design from design catalog"; the livery on B's car in free
+roam).
+
 ### Notifications (Message Center) (`forza_notifications.py`)
 
 The Message Center is in the pause menu (START, MESSAGE CENTER; not in multiplayer). It
@@ -917,8 +957,9 @@ notification flows), all scratch files not kept in the repo.
 
 ## Not done
 
-- The other services (the design storefront for liveries, tuning, layer groups and replays,
-  DLC metadata) get empty answers; only the photo storefront is kept (above).
+- DLC metadata gets empty answers. The design storefront serves paint jobs and vinyl groups
+  (above); the game has no tune or replay sharing. Gifts of a design (`Gift*.Create`, the
+  Message Center's DOWNLOAD), favorites and the friends' storefronts are not served.
   Existing local design/vinyl saves can now be inspected and exported with
   `tools/ugc_catalog.py` ([preservation workflow](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/ugc-preservation.md)); these bundles
   preserve encrypted payloads and attribution but are not yet installable or served online.
