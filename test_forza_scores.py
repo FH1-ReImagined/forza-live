@@ -82,6 +82,13 @@ class Club1000Test(unittest.TestCase):
         scores.configure(self.dir.name)  # a new server process reads the file
         self.assertEqual(self.rows(B_XUID)["rows"][0]["user"]["wzGamerTag"], "DriverA")
 
+    def test_entry_without_xuid(self):
+        self.complete(A_XUID, AVENTADOR, 0xAE6828D3)
+        del scores.STORE.club["%016X" % A_XUID]["xuid"]
+        scores.STORE.save()
+        scores.configure(self.dir.name)
+        self.assertEqual(self.rows(B_XUID)["rows"][0]["user"]["wzGamerTag"], "DriverA")
+
     def test_limits(self):
         for t in range(scores.CLUB_MAX_PER_CAR + 5):
             self.complete(A_XUID, AVENTADOR, t)
