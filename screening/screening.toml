@@ -7,10 +7,17 @@
 url = "http://172.17.0.1:21201"
 poll_seconds = 30
 timeout_seconds = 30
-max_per_poll = 20             # photos screened per poll (the rest wait for the next one)
+max_per_poll = 20             # photos and designs screened per poll (the rest wait for the next one)
 max_image_bytes = 16777216    # the server's own cap on a published picture
 fetch_attempts = 5            # a photo whose image cannot be fetched this often is left held
 hidden_refresh_seconds = 3600 # how often the hidden photos' pHashes are read again
+
+[designs]
+# The design storefront's paint jobs and vinyl groups, before the website shows them
+# (forza_design_feed.py: GET /admin/designs/queue). Same models and thresholds as photos; their
+# previews are small (288x160 and 256x128), so the zero-shot model sees the whole frame only.
+enabled = true
+grids = []                    # tiles per grid for designs: none
 
 [runtime]
 models_dir = "/models"

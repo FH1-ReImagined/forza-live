@@ -1,4 +1,5 @@
-"""The community photos' operator API (forza_community.py) as the screening worker uses it.
+"""The operator API of the community photos (forza_community.py) and of the designs on the website
+(forza_design_feed.py) as the screening worker uses it.
 
 The token goes only in the X-Admin-Token header and never into a log line, an exception or a URL.
 Requests go straight to the server: no proxy from the environment (a proxy could add
@@ -13,7 +14,9 @@ import urllib.request
 
 ID_RE = re.compile(r"[A-Z2-7]{12}")
 IMAGE_RE = re.compile(r"/admin/photos/img/[A-Z2-7]{12}\.(png|jpg)")
+DESIGN_IMAGE_RE = re.compile(r"/admin/designs/img/[A-Z2-7]{12}\.png")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
+DESIGN_TYPES = ("livery", "vinylgroup")
 
 
 class AdminError(Exception):
@@ -36,9 +39,29 @@ def photo_record(p):
     if not IMAGE_RE.fullmatch(image) or image.split("/")[-1].split(".")[0] != p["id"]:
         return None
     sha = str(p.get("sha256", ""))
-    return {"id": p["id"], "image": image, "sha256": sha if SHA_RE.fullmatch(sha) else "",
+    return {"id": p["id"], "kind": "photo", "image": image,
+            "sha256": sha if SHA_RE.fullmatch(sha) else "",
             "title": str(p.get("title") or "")[:200], "gamertag": str(p.get("gamertag") or "")[:64],
             "status": str(p.get("status", "")), "w": p.get("w"), "h": p.get("h")}
+
+
+def design_record(d):
+    """The fields the worker uses from a design of the designs' queue or list, checked; None
+    for a malformed one. No XUID is kept (the queue has none; the full list's owner is
+    dropped)."""
+    if not isinstance(d, dict) or not ID_RE.fullmatch(str(d.get("id", ""))):
+        return None
+    image = str(d.get("preview", ""))
+    if not DESIGN_IMAGE_RE.fullmatch(image) or image.split("/")[-1].split(".")[0] != d["id"]:
+        return None
+    sha = str(d.get("sha256", ""))
+    kind = str(d.get("type", ""))
+    return {"id": d["id"], "kind": "design", "type": kind if kind in DESIGN_TYPES else "?",
+            "image": image, "sha256": sha if SHA_RE.fullmatch(sha) else "",
+            "title": str(d.get("title") or "")[:200],
+            "description": str(d.get("description") or "")[:300],
+            "gamertag": str(d.get("gamertag") or "")[:64], "status": str(d.get("state", "")),
+            "w": d.get("w"), "h": d.get("h")}
 
 
 class AdminClient:
@@ -102,10 +125,38 @@ class AdminClient:
         return [r for r in map(photo_record, photos or []) if r is not None]
 
     def image(self, photo):
+        """The picture of a photo_record() or design_record()."""
         data, ctype = self._request("GET", photo["image"], limit=self.max_image_bytes)
         if ctype.split(";")[0].strip() not in ("image/png", "image/jpeg"):
             raise AdminError(None, "image %s: content type %r" % (photo["id"], ctype[:40]))
         return data
+
+    def design_queue(self):
+        """(the pending designs, oldest first, as design_record()s; how many are pending in
+        all). AdminError 404 from a server without designs on the website."""
+        doc = self._json("GET", "/admin/designs/queue")
+        found = doc.get("designs") if isinstance(doc, dict) else None
+        if not isinstance(found, list):
+            raise AdminError(None, "the designs' queue is not {\"designs\": [...]}")
+        records = [r for r in map(design_record, found) if r is not None]
+        total = doc.get("pending")
+        return records, total if isinstance(total, int) and total >= len(records) else len(records)
+
+    def designs(self, state):
+        doc = self._json("GET", "/admin/designs?state=" + state)
+        found = doc.get("designs") if isinstance(doc, dict) else None
+        return [r for r in map(design_record, found or []) if r is not None]
+
+    def design_act(self, did, action, note=None, expect="pending"):
+        """release, hide or hold a design that is still `expect` (pending: the worker's own
+        actions never override the operator's). AdminError 409 when it no longer is, 404 when
+        it is gone."""
+        if not ID_RE.fullmatch(did) or action not in ("release", "hide", "hold"):
+            raise ValueError("bad design id or action")
+        body = {"expect": expect}
+        if note is not None:
+            body["note"] = note
+        return self._json("POST", "/admin/designs/%s/%s" % (did, action), body)
 
     def act(self, pid, action, note=None):
         """release, hide (or hold): the photo's record after it. AdminError 409 when its status no

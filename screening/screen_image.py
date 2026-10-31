@@ -1,7 +1,8 @@
 """A photo's bytes to the picture the models see, treated as hostile input: PNG or JPEG only, within
-the sizes the server publishes (forza_community MIN_SIZE to MAX_SIZE), decompression bombs
-refused, at most MAX_WIDTH wide for the models. And its perceptual hash (pHash: a 64-bit DCT
-hash), to find a re-upload of a hidden photo."""
+the sizes the server publishes (forza_community MIN_SIZE to MAX_SIZE; a design's preview,
+forza_design_feed: DESIGN_MIN to DESIGN_MAX), decompression bombs refused, at most MAX_WIDTH wide
+for the models. And its perceptual hash (pHash: a 64-bit DCT hash), to find a re-upload of a
+hidden photo or design."""
 
 import io
 import warnings
@@ -11,6 +12,8 @@ from PIL import Image
 
 MIN_SIZE = (640, 360)
 MAX_SIZE = (7680, 4320)
+DESIGN_MIN = (32, 32)       # a paint job's preview is 288x160, a vinyl group's 256x128
+DESIGN_MAX = (1024, 1024)   # forza_cxds.MAX_SIDE
 MAX_WIDTH = 1920
 
 
@@ -18,8 +21,9 @@ class BadPicture(ValueError):
     pass
 
 
-def decode(data):
-    """An RGB PIL image of a PNG or JPEG, at most MAX_WIDTH wide; BadPicture for anything else."""
+def decode(data, min_size=MIN_SIZE, max_size=MAX_SIZE):
+    """An RGB PIL image of a PNG or JPEG of min_size to max_size, at most MAX_WIDTH wide;
+    BadPicture for anything else."""
     if not isinstance(data, (bytes, bytearray)) or len(data) < 16:
         raise BadPicture("no picture")
     Image.MAX_IMAGE_PIXELS = MAX_SIZE[0] * MAX_SIZE[1]
@@ -28,7 +32,7 @@ def decode(data):
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             img = Image.open(io.BytesIO(bytes(data)), formats=["PNG", "JPEG"])
             w, h = img.size
-            if not (MIN_SIZE[0] <= w <= MAX_SIZE[0] and MIN_SIZE[1] <= h <= MAX_SIZE[1]):
+            if not (min_size[0] <= w <= max_size[0] and min_size[1] <= h <= max_size[1]):
                 raise BadPicture("size %dx%d" % (w, h))
             if img.mode not in ("RGB", "RGBA", "L", "P", "LA"):
                 raise BadPicture("mode %s" % img.mode)

@@ -1,7 +1,8 @@
 """The worker against a real forza-live server (this repository's, started on 127.0.0.1 with
-FORZA_COMMUNITY_HOLD=1 and its photos seeded as held), with stand-in models: the queue, release,
-hide, the operator deciding first, bad pictures, refused requests. And the server's admin checks
-for the address a worker on Docker's default bridge network has."""
+FORZA_COMMUNITY_HOLD=1 and its photos seeded as held, its designs as pending), with stand-in
+models: the queues, release, hide, hold, the operator deciding first, bad pictures, refused
+requests. And the server's admin checks for the address a worker on Docker's default bridge
+network has."""
 
 import hashlib
 import http.server
@@ -9,6 +10,7 @@ import io
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -18,6 +20,7 @@ import tomllib
 import unittest
 import urllib.error
 import urllib.request
+import zlib
 from contextlib import redirect_stdout
 
 import screen_client
@@ -60,12 +63,68 @@ def seed(data_dir, pictures):
     return list(pictures)
 
 
+def cxds_of(img):
+    """A design preview as the game uploads it (forza_cxds.py: a tiled 8_8_8_8 texture in a cxds
+    file) of a Pillow picture, its pixels darkened by the gamma the server takes off again."""
+    sys.path.insert(0, ROOT)
+    try:
+        import forza_cxds
+    finally:
+        sys.path.remove(ROOT)
+    w, h = img.size
+    pitch = (w + 31) & ~31
+    dark = bytes(round(255 * (v / 255) ** 2.2) for v in range(256))
+    pixels = bytearray(pitch * ((h + 31) & ~31) * 4)
+    rgb = img.convert("RGB").tobytes().translate(dark)
+    for y in range(h):
+        for x in range(w):
+            o, at = forza_cxds.tiled_offset(x, y, pitch), (y * w + x) * 3
+            pixels[o:o + 4] = b"\xff" + rgb[at:at + 3]
+    header = bytearray(52)
+    header[0x20:0x28] = struct.pack(">II", 0x86, (w - 1) | (h - 1) << 13)
+    body = bytes(header) + bytes(pixels)
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    packed = c.compress(body) + c.flush()
+    return b"cxds" + struct.pack(">IIII", 2, len(body), len(packed), len(body)) + packed
+
+
+def seed_designs(data_dir, previews):
+    """Pending designs in a data folder, as forza_designs keeps them: {public id: (cxds preview,
+    title, description)}; even ones are paint jobs, odd ones vinyl groups. Returns the ids."""
+    os.makedirs(os.path.join(data_dir, "designs"), exist_ok=True)
+    files = {}
+    for i, (wid, (prev, title, desc)) in enumerate(previews.items()):
+        fid = 100000000 + i
+        livery = i % 2 == 0
+        payload = (b"crlv" if livery else b"lvyg") + bytes(60)
+        for suffix, data in ((".bin", payload), (".prev", prev)):
+            with open(os.path.join(data_dir, "designs", "%d%s" % (fid, suffix)), "wb") as f:
+                f.write(data)
+        meta = {"title": title, "description": desc, "keywordOne": 0, "keywordTwo": 0}
+        meta.update({"makeId": 21, "modelId": 1398, "textureId": 1} if livery else {"numLayers": 3})
+        owner = 0x0009000000000101 + i
+        os.makedirs(os.path.join(data_dir, "players"), exist_ok=True)
+        with open(os.path.join(data_dir, "players", "%016X.json" % owner), "w") as f:
+            json.dump({"gamertag": "Designer%d" % i}, f)
+        files[str(fid)] = {
+            "kind": "livery" if livery else "layergroup", "type": 2 if livery else 1,
+            "owner": owner, "gamertag": "Designer%d" % i, "size": len(payload),
+            "got": len(payload), "done": True, "created": 1793000000.0 + i, "code": "CODE%02d" % i,
+            "status": "live", "meta": meta, "downloaders": [], "ratings": {}, "reporters": [],
+            "views": 0, "webId": wid, "web": "pending", "webNote": "", "webAt": None, "png": None}
+    with open(os.path.join(data_dir, "designs.json"), "w") as f:
+        json.dump({"nextId": 100000000 + len(files), "files": files, "uploads": {},
+                   "serverUploads": []}, f)
+    return list(previews)
+
+
 class LocalServer:
     """forza_live_server.py from this checkout, on 127.0.0.1, with the token and the hold."""
 
-    def __init__(self, pictures, extra_args=()):
+    def __init__(self, pictures, extra_args=(), designs=None):
         self.data = tempfile.TemporaryDirectory()
         self.ids = seed(self.data.name, pictures)
+        self.design_ids = seed_designs(self.data.name, designs or {})
         self.http = free_port()
         env = dict(os.environ, FORZA_ADMIN_TOKEN=TOKEN, FORZA_COMMUNITY_HOLD="1")
         env.pop("FORZA_TRUSTED_PROXIES", None)
@@ -98,6 +157,14 @@ class LocalServer:
         doc = json.loads(urllib.request.urlopen(self.base + "/community/gallery.json").read())
         return [p["id"] for p in doc["photos"]]
 
+    def design_states(self):
+        doc = json.loads(self.client()._request("GET", "/admin/designs")[0])
+        return {d["id"]: (d["state"], d["note"], d["listed"]) for d in doc["designs"]}
+
+    def site(self):
+        doc = json.loads(urllib.request.urlopen(self.base + "/community/designs.json").read())
+        return [d["id"] for d in doc["designs"]]
+
     def close(self):
         self.proc.terminate()
         self.proc.wait()
@@ -122,15 +189,19 @@ class StubScreener:
     def __init__(self, on_score=None):
         self.versions = {"stub": "1"}
         self.hidden = {}
+        self.hidden_designs = {}
         self.calls = []
+        self.grids = {}
         self.on_score = on_score
 
-    def score(self, img, photo=None):
+    def score(self, img, photo=None, grids=None, hidden=None):
         self.calls.append(photo["id"])
+        self.grids[photo["id"]] = (grids, img.size)
         if self.on_score:
             self.on_score(photo)
         s = json.loads(json.dumps(CLEAN))
-        colour = img.getpixel((0, 0))
+        c = img.getpixel((0, 0))
+        colour = min((GREEN, RED, BLUE, GREY), key=lambda k: sum((a - b) ** 2 for a, b in zip(k, c)))
         if colour == RED:
             s["nsfw"]["high"] = 0.97
         elif colour == BLUE:
@@ -249,6 +320,181 @@ class WorkerAgainstServer(unittest.TestCase):
         self.assertNotIn(TOKEN, str(e.exception) + out.getvalue() + err.getvalue())
 
 
+def preview(colour, size=(288, 160)):
+    from PIL import Image
+    return cxds_of(Image.new("RGB", size, colour))
+
+
+class StandIn:
+    """Stand-in models for the real Screener (no onnxruntime): clean scores, no text read; the
+    zero-shot regions it was given are kept."""
+
+    def __init__(self):
+        self.regions = []
+
+    def nsfw(self, img):
+        return {"neutral": 0.99, "low": 0.01, "medium": 0.0, "high": 0.0}
+
+    def embed(self, img, grids):
+        names = ["full"] + ["tile%d" % i for g in grids for i in range(g[0] * g[1])]
+        self.regions.append((img.size, names))
+        return names, None
+
+    def score(self, names, vectors, categories=None):
+        return {c: {"sigmoid": 0.01, "region": "full", "prompt": "-"}
+                for c in ("hate", "gore", "nudity")}
+
+    def ocr(self, img):
+        return []
+
+
+class DesignsAgainstServer(unittest.TestCase):
+    """The design storefront's pending designs: the same decisions, and the worker moves a
+    doubtful one to held itself (the photos' queue holds by default; designs are in the game
+    already and wait only for the website)."""
+    IDS = {"AAAAAAAAAAAA": "clean livery", "BBBBBBBBBBBB": "nsfw group", "CCCCCCCCCCCC": "doubtful livery",
+           "DDDDDDDDDDDD": "clean group", "EEEEEEEEEEEE": "word in the description"}
+
+    def setUp(self):
+        self.server = LocalServer(
+            {"PPPPPPPPPPPP": (plain(GREEN), "")},
+            designs={"AAAAAAAAAAAA": (preview(GREEN), "FLAMES", "red and gold"),
+                     "BBBBBBBBBBBB": (preview(RED, (256, 128)), "STAR", ""),
+                     "CCCCCCCCCCCC": (preview(BLUE), "BLUE", ""),
+                     "DDDDDDDDDDDD": (preview(GREY, (256, 128)), "GREY", ""),
+                     "EEEEEEEEEEEE": (preview(GREEN), "NICE", "look zqxtestword here")})
+
+    def tearDown(self):
+        self.server.close()
+
+    def test_the_designs_queue(self):
+        designs, pending = self.server.client().design_queue()
+        self.assertEqual(([d["id"] for d in designs], pending), (list(self.IDS), 5))
+        for d in designs:
+            self.assertNotIn("owner", d)
+            self.assertEqual((d["kind"], d["status"]), ("design", "pending"))
+        self.assertEqual(designs[0]["type"], "livery")
+        self.assertEqual(designs[1]["type"], "vinylgroup")
+        self.assertEqual(designs[4]["description"], "look zqxtestword here")
+
+    def test_release_hide_and_hold(self):
+        stub = StubScreener()
+        worker = screen_worker.Worker(CFG, self.server.client(), stub)
+        (done, waiting), lines = run(worker)
+        self.assertEqual((done, waiting), (6, 0))  # the photo and the five designs
+        st = self.server.design_states()
+        self.assertEqual(st["AAAAAAAAAAAA"][:2], ("clear", "screening: release (clear)"))
+        self.assertEqual(st["DDDDDDDDDDDD"][0], "clear")
+        self.assertEqual(st["BBBBBBBBBBBB"][0], "hidden")
+        self.assertTrue(st["BBBBBBBBBBBB"][1].startswith("screening: hide (nsfw-high"))
+        self.assertFalse(st["BBBBBBBBBBBB"][2])  # hidden in the game too
+        self.assertEqual(st["CCCCCCCCCCCC"][0], "held")  # moved to held, with why
+        self.assertTrue(st["CCCCCCCCCCCC"][1].startswith("screening: hold (hate-suspect"))
+        self.assertTrue(st["CCCCCCCCCCCC"][2])  # still in the game
+        self.assertEqual(sorted(self.server.site()), ["AAAAAAAAAAAA", "DDDDDDDDDDDD", "EEEEEEEEEEEE"])
+        by_id = {r["id"]: r for r in lines if r.get("event") == "design"}
+        self.assertEqual(set(by_id), set(self.IDS))
+        self.assertEqual((by_id["AAAAAAAAAAAA"]["type"], by_id["BBBBBBBBBBBB"]["type"]),
+                         ("livery", "vinylgroup"))
+        self.assertEqual(by_id["CCCCCCCCCCCC"]["done"], "hold")
+        for r in by_id.values():
+            for key in ("id", "type", "models", "decision", "rule", "ms", "size"):
+                self.assertIn(key, r)
+            self.assertNotIn("owner", r)
+            self.assertNotIn("00090000", json.dumps(r).upper())  # no XUID anywhere
+        # a design's preview is scored whole, at its own size
+        self.assertEqual(stub.grids["AAAAAAAAAAAA"], ([], (288, 160)))
+        self.assertEqual(stub.grids["BBBBBBBBBBBB"], ([], (256, 128)))
+        self.assertEqual(stub.grids["PPPPPPPPPPPP"], (None, (1920, 1080)))  # photos as before
+        stub.calls.clear()
+        (done, waiting), _ = run(worker)
+        self.assertEqual((done, waiting, stub.calls), (0, 0, []))
+
+    def test_the_description_and_title_are_read(self):
+        cfg = dict(CFG, _dir=HERE)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        terms = os.path.join(tmp.name, "terms.txt")
+        with open(os.path.join(HERE, "wordlists", "terms.txt"), encoding="utf-8") as f:
+            text = f.read()
+        with open(terms, "w", encoding="utf-8") as f:
+            f.write(text + "\n[hide]\nzqxtestword\n")
+        cfg["text"] = dict(CFG["text"], terms=terms, ldnoobw=os.path.join(tmp.name, "none"))
+        cfg["runtime"] = dict(CFG["runtime"], models_dir=tmp.name)
+        m = StandIn()
+        screener = screen_worker.Screener(cfg, models={"nsfw": m.nsfw, "siglip": m, "ocr": m.ocr})
+        worker = screen_worker.Worker(cfg, self.server.client(), screener)
+        _, lines = run(worker)
+        rec = next(r for r in lines if r.get("id") == "EEEEEEEEEEEE")
+        self.assertEqual((rec["decision"], rec["rule"]), ("hide", "text-hide"))
+        self.assertEqual(rec["hits"][0]["source"], "description")
+        st = self.server.design_states()
+        self.assertEqual(st["EEEEEEEEEEEE"][0], "hidden")
+        self.assertIn("'zqxtestword' in the description", st["EEEEEEEEEEEE"][1])
+        self.assertEqual(st["AAAAAAAAAAAA"][0], "clear")
+        # the zero-shot model saw the whole frame only for designs, and the tiles for the photo
+        self.assertIn(((288, 160), ["full"]), m.regions)
+        self.assertIn(((1920, 1080), ["full"] + ["tile%d" % i for i in range(6)]), m.regions)
+
+    def test_the_operator_decides_first(self):
+        operator = self.server.client()
+
+        def hold_first(item):
+            if item["id"] == "AAAAAAAAAAAA":
+                operator._request("POST", "/admin/designs/AAAAAAAAAAAA/hold",
+                                  {"note": "operator: looking"})
+
+        worker = screen_worker.Worker(CFG, self.server.client(), StubScreener(hold_first))
+        _, lines = run(worker)
+        rec = next(r for r in lines if r.get("id") == "AAAAAAAAAAAA")
+        self.assertEqual((rec["decision"], rec["done"]), ("release", "operator-decided-first"))
+        self.assertEqual(self.server.design_states()["AAAAAAAAAAAA"][:2], ("held", "operator: looking"))
+        self.assertNotIn("AAAAAAAAAAAA", self.server.site())
+        # nothing releases a design the operator hid
+        operator._request("POST", "/admin/designs/DDDDDDDDDDDD/hide")
+        with self.assertRaises(screen_client.AdminError) as e:
+            operator._request("POST", "/admin/designs/DDDDDDDDDDDD/release")
+        self.assertEqual(e.exception.status, 409)
+
+    def test_dry_run_changes_nothing(self):
+        stub = StubScreener()
+        worker = screen_worker.Worker(CFG, self.server.client(), stub, dry_run=True)
+        _, lines = run(worker)
+        self.assertEqual({s for s, _, _ in self.server.design_states().values()}, {"pending"})
+        self.assertIn("dry-run", {r.get("done") for r in lines if r.get("event") == "design"})
+        stub.calls.clear()
+        (done, _), _ = run(worker)  # what it would hold is not scored again
+        self.assertNotIn("CCCCCCCCCCCC", stub.calls)
+
+    def test_designs_can_be_turned_off(self):
+        cfg = dict(CFG, designs={"enabled": False})
+        worker = screen_worker.Worker(cfg, self.server.client(), StubScreener())
+        (done, _), lines = run(worker)
+        self.assertEqual(done, 1)
+        self.assertEqual({s for s, _, _ in self.server.design_states().values()}, {"pending"})
+
+
+class OlderServer(unittest.TestCase):
+    def test_a_server_without_designs_still_gets_its_photos_screened(self):
+        server = LocalServer({"AAAAAAAAAAAA": (plain(GREEN), "")})
+        try:
+            client = server.client()
+            real = client._request
+
+            def no_designs(method, path, *a, **kw):
+                if path.startswith("/admin/designs"):
+                    raise screen_client.AdminError(404, "not found")
+                return real(method, path, *a, **kw)
+            client._request = no_designs
+            worker = screen_worker.Worker(CFG, client, StubScreener())
+            (done, waiting), _ = run(worker)
+            self.assertEqual((done, waiting), (1, 0))
+            self.assertEqual(server.statuses()["AAAAAAAAAAAA"][0], "live")
+            self.assertGreater(worker._no_designs_until, time.monotonic())
+        finally:
+            server.close()
+
+
 class TrustedProxyServer(unittest.TestCase):
     # (A wrong token cannot be tested from this machine: its loopback is admin without one
     # unless it is a trusted proxy. BridgeAddress checks the token for other addresses.)
@@ -260,6 +506,9 @@ class TrustedProxyServer(unittest.TestCase):
         try:
             with self.assertRaises(screen_client.AdminError) as e:
                 server.client().queue()
+            self.assertEqual(e.exception.status, 403)
+            with self.assertRaises(screen_client.AdminError) as e:
+                server.client().design_queue()
             self.assertEqual(e.exception.status, 403)
         finally:
             server.close()

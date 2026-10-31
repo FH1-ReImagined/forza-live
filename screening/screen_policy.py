@@ -3,10 +3,13 @@ the scores of one photo and the thresholds of screening.toml. A pure function: n
 
 A photo is hidden only on a confident hit; anything doubtful is left held for the maintainer;
 a photo some stage could not score is never released. Rule names go into the log and, for a
-hidden photo, into the note the server keeps.
+hidden photo, into the note the server keeps. A design (a paint job's or vinyl group's
+preview) is decided by the same table; its title and description are the player's own words,
+like a photo's title.
 """
 
 RELEASE, HIDE, HOLD = "release", "hide", "hold"
+TYPED = ("title", "description")  # text the player typed: read for sure, unlike OCR
 
 DEFAULTS = {
     "nsfw": {"hold_medium_high": 0.30, "hide_high": 0.90},
@@ -52,8 +55,8 @@ def decide(s, cfg=None):
     min_conf = t["text"]["hide_min_confidence"]
     for h in hits:
         where = h.get("source", "ocr")
-        sure = where == "title" or (where == "ocr" and h.get("confidence", 0.0) >= min_conf)
-        what = "'%s' in the %s" % (h["term"], "text of the photo" if where == "ocr" else where)
+        sure = where in TYPED or (where == "ocr" and h.get("confidence", 0.0) >= min_conf)
+        what = "'%s' in the %s" % (h["term"], "text of the picture" if where == "ocr" else where)
         if h["level"] == "hide" and where != "gamertag":
             rule(HIDE if sure else HOLD, "text-hide" if sure else "text-unsure", what)
         elif h["level"] in ("hide", "hate", "hold"):
