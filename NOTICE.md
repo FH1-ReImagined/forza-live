@@ -54,5 +54,8 @@ SOFTWARE.
 ## Third-party components
 
 The server uses only the Python standard library and contains no vendored third-party code.
+The community photos' screening worker (`screening/`, a separate image) uses third-party packages,
+models and word lists that its image downloads when it is built; none of them is in this
+repository. They and their licences are listed in [`screening/NOTICE.md`](screening/NOTICE.md).
 The game's repository is checked out beside this one only to run the tests; none of it is part of
 this repository.

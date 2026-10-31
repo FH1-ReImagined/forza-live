@@ -1,0 +1,10 @@
+# The image's model-building stage only (build_models.py): compiled into requirements-build.txt
+torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.14.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=5a6363570c753812540a05eb82380e329469cbe668643e88111414c12627711f
+torchvision @ https://download-r2.pytorch.org/whl/cpu/torchvision-0.29.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ef220d4b21878c58947851beb7337382897159105f012f0c9c07bf7e84174d7e
+timm==1.0.29
+onnx==1.23.1
+safetensors==0.8.0
+tokenizers==0.23.1
+onnxruntime==1.31.0
+numpy==2.5.3
+pillow==12.3.0

@@ -1,0 +1,64 @@
+# The screening worker's settings (screening/README.md). Mounted over /app/screening.toml (or
+# --config) to change them without a rebuild; the prompts are the exception (prompts.json, built
+# into the image).
+
+[server]
+# The forza-live HTTP port, reached from the container's bridge network (env FORZA_SERVER wins).
+url = "http://172.17.0.1:21201"
+poll_seconds = 30
+timeout_seconds = 30
+max_per_poll = 20             # photos screened per poll (the rest wait for the next one)
+max_image_bytes = 16777216    # the server's own cap on a published picture
+fetch_attempts = 5            # a photo whose image cannot be fetched this often is left held
+hidden_refresh_seconds = 3600 # how often the hidden photos' pHashes are read again
+
+[runtime]
+models_dir = "/models"
+threads = 4                   # onnxruntime threads per model (they run one after the other)
+selftest = true               # check the models on drawn pictures at start (exit if they fail)
+
+# Thresholds: screen_policy.py applies them, the README's decision table explains them.
+# Hide only on a confident hit; hold anything doubtful; release the rest.
+
+[nsfw]
+hold_medium_high = 0.30       # P(medium) + P(high) of Freepik's classifier: hold
+hide_high = 0.90              # P(high): hide
+
+[zeroshot]
+# SigLIP2: the highest sigmoid probability of a category's prompts over the whole frame and the
+# tiles. Measured on 69 game screenshots (menus, HUD, races, a festival video): hate at most 0.11
+# (a minimap's crossing roads), nudity 0.11 (a bare leg in the intro video), gore 0.02; a
+# clearly drawn swastika scores 0.95 or more, even 120 px wide on a car door; a plain red cross
+# or star 0.14-0.16.
+grids = [[3, 2]]              # tiles per grid, columns x rows (1920 x 1080: 640 x 540 tiles)
+hide_hate_with_text = 0.90    # hate this high and a [hate] or [hide] word in the text: hide
+ambiguous_with_hate = 0.20    # an [ambiguous] code (88, 14, SS...) with hate this high: hold
+
+[zeroshot.hold]
+hate = 0.30
+gore = 0.30
+nudity = 0.30
+
+[text]
+terms = "wordlists/terms.txt"           # relative to this file's folder
+ldnoobw = "/models/wordlists/ldnoobw"   # LDNOOBW's lists, fetched at build time
+ldnoobw_skip = "wordlists/ldnoobw_skip.txt"  # their entries that are ordinary English words
+min_confidence = 0.50                   # OCR lines below this are logged and ignored
+hide_min_confidence = 0.80              # a [hide] term read below this holds instead
+check_gamertag = true                   # a listed word in the credited name holds the photo
+
+[phash]
+hold_distance = 6             # a held photo this close (bits of 64) to a hidden one: hold
+
+[probe]
+# A trained classifier over the SigLIP2 embeddings (screen_models.Probe): set path to its .npz
+# and thresholds per label, e.g. hold = { hate = 0.5 }, hide = { hate = 0.95 }.
+path = ""
+hold = {}
+hide = {}
+
+[state]
+# Optional: a writable folder (a volume) where the embeddings of every screened photo are kept
+# (for training a probe later). Empty: nothing is written.
+dir = ""
+save_embeddings = false

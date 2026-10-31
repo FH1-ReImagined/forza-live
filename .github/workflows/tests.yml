@@ -40,6 +40,21 @@ jobs:
           FORZA_REPO_TOOLS: ${{ github.workspace }}/.game-repo/tools
         run: python -m unittest discover -s . -p 'test_*.py' -v
 
+  # The community photos' screening worker (screening/): its decision table, word lists and the
+  # worker against this server, with stand-in models. The test with the real models needs the
+  # image's built models and is skipped here.
+  screening:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Screening worker tests
+        run: |
+          python -m pip install numpy==2.5.3 pillow==12.3.0
+          python -m unittest discover -s screening -p 'test_screen_*.py' -v
+
   # The launcher runs this server on players' Windows PCs ("This PC" online): saves must work there
   # too (Windows' fsync needs a writable handle, which the Linux jobs cannot catch).
   windows:

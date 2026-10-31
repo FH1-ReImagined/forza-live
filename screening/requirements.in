@@ -1,0 +1,5 @@
+# The worker's image (pip-compile'd into requirements.txt with hashes; see README.md)
+onnxruntime==1.31.0
+numpy==2.5.3
+pillow==12.3.0
+rapidocr==3.10.0

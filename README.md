@@ -50,6 +50,7 @@ tunnels (playit.gg), the operator endpoints, the leaderboards and the data folde
 | `docs/title_services.md` | the title services as the game calls them (the protocol) |
 | `tools/server_probe.py` | checks a server from outside (status page, UDP HELLO -> WELCOME) |
 | `tools/xtsw_decode.py` | decodes the requests a server saved with `--dump-requests` |
+| `screening/` | the automatic screening worker for community photos (its own Docker image; [`screening/README.md`](screening/README.md)) |
 
 ## Tests
 

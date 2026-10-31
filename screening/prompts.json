@@ -1,0 +1,60 @@
+{
+ "comment": "SigLIP2 zero-shot prompts, embedded once when the image is built (build_models.py embed; the text model is not in the image). Changing them needs a rebuild. Each prompt is used as 'this is a photo of <prompt>.', lowercased (SigLIP2's training format). A photo's score for a category is computed per region (the whole frame and each tile) from these prompts: the categories that screening.toml gives thresholds to (hate, gore, nudity) are scored against the 'neutral' ones, which describe what Forza photos normally show (so a flag livery or a JDM rising sun competes with a car livery, not with nothing). 'selftest' is only for the start-up check and the tests: it is never part of a decision.",
+ "template": "this is a photo of {}.",
+ "categories": {
+  "hate": [
+   "a swastika",
+   "a nazi swastika flag",
+   "a swastika painted on a car",
+   "a nazi flag",
+   "nazi ss runes",
+   "a ku klux klan hood and robe",
+   "a confederate battle flag",
+   "a white supremacist symbol",
+   "an isis flag"
+  ],
+  "gore": [
+   "gore",
+   "a bloody mutilated body",
+   "a dead body covered in blood",
+   "graphic violence with blood and wounds",
+   "a severed body part"
+  ],
+  "nudity": [
+   "a naked person",
+   "nudity",
+   "pornography",
+   "a nude woman",
+   "exposed breasts",
+   "explicit sexual content"
+  ],
+  "neutral": [
+   "a car",
+   "a sports car",
+   "a race car with a livery",
+   "a car with racing numbers and sponsor logos",
+   "a car with a painted design",
+   "a car with a flag painted on it",
+   "a car with an anime character painted on it",
+   "a car with a cross painted on it",
+   "a car with a rising sun flag livery",
+   "a car with flames painted on it",
+   "a car with a skull painted on it",
+   "a road through the countryside",
+   "a landscape with mountains and trees",
+   "a city street",
+   "a video game screenshot",
+   "a video game menu",
+   "the inside of a car",
+   "the sky with clouds",
+   "a crowd of people at a music festival",
+   "a person standing next to a car",
+   "a sunset",
+   "a desert",
+   "a car crash"
+  ],
+  "selftest": [
+   "a red star"
+  ]
+ }
+}
