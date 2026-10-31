@@ -110,6 +110,9 @@ class Store:
             data = durable.load(self.path())
             self.boards = migrate(data.get("boards", {}))
             self.club = data.get("club1000", {})
+            # Entries put back by hand after the 2026-10-27 outage had no "xuid".
+            for key, entry in self.club.items():
+                entry.setdefault("xuid", key)
             self.next_file = data.get("nextFileId", 1)
         except (OSError, ValueError):
             return
