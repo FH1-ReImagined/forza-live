@@ -1,7 +1,8 @@
 # The server's unit tests on every push to main and every pull request, and the Docker image.
 # test_forza_shader_lists also checks the server's copy of the pipeline list format against its
-# definition in the game's repository (tools/pipeline_list.py, tools/fxobj_shaders.py): those
-# files are checked out beside this repository for it.
+# definition in the game's repository (tools/pipeline_list.py, tools/fxobj_shaders.py), and
+# test_forza_design_feed the design preview decoder against the one it ports
+# (tools/xdc_decode.py): those files are checked out beside this repository for it.
 name: tests
 
 on:
@@ -30,6 +31,7 @@ jobs:
             tools/pipeline_list.py
             tools/fxobj_shaders.py
             tools/xxh3.py
+            tools/xdc_decode.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - uses: actions/setup-python@v5

@@ -126,7 +126,7 @@ starts with a header). And never leave an option on once its tunnel's setting is
 
 ## Operator endpoints
 
-(Community photos' moderation has stricter rules: [below](#community-photos).)
+(The moderation of community photos and designs has stricter rules: [below](#community-photos).)
 
 `GET /gift?to=<gamertag|XUID>&credits=<n>[&message=..]` or `&car=<id>`,
 `GET /notify?to=..&type=..`, and `GET /world/event?session=all|<id>[&event=<id>]` are
@@ -396,7 +396,8 @@ operator.
 
 [`screening/`](../screening/README.md) is that worker. Run it beside a server that has
 `FORZA_COMMUNITY_HOLD=1`. Every 30 s it reads the queue and scores each held photo locally, on
-the CPU, with no hosted service:
+the CPU, with no hosted service (and the [designs](#community-designs) waiting for the website,
+the same way):
 
 - an NSFW classifier (Freepik's EVA02, MIT);
 - SigLIP2 zero-shot prompts for hate symbols, gore and nudity, over the whole frame and 6 tiles
@@ -433,6 +434,46 @@ the README shows how to give it a network of its own with an iptables rule.
 
 To review what it left held, run `docker logs forza-screening | grep '"decision":"hold"'`, then
 use the routes above.
+
+## Community designs
+
+The paint jobs and vinyl groups players share in the game's design storefront
+([title services](title_services.md#designs-on-the-website-forza_design_feedpy)) are listed in
+the game at once. The website's designs page shows one only after the
+[screening worker](#automatic-screening-screening) has passed its preview: until then it is
+`pending`. Every design that was on the server before this version starts `pending` too, at the
+first start. A confident screening hit (or the operator) hides the design in the game as well,
+as three player reports do. Nothing to set up: the routes are on the HTTP port with the rest, and
+the worker screens designs as well as photos.
+
+- Public: `GET /community/designs.json` (designs listed in the game and screened clear, newest
+  first, at most 500: public id, type, share code, title, description, gamertag, car name, layers,
+  downloads, rating, upload time and the preview's URL, size and SHA-256; no XUID, no payload) and
+  `GET /community/design-img/<id>.png` (the preview, 288x160 or 256x128, made by the server from
+  the game's texture). Cached and rate limited like the photos' routes.
+- Car names: a paint job's car is named only when `leaderboard_names.json` names it (the file of
+  [the leaderboards](#leaderboards-on-the-website-148)); otherwise `car` is null.
+
+Moderation, with the same rules as the photos' (the LAN or an ssh tunnel, the token in its header
+only, no proxy, no `Origin`). With `T` and `S` as above:
+
+```
+curl -H "$T" $S/admin/designs/queue              # pending designs, oldest first (no XUID)
+curl -H "$T" "$S/admin/designs?state=held"       # every design (pending, clear, held, hidden)
+                                                 # with its owner XUID, note, reports, car
+curl -H "$T" $S/admin/designs/img/<id>.png -o d.png   # its preview, whatever its state
+curl -H "$T" -X POST $S/admin/designs/<id>/release   # on the website (pending or held)
+curl -H "$T" -X POST $S/admin/designs/<id>/hold      # off the website, still in the game
+curl -H "$T" -X POST $S/admin/designs/<id>/hide      # off the website and out of the game
+curl -H "$T" -X POST $S/admin/designs/<id>/unhide    # back (also after three reports)
+curl -H "$T" -X POST $S/admin/designs/<id>/delete    # gone, from the game too
+curl -H "$T" -X POST $S/admin/designs/<id>/ban       # bans the design's owner
+```
+
+`<id>` is the design's public id. A hidden design cannot be released (409): unhide it. The
+actions take an optional `{"note": "...", "expect": "pending"}`; with `expect` the action applies
+only to a design in that state (409 otherwise), which is how the worker never overrides you: it
+releases, holds or hides only designs that are still pending.
 
 ## Signed requests (#515)
 

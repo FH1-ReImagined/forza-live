@@ -8,8 +8,8 @@ online. One Python 3 program, standard library only, nothing to install.
   who cannot reach each other directly.
 - **TCP 21201**: the title services the game asks Turn 10's servers for (the Horizon sign-in,
   Find Game playlists, online XP, scoreboards, leaderboards and Rivals ghosts, car clubs,
-  photos and designs, notifications), a JSON status page at `/`, and the community photos the
-  website's gallery copies (`/community/gallery.json`).
+  photos and designs, notifications), a JSON status page at `/`, and the community photos and
+  shared designs the website copies (`/community/gallery.json`, `/community/designs.json`).
 - Friends and text chat, the Horizon World (a shared free roam with festival events), the
   Co-op Festival campaign, head-to-head challenges, the players' shader lists.
 
@@ -43,14 +43,14 @@ tunnels (playit.gg), the operator endpoints, the leaderboards and the data folde
 |------|------|
 | `forza_live_server.py` | the UDP server, the HTTP port and the command line |
 | `forza_live_lsp.py`, `forza_xtsw.py`, `forza_xtsw_all.py` | Turn 10's title services and their wire format |
-| `forza_*.py` | friends, chat, stats, scores and leaderboards, clubs, photos and community photos, the design storefront, market, notifications, the Horizon World, the co-op campaign, challenges, shader lists, limits |
+| `forza_*.py` | friends, chat, stats, scores and leaderboards, clubs, photos and community photos, the design storefront and its designs on the website, market, notifications, the Horizon World, the co-op campaign, challenges, shader lists, limits |
 | `playground_rounds.xml` | the round presets the playlists serve |
 | `test_*.py` | unit tests |
 | `docs/hosting.md` | running a server |
 | `docs/title_services.md` | the title services as the game calls them (the protocol) |
 | `tools/server_probe.py` | checks a server from outside (status page, UDP HELLO -> WELCOME) |
 | `tools/xtsw_decode.py` | decodes the requests a server saved with `--dump-requests` |
-| `screening/` | the automatic screening worker for community photos (its own Docker image; [`screening/README.md`](screening/README.md)) |
+| `screening/` | the automatic screening worker for community photos and designs (its own Docker image; [`screening/README.md`](screening/README.md)) |
 
 ## Tests
 

@@ -32,6 +32,7 @@ import forza_auth as auth
 import forza_challenge as challenge
 import forza_chat as chat
 import forza_community as community
+import forza_design_feed as design_feed
 import forza_discord_status as discord_status
 import forza_friends as friends
 import forza_events as events
@@ -1468,9 +1469,11 @@ async def http_handler(server, reader, writer):
             if path in ("/", "/status"):
                 reply = response(200, json.dumps(server.status(), indent=2, default=str).encode(),
                                  "application/json", conn)
-            elif path.startswith("/admin/") and not community.handles(path):
+            elif path.startswith("/admin/") and not (community.handles(path)
+                                                     or design_feed.handles(path)):
                 # Chat moderation (forza_chat.py): /admin/chat, /admin/mute, /admin/kick.
-                # (Community photos' /admin/photos has its own rules: lsp.handle.)
+                # (Community photos' /admin/photos and the designs' /admin/designs have their
+                # own rules: lsp.handle.)
                 url = urllib.parse.urlsplit(path)
                 query = urllib.parse.parse_qs(url.query)
                 if not lsp.is_admin(peer, headers, query):

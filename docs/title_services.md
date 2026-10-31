@@ -855,14 +855,56 @@ Everything is free (Price 0, Quantity -1, whatever the player chose). One downlo
 one rating per player, never the owner's, only from proven callers; three distinct reporters
 hide a file at once. Each file has a six-character share code: typed into a search's gamertag
 or text field, it finds that file alone. A `held` state (listed to its owner only) is ready for
-screening uploads later; nothing is held for now. Files: `DATA_DIR/designs.json` and
-`DATA_DIR/designs/<id>.bin` / `.prev`, in the disk quota; design ids start at 100,000,000, so the
-calls shared with photos (`Purchase`, `RemoveFile`, `DownloadContent`...) tell them apart by id.
+screening uploads before they are listed; nothing is held for now: a design is listed at once.
+A design the screening or the operator hid for the website ([below](#designs-on-the-website-forza_design_feedpy))
+is hidden in the game too, as after three reports. Files: `DATA_DIR/designs.json` and
+`DATA_DIR/designs/<id>.bin` / `.prev` (and `.png`, the website's copy of the preview), in the
+disk quota; design ids start at 100,000,000, so the calls shared with photos (`Purchase`,
+`RemoveFile`, `DownloadContent`...) tell them apart by id.
 
 Seen in a game (two identities with different profile keys, a local server): A uploaded a paint
 job and a vinyl group with signed requests; B found each by its share code, bought, rated and
 applied it ("Successfully applied design from design catalog"; the livery on B's car in free
 roam).
+
+### Designs on the website (`forza_design_feed.py`)
+
+The website's designs page shows the paint jobs and vinyl groups players share, with their
+preview, and the share code to find each one in the game. A design is listed in the game as soon
+as it is uploaded, as before; the website shows it only once its preview has passed the
+automatic screening ([`screening/`](../screening/README.md), local models only). Each design has
+a web state, kept with it in `designs.json`:
+
+| Web state | In the game | On the website |
+| --- | --- | --- |
+| `pending`: new, and every design there before this module (given at start); the screening worker's queue | listed | no |
+| `clear`: released by the worker or the operator | listed | yes, while listed in the game (not hidden by reports, the owner not banned) |
+| `held`: the worker was not sure, or the preview does not convert; left for the operator | listed | no |
+| `hidden`: a confident screening hit, or the operator | listed to its owner only, as after three reports | no |
+
+The preview is the game's `cxds` texture (288x160 for a paint job, 256x128 for a vinyl group).
+`forza_cxds.py` decodes it with the standard library: the `cxds` v2 header (the texture's size
+twice and its packed size), the raw-deflated texture (exactly that size, nothing after it), its
+format word at 0x20 (tiled 8_8_8_8 only) and size word (13 bits each, at most 1024 pixels), the
+ARGB pixels in the Xbox 360's tiled order (the port of the game repository's
+`tools/xdc_decode.py`, with the same checks). The stored pixels are dark: the game shows them with
+a gamma of about 1/2.2, so the PNG has that gamma applied (the same pixels as `xdc_decode.py` with
+`round(255 * (v / 255) ** (1 / 2.2))`; alpha dropped). The PNG is 8-bit RGB with IHDR, IDAT and
+IEND only, kept as `DATA_DIR/designs/<file id>.png`; converting one takes about 3 ms. A preview
+that does not convert, or that the website would refuse (32 to 1024 pixels a side, at most 1 MiB
+as a PNG), holds its design, with the reason as its note; the game is not affected.
+
+A paint job's car name is the one the leaderboards show: `cars` in the operator's
+`leaderboard_names.json` (by the car's `Data_Car` id, the paint job's ModelId; written from a copy
+of the game by the game repository's `tools/extract_map_points.py --names`,
+[hosting](hosting.md#leaderboards-on-the-website-148)). The game database (`--game-db`) holds only
+references into the game's compressed string tables, so without that file `car` is null.
+
+| Route | |
+| --- | --- |
+| `GET /community/designs.json` | `{"version":1,"generated":<unix>,"designs":[{"id","type","code","title","description","gamertag","car","layers","downloads","rating","createdAt","preview","w","h","sha256"}]}`: designs listed in the game and `clear`, newest first, at most 500. `id` is the design's random public id (12 base32 characters, never the storefront's file id); `type` `livery` or `vinylgroup`; `code` the share code; `gamertag` the creator's (a design whose creator has no gamertag on record is not listed); `car` `{"name": "2012 Lamborghini Aventador LP700-4"}` or null (always null for a vinyl group); `layers` a vinyl group's number of layers, null for a paint job (the storefront does not say); `rating` `{"avg", "count"}`; `createdAt` the upload's time; `preview` `/community/design-img/<id>.png`, `w`, `h` and `sha256` its size and hash. Never a XUID or a payload (a payload holds its creator's XUID). Built again when a design or the ban list changes, at most every 60 s otherwise; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60` |
+| `GET /community/design-img/<id>.png` | the preview of a design in the feed, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 design image requests a minute (then 429) |
+| `/admin/designs...` | the operator's and the screening worker's ([hosting](hosting.md#community-designs)), with the community photos' rules |
 
 ### Notifications (Message Center) (`forza_notifications.py`)
 
