@@ -19,14 +19,14 @@ PER_PLAYER = {"auctions": 30, "shared_cars": 100, "gifts": 50}  # open items per
 BLOB_DIRS = ("ghosts", "market", "clubs", "photos", "designs", "community")
 
 _data_dir = "forza_live_data"
-_cache = [0.0, 0]  # time of the last scan, bytes found
+_cache = [float("-inf"), 0]  # time of the last scan, bytes found
 _added = [0]       # bytes accepted since
 
 
 def configure(data_dir):
     global _data_dir
     _data_dir = data_dir
-    _cache[:] = [0.0, 0]  # another folder: scan it at the next upload
+    _cache[:] = [float("-inf"), 0]  # another folder: scan it at the next upload
     _added[0] = 0
 
 
