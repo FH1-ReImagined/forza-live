@@ -1,0 +1,77 @@
+# The screening worker's own terms (screen_text.py), besides LDNOOBW's lists (every LDNOOBW term
+# holds a photo). One term or phrase a line, matched after normalisation: NFKC, case folded,
+# accents, look-alike letters (Cyrillic and Greek), leetspeak (n1gg3r) and spaced letters (n i g)
+# undone. A word matches whole (with a plural s, es or z); in a [hold] check, any of these terms of
+# 5 letters or more also matches inside a longer word. Numbers match only as whole numbers.
+#
+# [hide]       unambiguous slurs and extremist slogans: read clearly in the photo, or in its
+#              title, the photo is hidden
+# [hate]       hate words with other uses (history, film titles): they hold the photo; with a
+#              confident hate symbol (screening.toml zeroshot.hide_hate_with_text) it is hidden
+# [ambiguous]  codes with innocent uses (race numbers, model badges, the swastika characters,
+#              read as "manjisign"): alone they do nothing (they are logged); with a
+#              hate-symbol score of zeroshot.ambiguous_with_hate they hold
+# [allow]      phrases that are no hit although they contain a listed term (removed from the
+#              text before matching)
+#
+# Sources: ADL's hate symbols database (numeric codes, slogans) and the LDNOOBW English list.
+
+[hide]
+nigger
+nigga
+sandnigger
+kike
+wetback
+faggot
+raghead
+towelhead
+heil hitler
+sieg heil
+1488
+14 88
+gas the jews
+white power
+rahowa
+kkk
+ku klux klan
+
+[hate]
+nazi
+nazis
+hitler
+swastika
+third reich
+zyklon
+white pride
+14 words
+blood and honour
+blood and honor
+totenkopf
+chink
+gook
+spic
+tranny
+untermensch
+judenfrei
+
+[ambiguous]
+manjisign
+14
+18
+28
+88
+ss
+hh
+311
+2316
+
+[allow]
+scat pack
+hooker headers
+dick johnson
+snigger
+sniggers
+sniggering
+niggard
+niggardly
+niggardliness

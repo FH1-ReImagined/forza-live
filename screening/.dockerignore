@@ -1,0 +1,13 @@
+*
+!Dockerfile
+!requirements.txt
+!requirements-build.txt
+!build_models.py
+!models.lock.json
+!prompts.json
+!screen_*.py
+!synth.py
+!screening.toml
+!NOTICE.md
+!wordlists
+test_*.py

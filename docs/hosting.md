@@ -348,11 +348,12 @@ routes are on the HTTP port with the rest.
   `GET /community/img/<id>.png`. The website's `pages` workflow (its `tools/build_gallery.py`,
   `GALLERY_FEED_URL=http://forza-reimagined.playit.plus:56678`) copies them, re-encoded, into the
   site; a photo hidden or deleted here leaves the site at its next build.
-- Published at once, unless `FORZA_COMMUNITY_HOLD=1` (new photos wait as `held` for a screening
-  worker or the operator to release them). `FORZA_COMMUNITY_MAX_WIDTH` (default 1920) is the
-  width a big shot's copy is halved down to. Caps: 10 photos a day and 200 in all per player, 60
-  an hour on the server, 60 big shot uploads started an hour; copies count in
-  `FORZA_DISK_CAP_MB`. Converting a big shot takes the server about 0.2 s.
+- Published at once, unless `FORZA_COMMUNITY_HOLD=1` (new photos wait as `held` for the
+  [screening worker](#automatic-screening-screening) or the operator to release them).
+  `FORZA_COMMUNITY_MAX_WIDTH` (default 1920) is the width a big shot's copy is halved down to.
+  Caps: 10 photos a day and 200 in all per player, 60 an hour on the server, 60 big shot uploads
+  started an hour; copies count in `FORZA_DISK_CAP_MB`. Converting a big shot takes the server
+  about 0.2 s.
 - Big shots are not kept as private files (only the published copy), and the game sends no
   removal: a player who wants a photo gone asks the operator.
 - Games built from game main up to 3896de8 capture the big shot's tiles wrongly with the default
@@ -385,10 +386,53 @@ curl -H "$T" -X POST $S/admin/photos/ban/<XUID>  # or by XUID; unban/<XUID> lift
 A ban goes into `banned_xuids.json` in the data folder (the list the design storefront uses
 too, a JSON list of hex XUIDs that can also be edited by hand): the player's new uploads are not
 published and their photos are served to nobody until the ban is lifted. For a screening worker
-(a separate container on the LAN with the token): `GET /admin/photos/queue` lists the held
-photos, oldest first; `POST /admin/photos/<id>/hold` takes a live photo back to the queue,
-`POST .../release` publishes a held one (a photo the operator hid cannot be released, 409), and
-both take an optional `{"note": "..."}` kept for the operator.
+(a separate container with the token, at an address that is not a trusted proxy):
+`GET /admin/photos/queue` lists the held photos, oldest first; `POST /admin/photos/<id>/hold`
+takes a live photo back to the queue, `POST .../release` publishes a held one (a photo the
+operator hid cannot be released, 409), and both take an optional `{"note": "..."}` kept for the
+operator.
+
+### Automatic screening (`screening/`)
+
+[`screening/`](../screening/README.md) is that worker. Run it beside a server that has
+`FORZA_COMMUNITY_HOLD=1`. Every 30 s it reads the queue and scores each held photo locally, on
+the CPU, with no hosted service:
+
+- an NSFW classifier (Freepik's EVA02, MIT);
+- SigLIP2 zero-shot prompts for hate symbols, gore and nudity, over the whole frame and 6 tiles
+  (Apache-2.0);
+- OCR (RapidOCR, Apache-2.0) and word lists (LDNOOBW, CC-BY-4.0, and its own list of slurs,
+  slogans and codes).
+
+It then releases the photo, hides it with a note naming the rule (`screening: hide (nsfw-high:
+...)`), or leaves it held for you, logging why. Only a confident hit hides a photo. A race number
+such as 14, 18 or 88, or a badge such as SS, never hides one. The decision table, the measured
+cost (about 1.3 s and 1.4 GB at peak on 4 threads) and the known limits are in its README.
+
+Deployment, on the machine of the server above (the commands are in the README):
+
+- Build it with `docker build -t forza-screening screening/`. The build downloads the models,
+  pinned by revision and SHA-256. The running container downloads nothing.
+- Give it the token in an env file (`--env-file`).
+- Run it on the default **bridge** network, not `host`, with
+  `-e FORZA_SERVER=http://172.17.0.1:21201` (the bridge's gateway).
+- Use `--memory 3g --read-only --cap-drop ALL`.
+
+Why the bridge network:
+
+- With `--network host` the worker would come from 127.0.0.1, a trusted proxy here, and every
+  moderation request would be refused.
+- From the bridge it comes from its own 172.17.0.x address. That address is no trusted proxy and
+  sends no proxy header, so the token admits it.
+- So the server must listen on all addresses (`--host 0.0.0.0`), and `--trusted-proxy` must not
+  cover 172.17.0.0/16.
+
+The worker's image sets `ORT_DISABLE_TELEMETRY=1`: onnxruntime's Linux packages would otherwise
+send usage telemetry to Microsoft. To stop the container from reaching anything but the server,
+the README shows how to give it a network of its own with an iptables rule.
+
+To review what it left held, run `docker logs forza-screening | grep '"decision":"hold"'`, then
+use the routes above.
 
 ## Signed requests (#515)
 
