@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Forza Live community photos: the automatic screening worker (screening/README.md).
+"""Forza Live community photos and designs: the automatic screening worker (screening/README.md).
 
-Polls the server's queue of held photos, scores each one (NSFW classifier, SigLIP2 zero-shot over
-the frame and tiles, OCR and word lists) and releases it, hides it with a note naming the rule,
-or leaves it held for the maintainer. One JSON line per photo on stdout: id, model versions,
-scores, OCR text, the rule, the decision, latency. No XUID (the queue's owner field is dropped),
+Polls the server's queue of held photos and its queue of pending designs (the design
+storefront's paint jobs and vinyl groups, before the website shows them), scores each one (NSFW
+classifier, SigLIP2 zero-shot over the frame and, for photos, tiles; OCR and word lists over the
+picture's text, the title and a design's description) and releases it, hides it with a note
+naming the rule, or leaves it held for the maintainer (a design is moved to held, with the note).
+One JSON line per photo or design on stdout: id, model versions, scores, OCR text, the rule, the
+decision, latency. No XUID (the photo queue's owner field is dropped; the design queue has none),
 never the token.
 
   screen_worker.py [--config screening.toml] [--once] [--dry-run]
-  screen_worker.py --score FILE...     score local pictures, print the decisions, no server
+  screen_worker.py --score [--design] FILE...   score local pictures (--design: as design
+                                               previews), print the decisions, no server
 
 The token: env FORZA_ADMIN_TOKEN, or the file named by FORZA_ADMIN_TOKEN_FILE.
 """
@@ -82,7 +86,8 @@ class Screener:
         probe = cfg.get("probe", {}).get("path", "")
         self.probe = screen_models.Probe(rel(cfg, probe)) if probe else None
         self.versions = self._versions()
-        self.hidden = {}  # photo id -> pHash of the hidden photos (pHash rule)
+        self.hidden = {}          # photo id -> pHash of the hidden photos (pHash rule)
+        self.hidden_designs = {}  # design id -> pHash of the hidden designs
         state = cfg.get("state", {})
         self.embeddings_dir = None
         if state.get("save_embeddings") and state.get("dir"):
@@ -106,8 +111,12 @@ class Screener:
             v["probe"] = os.path.basename(self.probe.path)
         return v
 
-    def score(self, img, photo=None):
+    def score(self, img, photo=None, grids=None, hidden=None):
+        """grids: the tiles for the zero-shot model (default: [zeroshot] grids; [] the whole
+        frame only); hidden: the pHashes to compare with (default: the hidden photos')."""
         photo = photo or {}
+        grids = self.grids if grids is None else grids
+        hidden = self.hidden if hidden is None else hidden
         s = {"errors": {}, "hits": []}
         fields, ms = {}, {}
 
@@ -125,7 +134,7 @@ class Screener:
         s["nsfw"] = stage("nsfw", lambda: self.nsfw(img))
         if s["nsfw"]:
             fields["nsfw"] = {k: short(v) for k, v in s["nsfw"].items()}
-        emb = stage("siglip", lambda: self.siglip.embed(img, self.grids))
+        emb = stage("siglip", lambda: self.siglip.embed(img, grids))
         if emb:
             names, vectors = emb
             s["zeroshot"] = self.siglip.score(names, vectors)
@@ -142,8 +151,9 @@ class Screener:
         for t, c in lines:
             if c >= self.min_conf:
                 s["hits"] += self.terms.check(t, "ocr", c)
-        if photo.get("title"):
-            s["hits"] += self.terms.check(photo["title"], "title")
+        for field in ("title", "description"):
+            if photo.get(field):
+                s["hits"] += self.terms.check(photo[field], field)
         if self.check_gamertag and photo.get("gamertag"):
             s["hits"] += self.terms.check(photo["gamertag"], "gamertag")
         fields["hits"] = [{k: h[k] for k in ("term", "level", "match", "source", "confidence")}
@@ -151,7 +161,7 @@ class Screener:
         ph = stage("phash", lambda: screen_image.phash(img))
         if ph:
             fields["phash"] = ph
-            near = [(screen_image.distance(ph, h), pid) for pid, h in self.hidden.items()
+            near = [(screen_image.distance(ph, h), pid) for pid, h in hidden.items()
                     if pid != photo.get("id")]
             if near:
                 d, pid = min(near)
@@ -161,7 +171,8 @@ class Screener:
 
     def _save(self, photo, names, vectors):
         import numpy as np
-        np.savez_compressed(os.path.join(self.embeddings_dir, photo["id"] + ".npz"),
+        name = ("design-" if photo.get("kind") == "design" else "") + photo["id"]
+        np.savez_compressed(os.path.join(self.embeddings_dir, name + ".npz"),
                             regions=np.array(names), embeddings=vectors,
                             sha256=np.array(photo.get("sha256", "")))
 
@@ -200,98 +211,155 @@ class Worker:
         self.max_per_poll = int(srv.get("max_per_poll", 20))
         self.attempts = int(srv.get("fetch_attempts", 5))
         self.hidden_refresh = float(srv.get("hidden_refresh_seconds", 3600))
-        self.left = {}      # (id, sha256) -> the decision that left it held: not screened again
-        self.failures = {}  # id -> image fetches that failed
+        d = cfg.get("designs", {})
+        self.designs_on = bool(d.get("enabled", True))
+        self.design_grids = [tuple(g) for g in d.get("grids", [])]
+        self.left = {}      # (kind, id, sha256) -> the decision that left it held: not screened again
+        self.failures = {}  # (kind, id) -> image fetches that failed
         self.stop = threading.Event()
         self._hidden_at = 0.0
+        self._no_designs_until = 0.0  # a server without designs on the website: asked again then
 
-    def refresh_hidden(self):
-        """The pHashes of the hidden photos (for the like-hidden rule), read again hourly."""
-        if time.monotonic() - self._hidden_at < self.hidden_refresh and self._hidden_at:
-            return
-        self._hidden_at = time.monotonic()
+    def _refresh(self, listing, known, what):
         try:
-            hidden = self.client.photos("hidden")
+            hidden = listing()
         except Exception as e:
-            log.warning("hidden photos: %s", e)
+            log.warning("hidden %ss: %s", what, e)
             return
-        known = self.screener.hidden
         for p in hidden:
             if p["id"] in known:
                 continue
             try:
-                known[p["id"]] = screen_image.phash(screen_image.decode(self.client.image(p)))
+                data = self.client.image(p)
+                img = (screen_image.decode(data, screen_image.DESIGN_MIN, screen_image.DESIGN_MAX)
+                       if what == "design" else screen_image.decode(data))
+                known[p["id"]] = screen_image.phash(img)
             except Exception as e:
-                log.warning("hidden photo %s: %s", p["id"], e)
+                log.warning("hidden %s %s: %s", what, p["id"], e)
         for pid in set(known) - {p["id"] for p in hidden}:
             del known[pid]
 
+    def refresh_hidden(self):
+        """The pHashes of the hidden photos and designs (for the like-hidden rule), read again
+        hourly."""
+        if time.monotonic() - self._hidden_at < self.hidden_refresh and self._hidden_at:
+            return
+        self._hidden_at = time.monotonic()
+        self._refresh(lambda: self.client.photos("hidden"), self.screener.hidden, "photo")
+        if self.designs_on and time.monotonic() >= self._no_designs_until:
+            self._refresh(lambda: self.client.designs("hidden"), self.screener.hidden_designs,
+                          "design")
+
+    def design_queue(self):
+        """(pending designs, how many are pending in all); none when off or when the server has
+        no designs on the website (an older forza-live: asked again an hour later). A failure
+        here never stops the photos."""
+        if not self.designs_on or time.monotonic() < self._no_designs_until:
+            return [], 0
+        try:
+            return self.client.design_queue()
+        except Exception as e:
+            if getattr(e, "status", None) == 404:
+                log.warning("the server has no designs queue (a forza-live before the designs "
+                            "feed): designs skipped for an hour")
+                self._no_designs_until = time.monotonic() + 3600
+            else:
+                log.warning("designs' queue: %s", e)
+            return [], 0
+
+    @staticmethod
+    def key(p):
+        return (p.get("kind", "photo"), p["id"], p["sha256"])
+
     def run_once(self):
-        """One poll: (photos screened, photos waiting)."""
+        """One poll: (photos and designs screened, photos and designs waiting)."""
         self.refresh_hidden()
         queue = self.client.queue()
-        waiting = {(p["id"], p["sha256"]) for p in queue}
+        designs, pending = self.design_queue()
+        items = queue + designs
+        waiting = {self.key(p) for p in items}
         for key in set(self.left) - waiting:  # decided by the operator since
             del self.left[key]
-        todo = [p for p in queue if (p["id"], p["sha256"]) not in self.left
-                and self.failures.get(p["id"], 0) < self.attempts]
+        todo = [p for p in items if self.key(p) not in self.left
+                and self.failures.get(self.key(p)[:2], 0) < self.attempts]
         done = 0
         for p in todo[:self.max_per_poll]:
             if self.stop.is_set():
                 break
             self.screen(p)
             done += 1
-        return done, len(todo) - done
+        return done, len(todo) - done + max(0, pending - len(designs))
 
     def screen(self, p):
+        """Scores one photo or design (p["kind"]) and acts on the decision."""
         t0 = time.perf_counter()
-        rec = {"event": "photo", "id": p["id"], "sha256": p["sha256"][:16], "models":
-               self.screener.versions}
+        design = p.get("kind") == "design"
+        rec = {"event": "design" if design else "photo", "id": p["id"]}
+        if design:
+            rec["type"] = p.get("type", "?")
+        rec.update(sha256=p["sha256"][:16], models=self.screener.versions)
+        fkey = self.key(p)[:2]
         try:
             data = self.client.image(p)
         except Exception as e:
-            n = self.failures[p["id"]] = self.failures.get(p["id"], 0) + 1
+            n = self.failures[fkey] = self.failures.get(fkey, 0) + 1
             rec.update(decision="retry" if n < self.attempts else "hold",
                        rule="fetch-failed", detail=str(e)[:200])
             if getattr(e, "status", None) == 404:
                 rec.update(decision="gone", rule="gone")
-                self.failures[p["id"]] = self.attempts
+                self.failures[fkey] = self.attempts
+            elif design and n >= self.attempts and not self.dry_run:
+                self._act(p, "hold", "screening: hold (fetch-failed: %s)" % str(e)[:120], rec)
             emit(rec)
             return
-        self.failures.pop(p["id"], None)
+        self.failures.pop(fkey, None)
         try:
-            img = screen_image.decode(data)
-            rec["size"] = "%dx%d" % img.size
-            scores, fields = self.screener.score(img, p)
+            if design:  # a small preview: the whole frame only, compared with hidden designs
+                img = screen_image.decode(data, screen_image.DESIGN_MIN, screen_image.DESIGN_MAX)
+                rec["size"] = "%dx%d" % img.size
+                scores, fields = self.screener.score(img, p, grids=self.design_grids,
+                                                     hidden=self.screener.hidden_designs)
+            else:
+                img = screen_image.decode(data)
+                rec["size"] = "%dx%d" % img.size
+                scores, fields = self.screener.score(img, p)
         except screen_image.BadPicture as e:
             scores, fields = {"errors": {"decode": str(e)}}, {}
         except Exception as e:  # never crash on a photo: it stays held
-            log.exception("photo %s", p["id"])
+            log.exception("%s %s", rec["event"], p["id"])
             scores, fields = {"errors": {"screen": "%s: %s" % (type(e).__name__, e)}}, {}
         verdict = screen_policy.decide(scores, self.cfg)
         rec.update(fields)
         rec.update(decision=verdict["decision"], rule=verdict["rule"], detail=verdict["detail"],
                    rules=[r[1] for r in verdict["rules"]])
         rec["ms"] = dict(rec.get("ms", {}), total=round((time.perf_counter() - t0) * 1000))
-        action = {"release": "release", "hide": "hide"}.get(verdict["decision"])
+        # a held photo is left as it is; a pending design is moved to held, with the note
+        acts = ("release", "hide", "hold") if design else ("release", "hide")
+        action = verdict["decision"] if verdict["decision"] in acts else None
         if action and not self.dry_run:
-            try:
-                self.client.act(p["id"], action, note_for(verdict))
-                rec["done"] = action
-            except Exception as e:
-                status = getattr(e, "status", None)
-                rec["done"] = ("operator-decided-first" if status == 409 else
-                               "gone" if status == 404 else "failed: %s" % str(e)[:160])
-                if status not in (404, 409):
-                    rec["decision"] = "retry"
+            self._act(p, action, note_for(verdict), rec)
         elif action:
             rec["done"] = "dry-run"
-        if verdict["decision"] == "hold":
-            self.left[(p["id"], p["sha256"])] = verdict["rule"]
+        if verdict["decision"] == "hold" and rec.get("done") in (None, "dry-run"):
+            self.left[self.key(p)] = verdict["rule"]
         if verdict["decision"] == "hide" and rec.get("done") == "hide" and fields.get("phash"):
-            self.screener.hidden[p["id"]] = fields["phash"]
+            (self.screener.hidden_designs if design else self.screener.hidden)[p["id"]] = fields["phash"]
         rec["rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
         emit(rec)
+
+    def _act(self, p, action, note, rec):
+        try:
+            if p.get("kind") == "design":
+                self.client.design_act(p["id"], action, note)
+            else:
+                self.client.act(p["id"], action, note)
+            rec["done"] = action
+        except Exception as e:
+            status = getattr(e, "status", None)
+            rec["done"] = ("operator-decided-first" if status == 409 else
+                           "gone" if status == 404 else "failed: %s" % str(e)[:160])
+            if status not in (404, 409):
+                rec["decision"] = "retry"
 
     def run(self, once=False):
         delay = self.poll
@@ -324,6 +392,8 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="score and log, change nothing")
     ap.add_argument("--no-selftest", action="store_true")
     ap.add_argument("--score", nargs="+", metavar="FILE", help="score local pictures only")
+    ap.add_argument("--design", action="store_true",
+                    help="with --score: the pictures are design previews (whole frame only)")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -340,8 +410,16 @@ def main(argv=None):
             t0 = time.perf_counter()
             try:
                 with open(path, "rb") as f:
-                    img = screen_image.decode(f.read())
-                scores, fields = screener.score(img, {"id": os.path.basename(path)})
+                    data = f.read()
+                if a.design:
+                    img = screen_image.decode(data, screen_image.DESIGN_MIN, screen_image.DESIGN_MAX)
+                    scores, fields = screener.score(
+                        img, {"id": os.path.basename(path)},
+                        grids=[tuple(g) for g in cfg.get("designs", {}).get("grids", [])],
+                        hidden={})
+                else:
+                    img = screen_image.decode(data)
+                    scores, fields = screener.score(img, {"id": os.path.basename(path)})
             except (OSError, screen_image.BadPicture) as e:
                 scores, fields = {"errors": {"decode": str(e)}}, {}
             v = screen_policy.decide(scores, cfg)

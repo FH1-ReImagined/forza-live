@@ -1,14 +1,18 @@
-# Screening worker for community photos
+# Screening worker for community photos and designs
 
 With `FORZA_COMMUNITY_HOLD=1`, every new community photo (a 1920x1080 PNG the server makes from
 a photo mode Big Shot; [`docs/hosting.md`](../docs/hosting.md#community-photos)) starts `held`.
-This worker screens the held photos automatically on the server's own machine, with no hosted
-API:
+Every design shared in the game's design storefront (a paint job or a vinyl group) is listed in
+the game at once but starts `pending` for the website
+([`docs/hosting.md`](../docs/hosting.md#community-designs)). This worker screens both
+automatically on the server's own machine, with no hosted API:
 
-- It polls `GET /admin/photos/queue` every 30 s and fetches each held photo.
-- It scores the photo with three CPU models (onnxruntime) and word lists.
-- It then **releases** clear photos, **hides** confident hits with a note naming the rule, and
-  **leaves held** the doubtful ones for the maintainer, logging why.
+- It polls `GET /admin/photos/queue` and `GET /admin/designs/queue` every 30 s and fetches each
+  held photo and each pending design's preview.
+- It scores the picture with three CPU models (onnxruntime) and word lists.
+- It then **releases** clear ones, **hides** confident hits with a note naming the rule, and
+  **leaves held** the doubtful ones for the maintainer, logging why. A hidden design is hidden in
+  the game too.
 
 The rules come from the moderation research of October 2026: hide only on a confident hit, hold
 what is doubtful, and never let one uncertain score hide a photo. Player reports stay the safety
@@ -25,7 +29,7 @@ wins; otherwise any hold rule holds; otherwise the photo is released.
 | SigLIP2 hate-symbol prompts, highest sigmoid over the frame and the 3x2 tiles | < 0.30 | ≥ 0.30 (`hate-suspect`) | ≥ 0.90 **and** a `[hate]` or `[hide]` word in the photo or title (`hate-symbol+text`) |
 | SigLIP2 gore prompts | < 0.30 | ≥ 0.30 (`gore-suspect`) | never |
 | SigLIP2 nudity prompts (backs up the classifier on small regions) | < 0.30 | ≥ 0.30 (`nudity-suspect`) | never |
-| Words read in the photo (OCR confidence ≥ 0.50) or in its title | no hit | an LDNOOBW word (`text-word`); a `[hate]` word (`text-hate`); a `[hide]` word read with confidence < 0.80 (`text-unsure`); a `[hide]` or `[hate]` word inside a longer word | a `[hide]` word read with confidence ≥ 0.80, or in the title (`text-hide`) |
+| Words read in the picture (OCR confidence ≥ 0.50) or in its title (a design's title and description) | no hit | an LDNOOBW word (`text-word`); a `[hate]` word (`text-hate`); a `[hide]` word read with confidence < 0.80 (`text-unsure`); a `[hide]` or `[hate]` word inside a longer word | a `[hide]` word read with confidence ≥ 0.80, or in the title or description (`text-hide`) |
 | Ambiguous codes: 14, 18, 28, 88, SS, HH, 311, 2316 (race numbers, model badges), the characters 卐 and 卍 | alone | with a hate score ≥ 0.20 (`code+symbol`) | never |
 | The credited gamertag | no hit | any listed word (`gamertag-word`) | never |
 | pHash within 6 bits (of 64) of a hidden photo | | `like-hidden` | never |
@@ -55,6 +59,36 @@ Calibration and the hold rate:
 - Real photo mode shots have less text than menus, so they should hold even less. The target is to
   hold at most about 5% of photos.
 - Watch the share of `"decision":"hold"` lines in the worker's log over the first weeks.
+
+## Designs
+
+The design storefront's paint jobs and vinyl groups go through the same models, word lists and
+thresholds (the decision table above), with these differences:
+
+- **The picture is the design's preview**, as the game draws it for the storefront: a paint job's
+  is 288x160 (the car from the front three-quarter view), a vinyl group's 256x128. The server
+  makes it a PNG from the game's texture (`forza_cxds.py`). Being small, it is scored as a whole
+  frame (`[designs] grids = []`), with no tiles. RapidOCR scales a small picture up itself: words
+  about 26 px tall in a 288x160 preview are read (`test_screen_e2e`).
+- **The title and the description** are what the player typed, and for designs they matter most:
+  a `[hide]` word in either hides the design (`text-hide`), any other listed word holds it. The
+  credited gamertag is checked as for photos.
+- **Hold is an action.** A pending design that the worker is not sure about is moved to `held`
+  with the note (`screening: hold (<rule>: ...)`), out of the queue, so the operator sees why in
+  `GET /admin/designs?state=held`. A photo is left held as it was.
+- **The worker never overrides the operator.** Its actions on designs carry
+  `{"expect": "pending"}`: a design the operator held, hid or released while it was being scored
+  gets 409, logged as `operator-decided-first`.
+- **pHash** compares a design with the hidden designs only (read hourly from
+  `GET /admin/designs?state=hidden`).
+- A server older than the designs feed answers 404 for the designs' queue: the worker then logs
+  it, screens the photos only and asks again an hour later. `[designs] enabled = false` turns the
+  designs off.
+
+Measured on the same machine (4 threads), a design takes about **0.7 s** (NSFW 0.49 s at its
+fixed 448 px, SigLIP2 0.08 s for one region, OCR 0.1-0.15 s). Four previews captured from the
+game (two paint jobs, two vinyl groups; scored locally with `--design --score`, not kept) were
+all released: P(neutral) ≥ 0.999, hate ≤ 0.01, gore ≤ 0.007, nudity ≤ 0.003, no text read.
 
 ## Models and licences
 
@@ -246,7 +280,10 @@ the worker's subnet.
 Keep its relative paths (`wordlists/...`) or point them at mounted files.
 
 **Updating.** Run `docker build` again, then `docker rm -f forza-screening` and the run command
-again. Photos that were left held are screened again after a restart.
+again. Photos that were left held are screened again after a restart; designs the worker held are
+not (they are out of the queue, with their note). Update the server first: the worker screens
+designs only on a server that has their queue. A mounted copy of `screening.toml` from before the
+designs works as is (the `[designs]` defaults apply).
 
 ## The log
 
@@ -265,7 +302,11 @@ The worker writes one JSON line per photo on stdout. The line holds:
   the photo while it was being scored);
 - `ms` (time per stage and in total) and `rss_mb`.
 
-The log has no XUID: the worker drops the queue's `owner` field.
+A design's line has `"event":"design"`, its public `id`, `type` (`livery` or `vinylgroup`) and
+the same fields; `done` is `hold` when the worker moved it to held.
+
+The log has no XUID: the worker drops the photo queue's `owner` field, and the designs' queue has
+none.
 
 For example, to list the photos left held and why:
 
@@ -274,7 +315,9 @@ docker logs forza-screening | grep '"decision":"hold"'
 ```
 
 The maintainer then looks at the photo (`GET /admin/photos/img/<id>.png`) and releases or hides
-it ([`docs/hosting.md`](../docs/hosting.md#community-photos)).
+it ([`docs/hosting.md`](../docs/hosting.md#community-photos)); a design likewise
+(`GET /admin/designs?state=held`, `GET /admin/designs/img/<id>.png`,
+[`docs/hosting.md`](../docs/hosting.md#community-designs)).
 
 Released and hidden photos also carry the worker's note in `/admin/photos`. A held photo has no
 note: the API can set a note only together with a change of status.
@@ -292,18 +335,23 @@ python3 -m unittest discover -s screening -p 'test_screen_*.py' -v
 - `test_screen_text`: the word matching, with test words, and the shipped lists on benign racing
   text.
 - `test_screen_client`: the worker, with stand-in models, against this repository's server. The
-  test starts the server on 127.0.0.1 with `FORZA_COMMUNITY_HOLD=1` and held photos seeded. It
-  covers:
-  - release, hide and hold;
-  - an operator who hides a photo while it is being scored (the release gets 409 and the photo
-    stays hidden);
+  test starts the server on 127.0.0.1 with `FORZA_COMMUNITY_HOLD=1`, held photos and pending
+  designs seeded (their previews drawn and packed as `cxds` textures, as the game uploads them).
+  It covers:
+  - release, hide and hold, for photos and designs (a design scored whole, its description read,
+    a hidden one out of the game, a held one moved to held with its note);
+  - an operator who hides a photo (or holds a design) while it is being scored (the release
+    gets 409 and the operator's decision stays);
+  - a server without the designs' queue (photos still screened);
   - dry runs;
   - refusals from a trusted-proxy address;
   - redirects, proxy variables and the token never printed;
   - the server's admin checks for a bridge address;
   - hostile pictures and pHash.
 - `test_screen_e2e`: the real models, through `screen_worker.main --once`, on five drawn pictures
-  held on a local server. It prints the time per picture and the peak memory. It needs the built
+  held on a local server and five drawn design previews pending there (a car, sponsors and a race
+  number, a vinyl group star: released; a test word in the preview or in the description:
+  hidden). It prints the time per picture and the peak memory. It needs the built
   models (`SCREENING_MODELS`, default `/models`), so it is skipped elsewhere, including CI. In
   the image:
 
@@ -313,7 +361,7 @@ python3 -m unittest discover -s screening -p 'test_screen_*.py' -v
   ```
 
 - `screen_worker.py --score FILE...` scores local pictures and prints the decisions, with no
-  server.
+  server; `--design --score FILE...` scores them as design previews.
 
 ## Updating the pins
 
@@ -343,6 +391,9 @@ python3 -m unittest discover -s screening -p 'test_screen_*.py' -v
 - **No account history.** There are no stricter rules for a new player's first uploads and no
   bans after repeated rejections: the worker does not keep the XUID.
 - **Reasons for held photos are only in the worker's log.**
-- **pHash finds only near-identical re-uploads** of hidden photos. Their hashes are read again
-  every hour.
+- **pHash finds only near-identical re-uploads** of hidden photos and designs. Their hashes are
+  read again every hour.
+- **A design's preview shows one side of the car**, small. A vinyl on the other side, the roof or
+  the back, or one a few pixels wide in the preview, is not seen: the title and description
+  checks and player reports (three hide a design in the game) are the net there.
 - **No CSAM hash matching.** No such tool runs locally under these constraints.

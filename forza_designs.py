@@ -45,12 +45,19 @@ Rules of this server:
   impersonate.
 - A file is "live" (listed), "held" (seen by its owner only: the hook for screening uploads
   before they are listed, hold_new(); nothing is held for now) or "hidden" (reported).
+- A file also has a web state (forza_design_feed.py, the website's designs): "pending" (new,
+  and every file there before the website's designs, until the screening worker sees its
+  preview), "clear" (on the website), "held" (left for the operator: not on the website) or
+  "hidden" (a confident screening hit or the operator: hidden in the game too, listed to its
+  owner only, as three reports do). Its public id there (webId) is random, never the file id.
 - Each file has a share code (CODE_LEN characters, no 0/O/1/I) for the website: typed in a
   search's gamertag or text field it finds that file.
-- Nothing here is served outside the game's protocol: payloads and XUIDs never leave it.
+- Nothing here is served outside the game's protocol: payloads and XUIDs never leave it (the
+  website gets the preview, title, description, share code and counts: forza_design_feed.py).
 
-Files: DATA_DIR/designs.json (the index, forza_durable), DATA_DIR/designs/<id>.bin (payload)
-and <id>.prev (preview); counted in the server's disk quota (forza_limits). Design ids start at
+Files: DATA_DIR/designs.json (the index, forza_durable), DATA_DIR/designs/<id>.bin (payload),
+<id>.prev (preview) and <id>.png (the preview as the website shows it, forza_design_feed.py);
+counted in the server's disk quota (forza_limits). Design ids start at
 FIRST_ID so that they never meet photo ids (forza_photos): the storefront calls name a file by
 its id only, and the calls shared with photos go to forza_photos for the ids below FIRST_ID.
 """
@@ -84,6 +91,9 @@ REPORT_HIDE = 3          # distinct reporters that hide a file
 CODE_LEN = 6
 CODE_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 LIVE, HELD, HIDDEN = "live", "held", "hidden"
+PENDING, CLEAR = "pending", "clear"  # web states, with HELD and HIDDEN (forza_design_feed.py)
+WEB_ID_LEN = 12
+WEB_ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
 # kind: (Create class, params/results type prefix, desc field, storefront page, header Type, magic)
 KINDS = {
@@ -95,6 +105,7 @@ PAGES = {spec[3]: kind for kind, spec in KINDS.items()}
 
 INDEX = {"nextId": FIRST_ID, "files": {}, "uploads": {}, "serverUploads": []}
 _loaded = [False]
+_version = [0]  # counts the saves: forza_design_feed builds its feed again after one
 _bans = {"mtime": None, "xuids": frozenset()}
 # Who is calling (forza_live_lsp): proven(), the request is signed by the caller's own key;
 # trusted(), signed or carrying the caller's raw friends key (games before signed requests).
@@ -107,6 +118,7 @@ def configure(data_dir, proven=None, trusted=None):
     INDEX.clear()
     INDEX.update({"nextId": FIRST_ID, "files": {}, "uploads": {}, "serverUploads": []})
     _loaded[0] = False
+    _version[0] += 1
     _bans.update({"mtime": None, "xuids": frozenset()})
     _caller["proven"] = proven or (lambda: False)
     _caller["trusted"] = trusted or (lambda: False)
@@ -127,6 +139,11 @@ def load():
             INDEX.update(durable.load(index_path()))
         except (OSError, ValueError):
             pass
+        if add_web_state(INDEX["files"]):
+            try:
+                save()
+            except OSError as e:
+                log.warning("designs: web states not saved: %s", e)
     return INDEX
 
 
@@ -136,6 +153,32 @@ def save():
     with open(tmp, "w") as f:
         json.dump(INDEX, f, indent=1)
     durable.replace(tmp, index_path())
+    _version[0] += 1
+
+
+def new_web_id(files):
+    used = {f.get("webId") for f in files.values()}
+    while True:
+        wid = "".join(secrets.choice(WEB_ID_CHARS) for _ in range(WEB_ID_LEN))
+        if wid not in used:
+            return wid
+
+
+def web_fields(files):
+    """A new file's web state: pending, with a public id of its own."""
+    return {"webId": new_web_id(files), "web": PENDING, "webNote": "", "webAt": None,
+            "png": None}
+
+
+def add_web_state(files):
+    """Files from before the website's designs get a web state: pending, like a new upload.
+    True when any did."""
+    added = False
+    for f in files.values():
+        if "web" not in f:
+            f.update(web_fields(files))
+            added = True
+    return added
 
 
 def hx(xuid):
@@ -219,7 +262,7 @@ def new_code(files):
 
 def remove(fid):
     load()["files"].pop(str(fid), None)
-    for suffix in (".bin", ".prev"):
+    for suffix in (".bin", ".prev", ".png"):
         try:
             os.remove(file_path(fid, suffix))
         except OSError:
@@ -238,8 +281,10 @@ def drop_stale():
 
 
 def public(f, bans=None):
-    """Listed for everybody: live, and not a banned player's."""
-    return f["status"] == LIVE and f["owner"] not in (banned_xuids() if bans is None else bans)
+    """Listed for everybody: live, not hidden by the screening or the operator (web state
+    hidden), and not a banned player's."""
+    return (f["status"] == LIVE and f.get("web") != HIDDEN
+            and f["owner"] not in (banned_xuids() if bans is None else bans))
 
 
 def files(kind=None, owner=None, viewer=None, done=True, everybody=False):
@@ -335,7 +380,7 @@ def creator(kind):
             "kind": kind, "type": ftype, "owner": xuid, "gamertag": clubs.gamertag(xuid),
             "size": size, "got": 0, "done": False, "created": now, "code": new_code(d["files"]),
             "status": hold_new(xuid, kind, meta), "meta": meta, "downloaders": [],
-            "ratings": {}, "reporters": [], "views": 0}
+            "ratings": {}, "reporters": [], "views": 0, **web_fields(d["files"])}
         d["uploads"][hx(xuid)] = mine + [now]
         d["serverUploads"].append(now)
         save()

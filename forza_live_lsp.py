@@ -25,6 +25,9 @@ services). This answers the ones online play needs:
                                the design storefront: paint jobs and vinyl groups (forza_designs.py)
     GET /community/..., /admin/photos  community photos: signed photo mode uploads published
                                for the website's gallery (forza_community.py)
+    GET /community/designs.json, /community/design-img/..., /admin/designs
+                               the design storefront's designs on the website, after
+                               screening (forza_design_feed.py)
     Xls.WebServices.Notifications  the Message Center (forza_notifications.py): Rivals,
                                gifts, auctions and car club messages
 
@@ -50,6 +53,7 @@ import forza_campaign as campaign
 import forza_clubs as clubs
 import forza_community as community
 import forza_coop_ledger as coop_ledger
+import forza_design_feed as design_feed
 import forza_designs as designs
 import forza_friends as friends
 import forza_limits as limits
@@ -212,6 +216,7 @@ def configure(args):
     photos.configure(DATA_DIR, proven=caller_signed, finished=community.photo_uploaded,
                      removed=community.photo_removed)
     designs.configure(DATA_DIR, proven=caller_signed, trusted=caller_trusted)
+    design_feed.configure()
     shader_lists.configure(DATA_DIR)
     leaderboards.configure(DATA_DIR)
 
@@ -728,7 +733,8 @@ def came_through_proxy(peer, headers):
 
 def is_local_admin(peer, headers):
     """is_admin for the operator endpoints that must never be used from the internet (community
-    photos' moderation, forza_community.py): the token only in its header (a query string ends
+    photos' and the designs' moderation, forza_community.py and forza_design_feed.py): the
+    token only in its header (a query string ends
     up in logs and browser history), and nothing that came through the tunnel or a proxy (the
     token would cross it in plain text). From the LAN, an ssh tunnel or this machine."""
     return not came_through_proxy(peer, headers) and is_admin(peer, headers, {})
@@ -814,6 +820,9 @@ def handle(server, method, path, headers, body, peer):
         answer = leaderboards.handle(method, path)
         if answer is not None:
             return answer
+    if design_feed.handles(url.path):  # designs on the website (forza_design_feed.py)
+        return design_feed.handle(method, path, headers, body,
+                                  lambda: is_local_admin(peer, headers))
     if community.handles(url.path):  # community photos (forza_community.py)
         return community.handle(method, path, headers, body,
                                 lambda: is_local_admin(peer, headers))
