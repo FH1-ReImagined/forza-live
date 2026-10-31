@@ -22,6 +22,19 @@ shared photos (newest first, with their previews), Purchase hands one out (to an
 RemoveFile / ChangeFileTitle / ChangeFileDescription act on the owner's. The featured, most
 downloaded and top rated photo lists are over everybody's. An upload that never finished
 frees its slot after STALE_UPLOAD seconds.
+
+Photo mode's large photo (TAKE PHOTO, RB: BIG SHOT 8.3 MEGAPIXEL, then "create a large photo and
+upload it to ForzaMotorsport.net") is LargeFileUpload.Create(24883254, overwriteOldest false,
+"ForzaBigshot.bmp"): a 3840x2160 24-bit BMP. Files over limits.MAX_BLOB ("big shots", up to
+MAX_BIG) are taken only from a request signed with the player's own key, at most BIG_PER_HOUR
+are started an hour on the whole server, and a player has one unfinished at a time. A big
+shot is not kept as a file: once it has arrived it goes to forza_community (which publishes a
+smaller copy, or nothing) and is forgotten.
+
+A finished photo mode upload (kind "large") is handed to configure(finished=) with whether it was
+signed by the player's own key (its Create and the call that completed it; configure(proven=),
+forza_live_lsp.caller_signed): forza_community publishes the signed ones. Every file removed is
+told to configure(removed=).
 """
 
 import json
@@ -45,15 +58,32 @@ STOREFRONT_SLOTS = 25    # shared photos per player
 PHOTO_PAGE = 3           # the storefront page of the shared photos (tuning, liveries, layer groups, photos, replays)
 STALE_UPLOAD = 3600      # an unfinished shared photo gives its slot back after this
 MAX_LIST = 50            # files in one list answer (each carries its preview)
+MAX_BIG = 32 << 20       # a big shot (photo mode's 3840x2160 BMP is 24,883,254 bytes)
+BIG_PER_HOUR = 60        # big shots started an hour on the whole server
 INDEX = {"nextId": 1, "files": {}}
+_big = []                # when this hour's big shots were started
 _loaded = [False]
+_hooks = {"proven": lambda: False, "finished": None, "removed": None}
 
 
-def configure(data_dir):
+def configure(data_dir, proven=None, finished=None, removed=None):
+    """proven(): the call being handled is signed by its player's own key; finished(fid, record,
+    path, signed): a photo mode upload has arrived; removed(fid): a file is gone."""
     global DATA_DIR
     DATA_DIR = data_dir
     INDEX.update({"nextId": 1, "files": {}})
     _loaded[0] = False
+    _big.clear()
+    _hooks.update({"proven": proven or (lambda: False), "finished": finished, "removed": removed})
+
+
+def tell(hook, *args):
+    """A hook's call; its failure is logged and never fails the player's upload."""
+    if _hooks[hook] is not None:
+        try:
+            _hooks[hook](*args)
+        except Exception:
+            log.exception("photos: the %s hook failed", hook)
 
 
 def index_path():
@@ -82,7 +112,7 @@ def save():
     durable.replace(tmp, index_path())
 
 
-def remove(fid):
+def forget(fid):
     load()["files"].pop(str(fid), None)
     for suffix in (".bin", ".prev"):
         try:
@@ -91,19 +121,37 @@ def remove(fid):
             pass
 
 
+def remove(fid):
+    forget(fid)
+    tell("removed", fid)
+
+
 def create(xuid, size, overwrite, name="", kind="photo", preview=b"", meta=None):
     """A new content file of `size` bytes for the player; its id. ValueError: refused."""
     d = load()
-    if not 0 < size <= limits.MAX_BLOB:
+    big = kind == "large" and size > limits.MAX_BLOB
+    if not 0 < size <= (MAX_BIG if big else limits.MAX_BLOB):
         raise ValueError("file of %d bytes refused" % size)
     if len(preview) > MAX_PREVIEW:
         raise ValueError("preview of %d bytes refused" % len(preview))
+    if big:
+        if not _hooks["proven"]():
+            raise ValueError("a big shot of %d bytes needs a request signed by the player's key"
+                             % size)
+        now = time.time()
+        _big[:] = [t for t in _big if now - t < 3600]
+        if len(_big) >= BIG_PER_HOUR:
+            raise ValueError("the server takes no more big shots this hour")
+        for i, f in list(d["files"].items()):  # the player's unfinished one, abandoned ones
+            if f.get("big") and not f["done"] and (f["owner"] == xuid
+                                                   or now - f["created"] > STALE_UPLOAD):
+                forget(int(i))
     mine = sorted((f["created"], int(i)) for i, f in d["files"].items() if f["owner"] == xuid)
     while len(mine) >= MAX_PER_PLAYER:
         if not overwrite:
             raise ValueError("storage full")
         remove(mine.pop(0)[1])
-    limits.accept(size + len(preview))
+    limits.accept(size + len(preview), MAX_BIG if big else limits.MAX_BLOB)
     fid = d["nextId"]
     d["nextId"] += 1
     os.makedirs(os.path.dirname(file_path(fid)), exist_ok=True)
@@ -114,6 +162,11 @@ def create(xuid, size, overwrite, name="", kind="photo", preview=b"", meta=None)
             f.write(preview)
     d["files"][str(fid)] = {"owner": xuid, "size": size, "got": 0, "kind": kind,
                             "name": name[:64], "created": time.time(), "done": False}
+    if kind == "large":
+        d["files"][str(fid)]["signed"] = bool(_hooks["proven"]())
+    if big:
+        d["files"][str(fid)]["big"] = True
+        _big.append(time.time())
     if meta is not None:
         d["files"][str(fid)]["meta"] = meta
     save()
@@ -354,6 +407,12 @@ def upload_content(xuid, body):
         f["done"] = True
         save()
         log.info("photos: %016X: file %d uploaded (%d bytes)", xuid, p["contentId"], f["size"])
+        if f["kind"] == "large":  # photo mode's upload: a community photo when it was signed
+            tell("finished", p["contentId"], f, file_path(p["contentId"]),
+                 bool(f.get("signed") and _hooks["proven"]()))
+        if f.get("big"):  # not kept: the community has its copy (or nothing)
+            forget(p["contentId"])
+            save()
     return x.reply(A.ContentUploadContent_Results, {"payloadUploadedSize": f["got"]})
 
 

@@ -34,9 +34,9 @@ Rules of this server:
 - At most SLOTS files per player and kind (the storefront's SLOTS AVAILABLE), PER_DAY uploads a
   day per player, PER_HOUR uploads an hour on the whole server. A banned XUID
   (DATA_DIR/banned_xuids.json, a list of hex XUIDs the operator edits, read again when it
-  changes) uploads nothing, and its files are listed to nobody but itself. The payload must have the
-  kind's magic and at most MAX_PAYLOAD bytes, the preview must be a cxds texture of at most
-  MAX_PREVIEW bytes.
+  changes; forza_community's /admin/photos/ban writes it too) uploads nothing, and its files are
+  listed to nobody but itself. The payload must have the kind's magic and at most MAX_PAYLOAD
+  bytes, the preview must be a cxds texture of at most MAX_PREVIEW bytes.
 - Free: Price is stored and answered as 0, Quantity as -1 (no limit), whatever the player chose.
 - A rating (1-5) and a download count once per player (a later rating replaces the earlier one),
   never the owner's. REPORT_HIDE distinct players reporting a file hide it at once. Only the
@@ -168,6 +168,38 @@ def banned_xuids():
 
 def banned(xuid):
     return xuid in banned_xuids()
+
+
+def set_ban(xuid, ban=True):
+    """Puts the XUID on the ban list (or takes it off), keeping the rest of the file as the
+    operator wrote it. True when the list changed; ValueError when the file is not a JSON list
+    (it is left alone)."""
+    path = os.path.join(DATA_DIR, "banned_xuids.json")
+    try:
+        with open(path) as f:
+            entries = json.load(f)
+    except FileNotFoundError:
+        entries = []
+    except (OSError, ValueError) as e:
+        raise ValueError("%s cannot be read (%s): fix it by hand" % (path, e)) from None
+    if not isinstance(entries, list):
+        raise ValueError("%s is not a JSON list: fix it by hand" % path)
+
+    def same(v):
+        try:
+            return int(str(v), 16) == xuid
+        except ValueError:
+            return False
+    if any(same(v) for v in entries) == ban:
+        return False
+    kept = [v for v in entries if not same(v)] + ([hx(xuid)] if ban else [])
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(kept, f, indent=1)
+    durable.replace(tmp, path)
+    _bans["mtime"] = None  # read again at once, whatever the file system's clock resolution
+    return True
 
 
 def hold_new(xuid, kind, meta):

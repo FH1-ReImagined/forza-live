@@ -31,6 +31,7 @@ import urllib.parse
 import forza_auth as auth
 import forza_challenge as challenge
 import forza_chat as chat
+import forza_community as community
 import forza_discord_status as discord_status
 import forza_friends as friends
 import forza_events as events
@@ -1425,8 +1426,9 @@ async def read_proxy_header(server, reader, idle):
 
 
 def response(status, body, content_type="application/octet-stream", extra=()):
-    reason = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
-              500: "Internal Server Error"}
+    reason = {200: "OK", 304: "Not Modified", 400: "Bad Request", 403: "Forbidden",
+              404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+              429: "Too Many Requests", 500: "Internal Server Error"}
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
             f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *",
             f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (forza_auth.py)
@@ -1466,8 +1468,9 @@ async def http_handler(server, reader, writer):
             if path in ("/", "/status"):
                 reply = response(200, json.dumps(server.status(), indent=2, default=str).encode(),
                                  "application/json", conn)
-            elif path.startswith("/admin/"):
+            elif path.startswith("/admin/") and not community.handles(path):
                 # Chat moderation (forza_chat.py): /admin/chat, /admin/mute, /admin/kick.
+                # (Community photos' /admin/photos has its own rules: lsp.handle.)
                 url = urllib.parse.urlsplit(path)
                 query = urllib.parse.parse_qs(url.query)
                 if not lsp.is_admin(peer, headers, query):
@@ -1524,14 +1527,15 @@ async def http_handler(server, reader, writer):
                                  conn)
             else:
                 try:
-                    status, content_type, data = lsp.handle(server, method, path, headers, body,
-                                                            peer)
+                    answer = lsp.handle(server, method, path, headers, body, peer)
                 except Exception:  # a bad request must not take the server down
                     log.exception("LSP %s %s failed", method, path)
-                    status, content_type, data = 500, "text/plain", b"error"
+                    answer = 500, "text/plain", b"error"
+                status, content_type, data = answer[:3]
+                extra = tuple(answer[3]) if len(answer) > 3 else ()  # e.g. ETag, Cache-Control
                 log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, path, status,
                          len(data))
-                reply = response(status, data, content_type, conn)
+                reply = response(status, data, content_type, conn + extra)
             writer.write(reply)
             await writer.drain()
             if not keep:

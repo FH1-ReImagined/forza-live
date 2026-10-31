@@ -144,7 +144,7 @@ Notifications, Transaction}`. What the game calls, in order:
 | End of a Rivals race (also retiring) | `User.WriteRaceStatsEx(id, raceStats, scoreData)` | kept per player (`userXP`, credits, the race) |
 | After the sign-in (single player too) | `Xls Notifications.RetrieveForUser` `notificationPollIntervalSeconds` after `Logon2`, then every `nextRetrieveSeconds` (`StartNewSession` on some paths) | the player's notifications (Message Center, below), 15 s then 60 s (with 0 the game polled 7 times a second) |
 | Sometimes | `Xls User.SetFriends` | empty |
-| Photo mode, SAVE / large photo ("uploading to forzamotorsport.net") | `LargeFileUpload.Create(payloadSize, overwriteOldest, userFileName)`, then `Xls Content.UploadContent(contentId, payloadOffset, payloadTotalSize, uploadData)` | `contentFileId`, then `payloadUploadedSize` = bytes held so far (`forza_photos.py`: kept per player under `photos/`, 2 MB each, 100 per player, in the disk quota; `DownloadContent` gives the owner's file back). Answered empty before, the game never saw its upload finish (#71); the chunk size and the answer's meaning (bytes held, not bytes of this chunk) are from the descriptors, not yet seen in a game |
+| Photo mode, BIG SHOT ("upload it to ForzaMotorsport.net") | `LargeFileUpload.Create(24883254, overwriteOldest false, "ForzaBigshot.bmp")`, then `Xls Content.UploadContent(contentId, payloadOffset, payloadTotalSize, uploadData)` in 256 KiB chunks: a 3840x2160 24-bit BMP | `contentFileId`, then `payloadUploadedSize` = bytes held so far (`forza_photos.py`). Answered empty before, the game never saw its upload finish (#71); with the 2 MB limit the Create failed ("The Forza Horizon service is not available"). Now taken from signed games and published as a [community photo](#community-photos-forza_communitypy) |
 | Photo mode, SHARE to the storefront (MY SHARED PHOTOS) | `StorefrontPhoto.Create(fileHeader, photoDesc, payloadSize, previewData)` (27 KB: header, car/track ids and a thumbnail), then `UploadContent` as above; the pages and files are read with `Storefront.GetPhotoPageList`, `GetFileListForPage`, `GetStats`, `GetFeaturedPhotos`, `GetMostDownloadedPhotos`, `GetTopRatedPhotos` | the shared photos below (#82) |
 
 The game keeps one HTTP connection to the title server for all its calls. The server must
@@ -770,6 +770,59 @@ list then shows it (24/25, LOCATION Colorado), BROWSE PHOTOS shows it under PG P
 gives the slot back (25/25 on reopening). The thumbnails of the photo saved on a headless
 session are black. Not seen: other players' photos (no second account), ratings, search
 results with a match, `Purchase`, the 27 KB request (a photo of the player's own).
+
+### Community photos (`forza_community.py`)
+
+Photo mode's large photo is the **Big Shot**: TAKE PHOTO, RB switches STANDARD : 0.9 MEGAPIXEL to
+BIG SHOT : 8.3 MEGAPIXEL, A asks "You are about to create a large photo and upload it to
+ForzaMotorsport.net. This process can take a bit of time. Are you sure you want to continue?",
+and YES renders the picture in 3 x 3 tiles of the screen and sends `LargeFileUpload.Create`
+(payloadSize 24,883,254, overwriteOldest false, userFileName `ForzaBigshot.bmp`), then the file
+in 95 `UploadContent` chunks of 256 KiB: a BMP (`BM`, 40-byte header, 3840 x -2160 (top-down),
+24-bit, uncompressed) with the game's FORZA HORIZON mark in its corner. The game then says "Your
+Big Shot photo was successfully uploaded to the ForzaMotorsport.net server. You can retrieve it
+from there later." On Turn 10's service those photos went to the website; here they go to the
+community gallery on the project's website.
+
+`forza_photos.py` takes a file over 2 MB (a "big shot", up to 32 MiB) only from a request signed
+with the player's own key (`X-Forza-Auth`), at most 60 started an hour on the whole server and
+one unfinished per player; an older game's big shot fails as before. Once it has arrived it is
+handed to `forza_community.py` and forgotten: big shots are not kept as private files.
+`forza_community.py` publishes it when the upload was signed (its Create and the call that
+completed it), the player is not banned (`DATA_DIR/banned_xuids.json`) and has a gamertag, the
+caps allow it (10 a day and 200 in all per player, 60 an hour on the server) and the picture
+reads as a BMP of 640x360 to 7680x4320 (aspect at most 3:1). The published copy is made by the
+server with the standard library: the BMP halved down to at most 1920 pixels wide
+(`FORZA_COMMUNITY_MAX_WIDTH`; each pixel the mean of 2 x 2) as a PNG with only IHDR, IDAT and
+IEND, about 0.2 s and 3 MB for a big shot. A big shot whose nine tiles are the same picture is a
+failed capture and not published (the TU4 recompilation with its default `--readback_resolve=some`
+gives nine copies of the loading screen; with `--readback_resolve=full` the tiles are the photo).
+A JPEG (one SOF0 or SOF2 frame, 8-bit, 1 or 3 components) would be published too, rewritten with
+only SOI, a shortened JFIF APP0 and Adobe APP14, DQT, DHT, DRI, the frame, its scans and EOI (no
+EXIF, XMP, ICC, comments, thumbnails or trailing bytes); photo mode does not send one. Anything
+else is not published, and the game's upload succeeds all the same.
+
+A photo has a random 12-character base32 id, the gamertag the player had (never the XUID), a
+title (the upload's file name, without its extension; none for `ForzaBigshot.bmp`), `takenAt`
+(the upload's time), `approvedAt` (its first time in the feed), its size and the SHA-256 of the
+published file. It is `live`, `held` (for a screening worker, below; new photos start held only
+with `FORZA_COMMUNITY_HOLD=1`) or `hidden` (by the operator); a banned player's photos are served
+to nobody until the ban is lifted. When a player's file is removed by a later upload with
+overwriteOldest, its community photo goes too; photo mode sends overwriteOldest false and keeps
+no big shot file, so a player cannot withdraw a photo from the game: the operator deletes it.
+
+| Route | |
+| --- | --- |
+| `GET /community/gallery.json` | `{"version":1,"generated":<unix>,"photos":[{"id","gamertag","title","takenAt","approvedAt","w","h","sha256","image"}]}`: live photos, newest first, at most 500. Built again only when a photo or the ban list changes; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60`. The website's `tools/build_gallery.py` reads it |
+| `GET /community/img/<id>.png` | a live photo (`.jpg` for a JPEG), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 image requests a minute (then 429) |
+| `/admin/photos...` | the operator's ([hosting](hosting.md#community-photos)) |
+
+Files: `DATA_DIR/community.json` (forza_durable) and `DATA_DIR/community/<id>.png`, in the disk
+quota. Seen in a game (TU4 at game main 3896de8, a copy of the test save, a local server): a big
+shot with `--readback_resolve=full` became a live 1920x1080 PNG in the feed, served with the
+headers above, and the website's `build_gallery.py` published it from the feed; with the default
+readback the server logged the failed capture and published nothing; the game said the upload
+succeeded both times.
 
 ### The design storefront (`forza_designs.py`)
 
