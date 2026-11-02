@@ -1,7 +1,9 @@
 # Forza Live
 
 **[Host your own server](docs/hosting.md#how-to-make-your-own-forza-live-server)**: the
-step-by-step guide (Docker Compose, the ports, playit.gg, updates and backups).
+step-by-step guide (Docker Compose, the ports, playit.gg, updates and backups); then
+[configuration](docs/configuration.md), [operating](docs/operating.md) and
+[website data](docs/website-data.md).
 
 Forza Live is the online server of
 [Forza Horizon 1: ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined). It
@@ -31,7 +33,10 @@ player's own machine, and **My own server** connects to one you host.
 | `forza_live/world/` | the Horizon World, who hosts it, clubs in it, the Co-op Festival and its results |
 | `forza_live/content/` | photos and community photos, designs and their previews, the Auction House and gifts, shader lists |
 | `tests/` | the unit tests, one folder per `forza_live/` folder (`tests/server/` for `server.py`); shared helpers in `tests/support.py` |
-| `docs/hosting.md` | running a server: the guide, then the reference |
+| `docs/hosting.md` | the step-by-step guide to running a server |
+| `docs/configuration.md` | every option and environment variable, Docker, tunnels, limits |
+| `docs/operating.md` | running a public server: operator endpoints, moderation, score admin, backups |
+| `docs/website-data.md` | what the server publishes for a website |
 | `docs/title_services.md` | the title services as the game calls them (the protocol) |
 | `docs/server_events.md` | organizer-approved community events |
 | `tools/server_probe.py` | checks a server from outside (status page, UDP HELLO -> WELCOME) |
@@ -58,6 +63,9 @@ screening worker has its own tests (`python3 -m unittest discover -s screening -
 with numpy and Pillow). CI (`.github/workflows/tests.yml`) runs them all on every push and pull
 request, on Linux and Windows, and builds the Docker image; `server-probe.yml` checks the public
 server from outside every 6 hours.
+
+Developer docs: [title services](docs/title_services.md) (the protocol as the game calls it) and
+[community events](docs/server_events.md).
 
 The game's repository pins a commit of this one in `server/`. A change that the game or the
 launcher needs lands here first; then the game's repository moves its submodule to it

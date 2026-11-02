@@ -503,7 +503,7 @@ class TrustedProxyServer(unittest.TestCase):
         # what happens with --network host on the public server: 127.0.0.1 is a trusted proxy
         server = LocalServer({"AAAAAAAAAAAA": (plain(GREEN), "")},
                              ["--trusted-proxy", "127.0.0.0/8",
-                              "--trusted-proxy", "192.168.100.105"])
+                              "--trusted-proxy", "192.0.2.10"])
         try:
             with self.assertRaises(screen_client.AdminError) as e:
                 server.client().queue()
@@ -558,7 +558,7 @@ class BridgeAddress(unittest.TestCase):
         self.limits, self.lsp = limits, lsp
         self.old_token = lsp.ADMIN_TOKEN
         lsp.ADMIN_TOKEN = TOKEN
-        limits.configure_proxies("127.0.0.0/8", "192.168.100.105")
+        limits.configure_proxies("127.0.0.0/8", "192.0.2.10")
 
     def tearDown(self):
         self.lsp.ADMIN_TOKEN = self.old_token
@@ -572,7 +572,7 @@ class BridgeAddress(unittest.TestCase):
         self.assertFalse(admin(("172.17.0.2", 41000), dict(ok, **{"x-admin-token": "no"})))
         self.assertFalse(admin(("172.17.0.2", 41000), {}))
         self.assertFalse(admin(("127.0.0.1", 41000), ok))       # --network host: trusted proxy
-        self.assertFalse(admin(("192.168.100.105", 41000), ok))  # the tunnel agent
+        self.assertFalse(admin(("192.0.2.10", 41000), ok))  # the tunnel agent
         for header in ("x-forwarded-for", "x-real-ip", "forwarded"):
             self.assertFalse(admin(("172.17.0.2", 41000), dict(ok, **{header: "1.2.3.4"})))
 

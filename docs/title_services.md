@@ -59,7 +59,7 @@ body (`forza_live/core/auth.py` has the scheme; `src/kernel/live_signing.h`, `ls
 request is held until its body is complete and the line goes in before its blank line). Games
 before signed requests sent their friends key itself (`X-Friends-Key: <32 hex digits>`), taken
 for an XUID still bound to it until `--raw-key-cutoff`
-([`hosting.md`](hosting.md#signed-requests-515)). The server (`forza_live.title_services.lsp.verify_caller`)
+([`configuration.md`](configuration.md#signed-requests)). The server (`forza_live.title_services.lsp.verify_caller`)
 refuses a call that changes anything (every method but `Get*`/`Search*`/`Download*`, and
 `Hopper.GetGameOptions`, which moves a world's event along) when the signature (or friends key)
 is not the XUID's or is missing for an XUID with a key on record, and takes a call for an XUID
@@ -68,7 +68,7 @@ minutes), its race stats marked `verified: false`, and never the player's word w
 (`caller_trusted()`; its scores are kept unranked, off the boards). Our game also names its build,
 `X-Forza-Build: <id>/tu<0|4>` (the launcher's version, or `git-<commit>` for a source build; CMake's
 `FORZA_BUILD_ID`), which the server keeps with each leaderboard row so the rows of a bad build can
-be found (FH1 #517). Addresses can't do this job: behind a tunnel ([`hosting.md`](hosting.md))
+be found (FH1 #517). Addresses can't do this job: behind a tunnel ([`configuration.md`](configuration.md#behind-a-tunnel-playitgg))
 every HTTP connection and UDP datagram arrive from the tunnel agent's address, and a
 connection's TCP port says nothing about the player's UDP one.
 
@@ -490,7 +490,7 @@ callers:
 | `SubmitScore(type, data)` / `SubmitScoreEx(type 3, {data, numCarsPassed})` | `82AB9570` / `82AB95E0` | the scoreboard manager `0x82897xxx` (race end), `0x828DF464` |
 | `UploadFile(scoreId, data)` | `82AB9650` | `0x82897918`, after a submission answered `uploadFiles` |
 | `DownloadFile(id, maxSize 256000)` | `82AB90D0` | `0x82897A1C` (a rival's ghost, by `ghostFileId`) |
-| `GetBestScores(scoreType, board, isServerTimeTrial, car, class, drive type)` | `82AB9140` | `0x828976FC`; seen at the start of a Rivals race; the answer is the caller's own best (a time is submitted only when it beats it): the ranked row, and for an unverified caller the better of that and its unranked one (hosting.md, "Which results count") |
+| `GetBestScores(scoreType, board, isServerTimeTrial, car, class, drive type)` | `82AB9140` | `0x828976FC`; seen at the start of a Rivals race; the answer is the caller's own best (a time is submitted only when it beats it): the ranked row, and for an unverified caller the better of that and its unranked one (website-data.md, "Which results count") |
 | `GetRivalAndPersonalBest(board, isServerTimeTrial, rivalXuid)` | `82AB9228` | `sub_8290CD58` ("RivalData: Rival Net Task"): X RIVALS on an event's ticket |
 | `GetRival(board, isServerTimeTrial, rivalXuid)` | `82AB91B8` | `sub_827D09F0` |
 | `GetRows(type, view, board, isServerTimeTrial, isClubBoard, startAt, maxResults)` | `82AB9330` | the leaderboard screen's fetch `sub_82826E88` (50 rows from `startAt`), `0x828C7F1C` (view 5, 200 rows) |
@@ -510,7 +510,7 @@ smaller first; only types 1-3 are kept (online races submit type 4 on board -1),
 `uploadFiles` true; the ghost the game then uploads is checked (below) and kept in
 `DATA_DIR/ghosts/<id>.bin` (the row's `ghostFileId`), served by `DownloadFile`. Results from
 callers that are not signed in here, and times whose ghost fails, are kept unranked
-([`hosting.md`](hosting.md), "Which results count"). Views:
+([`website-data.md`](website-data.md#which-results-count), "Which results count"). Views:
 0 the top from `startAt`, 1 around the caller, others (friends are everyone here) like 0;
 `isClubBoard` keeps the caller's car club's members; `userRow` is the caller's row
 (position 0 when they have none). Rollups rank players by the event boards they lead. The
@@ -868,7 +868,7 @@ no big shot file, so a player cannot withdraw a photo from the game: the operato
 | --- | --- |
 | `GET /community/gallery.json` | `{"version":1,"generated":<unix>,"photos":[{"id","gamertag","title","takenAt","approvedAt","w","h","sha256","image"}]}`: live photos, newest first, at most 500. Built again only when a photo or the ban list changes; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60`. The website's `tools/build_gallery.py` reads it |
 | `GET /community/img/<id>.png` | a live photo (`.jpg` for a JPEG), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 image requests a minute (then 429) |
-| `/admin/photos...` | the operator's ([hosting](hosting.md#community-photos)) |
+| `/admin/photos...` | the operator's ([operating](operating.md#community-photos)) |
 
 Files: `DATA_DIR/community.json` (forza_live.core.durable) and `DATA_DIR/community/<id>.png`, in the disk
 quota. Seen in a game (TU4 at game main 3896de8, a copy of the test save, a local server): a big
@@ -950,14 +950,14 @@ as a PNG), holds its design, with the reason as its note; the game is not affect
 A paint job's car name is the one the leaderboards show: `cars` in the operator's
 `leaderboard_names.json` (by the car's `Data_Car` id, the paint job's ModelId; written from a copy
 of the game by the game repository's `tools/extract_map_points.py --names`,
-[hosting](hosting.md#leaderboards-on-the-website-148)). The game database (`--game-db`) holds only
+[website data](website-data.md#leaderboards)). The game database (`--game-db`) holds only
 references into the game's compressed string tables, so without that file `car` is null.
 
 | Route | |
 | --- | --- |
 | `GET /community/designs.json` | `{"version":1,"generated":<unix>,"designs":[{"id","type","code","title","description","gamertag","car","layers","downloads","rating","createdAt","preview","w","h","sha256"}]}`: designs listed in the game and `clear`, newest first, at most 500. `id` is the design's random public id (12 base32 characters, never the storefront's file id); `type` `livery` or `vinylgroup`; `code` the share code; `gamertag` the creator's (a design whose creator has no gamertag on record is not listed); `car` `{"name": "2012 Lamborghini Aventador LP700-4"}` or null (always null for a vinyl group); `layers` a vinyl group's number of layers, null for a paint job (the storefront does not say); `rating` `{"avg", "count"}`; `createdAt` the upload's time; `preview` `/community/design-img/<id>.png`, `w`, `h` and `sha256` its size and hash. Never a XUID or a payload (a payload holds its creator's XUID). Built again when a design or the ban list changes, at most every 60 s otherwise; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60` |
 | `GET /community/design-img/<id>.png` | the preview of a design in the feed, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 design image requests a minute (then 429) |
-| `/admin/designs...` | the operator's and the screening worker's ([hosting](hosting.md#community-designs)), with the community photos' rules |
+| `/admin/designs...` | the operator's and the screening worker's ([operating](operating.md#community-designs)), with the community photos' rules |
 
 ### Notifications (Message Center) (`forza_live/social/notifications.py`)
 

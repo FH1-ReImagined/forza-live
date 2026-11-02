@@ -1,10 +1,10 @@
 # Screening worker for community photos and designs
 
 With `FORZA_COMMUNITY_HOLD=1`, every new community photo (a 1920x1080 PNG the server makes from
-a photo mode Big Shot; [`docs/hosting.md`](../docs/hosting.md#community-photos)) starts `held`.
+a photo mode Big Shot; [`docs/operating.md`](../docs/operating.md#community-photos)) starts `held`.
 Every design shared in the game's design storefront (a paint job or a vinyl group) is listed in
 the game at once but starts `pending` for the website
-([`docs/hosting.md`](../docs/hosting.md#community-designs)). This worker screens both
+([`docs/operating.md`](../docs/operating.md#community-designs)). This worker screens both
 automatically on the server's own machine, with no hosted API:
 
 - It polls `GET /admin/photos/queue` and `GET /admin/designs/queue` every 30 s and fetches each
@@ -156,11 +156,11 @@ photo (at most 3.8 s), with a peak of 1.38 GB.
   server caps uploads at 60 an hour.
 - Set `[runtime] threads` to the number of CPUs you give the container (`--cpus`).
 
-## Deploy on Unraid
+## Deploy next to the server
 
 The worker has to reach the server from an address that is not a trusted proxy:
 
-- The public server runs with `--network host` and `--trusted-proxy 127.0.0.1` (and the tunnel
+- A server behind a tunnel runs with `--network host` and `--trusted-proxy 127.0.0.1` (and the tunnel
   agent's address), and it refuses moderation requests from trusted-proxy addresses.
 - So the worker runs on Docker's default **bridge** network, not `host`. It reaches the server
   at the bridge's gateway, `http://172.17.0.1:21201`.
@@ -180,32 +180,28 @@ This works because of how Docker routes the request and how the server checks it
 
 Two settings on the server side matter:
 
-- The server must listen on all addresses (`--host 0.0.0.0`, as in `docs/hosting.md`).
+- The server must listen on all addresses (`--host 0.0.0.0`, as in `docs/configuration.md`).
 - `--trusted-proxy` must not cover 172.17.0.0/16.
 
-Steps, in the Unraid terminal:
+Steps, in a terminal on the server's machine:
 
 1. Build the image, from the copy of forza-live the server is built from:
 
    ```
-   cd /mnt/user/appdata/forza-live/src/screening
+   cd /path/to/forza-live/screening
    docker build -t forza-screening .
    ```
 
    The build downloads about 2.5 GB from Hugging Face, GitHub, PyPI and download.pytorch.org.
    The image is about 1.25 GB. Nothing is downloaded at run time.
 
-2. Put the server's admin token in an env file only root can read. This command copies it from
-   the server container without printing it:
+2. Put the server's admin token in an env file only root can read. Copy the
+   `FORZA_ADMIN_TOKEN=` line from the `.env` you started the server with:
 
    ```
-   mkdir -p /mnt/user/appdata/forza-screening
-   ( umask 077; docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' forza-live \
-       | grep '^FORZA_ADMIN_TOKEN=' > /mnt/user/appdata/forza-screening/token.env )
+   mkdir -p /path/to/screening
+   ( umask 077; grep '^FORZA_ADMIN_TOKEN=' /path/to/forza-live/.env > /path/to/screening/token.env )
    ```
-
-   Alternatively, write `FORZA_ADMIN_TOKEN=<token>` into that file with an editor, then run
-   `chmod 600` on it.
 
 3. Check the bridge's gateway address. It is usually 172.17.0.1:
 
@@ -217,7 +213,7 @@ Steps, in the Unraid terminal:
 
    ```
    docker run --rm --network bridge \
-     --env-file /mnt/user/appdata/forza-screening/token.env \
+     --env-file /path/to/screening/token.env \
      -e FORZA_SERVER=http://172.17.0.1:21201 \
      --memory 3g --memory-swap 3g --read-only --tmpfs /tmp:size=64m \
      --cap-drop ALL --security-opt no-new-privileges \
@@ -229,7 +225,7 @@ Steps, in the Unraid terminal:
    ```
    docker run -d --name forza-screening --restart unless-stopped \
      --network bridge \
-     --env-file /mnt/user/appdata/forza-screening/token.env \
+     --env-file /path/to/screening/token.env \
      -e FORZA_SERVER=http://172.17.0.1:21201 \
      --memory 3g --memory-swap 3g --cpus 4 --pids-limit 256 \
      --read-only --tmpfs /tmp:size=64m \
@@ -263,7 +259,7 @@ forwards:
 
 ```
 docker network create --subnet 172.31.250.0/24 forza-screening
-iptables -I DOCKER-USER -s 172.31.250.0/24 -j DROP   # add to /boot/config/go to keep it
+iptables -I DOCKER-USER -s 172.31.250.0/24 -j DROP   # make it persistent with your firewall setup
 ```
 
 Then run the container with `--network forza-screening` and
@@ -274,7 +270,7 @@ the worker's subnet.
 **Changing thresholds.** Mount your copy over the image's file, then restart the container:
 
 ```
--v /mnt/user/appdata/forza-screening/screening.toml:/app/screening.toml:ro
+-v /path/to/screening/screening.toml:/app/screening.toml:ro
 ```
 
 Keep its relative paths (`wordlists/...`) or point them at mounted files.
@@ -315,9 +311,9 @@ docker logs forza-screening | grep '"decision":"hold"'
 ```
 
 The maintainer then looks at the photo (`GET /admin/photos/img/<id>.png`) and releases or hides
-it ([`docs/hosting.md`](../docs/hosting.md#community-photos)); a design likewise
+it ([`docs/operating.md`](../docs/operating.md#community-photos)); a design likewise
 (`GET /admin/designs?state=held`, `GET /admin/designs/img/<id>.png`,
-[`docs/hosting.md`](../docs/hosting.md#community-designs)).
+[`docs/operating.md`](../docs/operating.md#community-designs)).
 
 Released and hidden photos also carry the worker's note in `/admin/photos`. A held photo has no
 note: the API can set a note only together with a change of status.

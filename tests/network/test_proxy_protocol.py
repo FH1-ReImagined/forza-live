@@ -20,7 +20,7 @@ from forza_live import server as srv
 from forza_live.network import proxy
 from tests.support import FakeTransport
 
-AGENT = "192.168.100.105"  # the tunnel agent's address, a trusted proxy
+AGENT = "192.0.2.10"  # the tunnel agent's address, a trusted proxy
 TUNNEL = ("192.0.2.10", 56677)  # the tunnel's public address (the header's destination)
 REAL_A = ("81.2.69.142", 40001)  # players' public addresses (global unicast)
 REAL_B = ("89.160.20.112", 52000)

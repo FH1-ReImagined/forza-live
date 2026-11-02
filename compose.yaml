@@ -1,7 +1,7 @@
 # Forza Live with Docker Compose: copy .env.example to .env, set the token, then
 #   docker compose up -d --build
 # Players set this server's address in the launcher (Settings, Online, My own server).
-# Ports, tunnels and every option: docs/hosting.md, or `python3 forza_live_server.py --help`.
+# Ports, tunnels and every option: docs/configuration.md, or `python3 forza_live_server.py --help`.
 services:
   forza-live:
     build: .

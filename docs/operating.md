@@ -1,0 +1,211 @@
+# Operating a public Forza Live server
+
+Day-to-day running of a server other people play on: the operator endpoints, chat, photo and design moderation, the score admin, and backups. Options are in [configuration](configuration.md); the first setup is in the [hosting guide](hosting.md).
+
+## Operator endpoints
+
+(The moderation of community photos and designs has stricter rules: [below](#community-photos-and-designs).)
+
+`GET /gift?to=<gamertag|XUID>&credits=<n>[&message=..]` or `&car=<id>`,
+`GET /notify?to=..&type=..`, `GET /broadcast?type=0x100&Message=..[&days=1-30]` (one
+Message Center notification for every player, new ones included, stored once), and `GET /world/event?session=all|<id>[&event=<id>]` are
+operator-only. They are answered for requests from the server's own machine (loopback, not
+through a reverse proxy), or with `FORZA_ADMIN_TOKEN` (header `X-Admin-Token: <token>` or
+`?token=<token>`); everything else gets 403. From the host's terminal:
+
+    docker exec forza-live python3 -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:21201/gift?to=Name&credits=50000').read())"
+
+or from your LAN: `curl -H "X-Admin-Token: <token>" "http://192.168.1.x:21201/gift?..."`.
+Without the token variable, remote use is impossible. Do not expose the token on the
+internet side (it travels in plain HTTP).
+
+## Friends, chat and clubs
+
+Friends are kept per player (XUID) in `friends.json` in the data folder: each
+player's gamertag, when it was last seen, the public key of its game (or, until the player
+upgrades, a SHA-256 of the friends key of a game before signed requests), and its friends,
+requests both ways and blocks (written at most every 2 s after a change and on shutdown;
+keep the data folder). The first game that uses an XUID's friends binds them to its key
+([signed requests](configuration.md#signed-requests)); another game claiming that XUID gets no list. A player with no friends, requests or blocks is forgotten after 180 days.
+Limits: 200 friends, 50 requests waiting each way, 200 blocks per player; 10 requests a
+minute (bursts of 5), 60 other changes a minute, 30 searches a minute; searches answer at
+most 20 players. A request to a player who blocked the sender looks sent but is dropped,
+and so are invites from a blocked player. The status page shows how many players,
+friendships and open requests there are. Games up to v0.1.14 still see everyone online as a
+friend.
+
+Text chat is relayed, not stored: a message goes to the players online in the
+sender's session, Horizon World, to one friend, or to the other members of the sender's car
+club who are online (the Club channel: wherever they are, in any room or world, from
+the club in `clubs.json`; both sides need a proven XUID, as for all chat, and a game that
+asks for the club tag, so games before the Club channel neither show it nor get its
+messages), and the server keeps only the last 200 messages in memory (time, sender, channel,
+the club's tag for the Club channel, recipients, text) for moderation; they are gone
+when the server stops. Limits: 200 characters per message, 5 messages per 10 s per player
+(the sender is told to slow down), direct messages only between friends; a player's mutes
+(kept in `friends.json`) and blocks hide the other's messages. Games up to v0.1.14 have no
+chat.
+
+Car clubs in the Horizon World : Find Game > Horizon World searches are answered with
+the open worlds the fullest first; for a player in a club, a world with one of its online
+clubmates in it (the one with the most clubmates first) comes before that. Only worlds with
+room are offered, so a full world of clubmates changes nothing, and a player without a club,
+or without a clubmate in an open world, is placed as before. The chat commands `/club` (in any
+channel: the clubmates online and where they are, by gamertag) and `/club join [gamertag]`
+(puts that clubmate's world first for 10 minutes) are answered only to the player who types
+them.
+
+In World chat, the world's host can type `/event random` to start a random race in the
+Horizon World or the Co-op Festival. The server picks once for the whole session from that
+mode's eligible events. The Horizon World needs the game's database (`--game-db`); the Co-op
+Festival keeps its usual event restrictions and rewards. Other players cannot change the
+host's selection.
+
+### Moderating players
+
+Chat moderation uses operator endpoints, with the same rules as `/gift`:
+
+- `/admin/chat`: the last messages, and the mutes and bans with their seconds left;
+- `/admin/mute?who=<gamertag or XUID>&minutes=N`: the player's messages are refused (they
+  are told for how long); `minutes=0` lifts it;
+- `/admin/kick?who=...&minutes=N`: drops the player and refuses its sign-in for N minutes
+  (a ban; the game shows "server error 4: removed by the server admin"); `minutes=0` lifts
+  it.
+
+Mutes and bans are kept in `moderation.json` in the data folder until they run out. Example:
+`curl -H "X-Admin-Token: <token>" "http://host:21201/admin/mute?who=Name&minutes=30"`.
+
+## Community photos and designs
+
+Photos and designs players share can appear on a website ([what is published](website-data.md#community-photos)). Moderating them has stricter rules than the other operator endpoints, and the [screening worker](#automatic-screening) can do the first pass.
+
+### Community photos
+
+Moderation is for the operator only, from the LAN or an ssh tunnel: the routes refuse anything
+that came through the tunnel or a reverse proxy, even with the token, because the token would
+cross the internet in plain HTTP. That is every request from a `--trusted-proxy` address and
+every request with `X-Forwarded-For`, `X-Real-IP` or `Forwarded`. On a server set up with a tunnel as in [configuration](configuration.md#behind-a-tunnel-playitgg) (127.0.0.1 and the host's LAN IP are trusted proxies) that includes the host itself and `docker
+exec`: moderate from another machine on the LAN, or through an ssh tunnel that ends at an address
+that is not a trusted proxy. The routes take `FORZA_ADMIN_TOKEN` only in the `X-Admin-Token`
+header (never `?token=`; this machine's loopback, when it is not a trusted proxy, needs none, as
+for the other operator endpoints), and refuse any request with an `Origin` header (a web page
+cannot drive them). With `T='X-Admin-Token: <token>'` and `S=http://192.168.1.x:21201`:
+
+```
+curl -H "$T" $S/admin/photos                    # every photo: id, owner XUID, gamertag, title,
+                                                # status, banned, public, sizes, sha256
+curl -H "$T" "$S/admin/photos?status=hidden"     # live, held or hidden only
+curl -H "$T" $S/admin/photos/img/<id>.png -o p.png   # look at one, whatever its status
+curl -H "$T" -X POST $S/admin/photos/<id>/hide   # out of the feed and the image route
+curl -H "$T" -X POST $S/admin/photos/<id>/unhide
+curl -H "$T" -X POST $S/admin/photos/<id>/delete # gone (the same picture is not published again)
+curl -H "$T" -X POST $S/admin/photos/<id>/ban    # bans the photo's owner
+curl -H "$T" -X POST $S/admin/photos/ban/<XUID>  # or by XUID; unban/<XUID> lifts it
+```
+
+A ban goes into `banned_xuids.json` in the data folder (the list the design storefront uses
+too, a JSON list of hex XUIDs that can also be edited by hand): the player's new uploads are not
+published and their photos are served to nobody until the ban is lifted. For a screening worker
+(a separate container with the token, at an address that is not a trusted proxy):
+`GET /admin/photos/queue` lists the held photos, oldest first; `POST /admin/photos/<id>/hold`
+takes a live photo back to the queue, `POST .../release` publishes a held one (a photo the
+operator hid cannot be released, 409), and both take an optional `{"note": "..."}` kept for the
+operator.
+
+### Automatic screening
+
+[`screening/`](../screening/README.md) is that worker. Run it beside a server that has
+`FORZA_COMMUNITY_HOLD=1`. Every 30 s it reads the queue and scores each held photo locally, on
+the CPU, with no hosted service (and the [designs](#community-designs) waiting for the website,
+the same way):
+
+- an NSFW classifier (Freepik's EVA02, MIT);
+- SigLIP2 zero-shot prompts for hate symbols, gore and nudity, over the whole frame and 6 tiles
+  (Apache-2.0);
+- OCR (RapidOCR, Apache-2.0) and word lists (LDNOOBW, CC-BY-4.0, and its own list of slurs,
+  slogans and codes).
+
+It then releases the photo, hides it with a note naming the rule (`screening: hide (nsfw-high:
+...)`), or leaves it held for you, logging why. Only a confident hit hides a photo. A race number
+such as 14, 18 or 88, or a badge such as SS, never hides one. The decision table, the measured
+cost (about 1.3 s and 1.4 GB at peak on 4 threads) and the known limits are in its README.
+
+Deployment, on the machine of the server (the commands are in the README):
+
+- Build it with `docker build -t forza-screening screening/`. The build downloads the models,
+  pinned by revision and SHA-256. The running container downloads nothing.
+- Give it the token in an env file (`--env-file`).
+- Run it on the default **bridge** network, not `host`, with
+  `-e FORZA_SERVER=http://172.17.0.1:21201` (the bridge's gateway).
+- Use `--memory 3g --read-only --cap-drop ALL`.
+
+Why the bridge network:
+
+- With `--network host` the worker would come from 127.0.0.1, a trusted proxy here, and every
+  moderation request would be refused.
+- From the bridge it comes from its own 172.17.0.x address. That address is no trusted proxy and
+  sends no proxy header, so the token admits it.
+- So the server must listen on all addresses (`--host 0.0.0.0`), and `--trusted-proxy` must not
+  cover 172.17.0.0/16.
+
+The worker's image sets `ORT_DISABLE_TELEMETRY=1`: onnxruntime's Linux packages would otherwise
+send usage telemetry to Microsoft. To stop the container from reaching anything but the server,
+the README shows how to give it a network of its own with an iptables rule.
+
+To review what it left held, run `docker logs forza-screening | grep '"decision":"hold"'`, then
+use the routes above.
+
+### Community designs
+
+Moderation, with the same rules as the photos' (the LAN or an ssh tunnel, the token in its header
+only, no proxy, no `Origin`). With `T` and `S` as above:
+
+```
+curl -H "$T" $S/admin/designs/queue              # pending designs, oldest first (no XUID)
+curl -H "$T" "$S/admin/designs?state=held"       # every design (pending, clear, held, hidden)
+                                                 # with its owner XUID, note, reports, car
+curl -H "$T" $S/admin/designs/img/<id>.png -o d.png   # its preview, whatever its state
+curl -H "$T" -X POST $S/admin/designs/<id>/release   # on the website (pending or held)
+curl -H "$T" -X POST $S/admin/designs/<id>/hold      # off the website, still in the game
+curl -H "$T" -X POST $S/admin/designs/<id>/hide      # off the website and out of the game
+curl -H "$T" -X POST $S/admin/designs/<id>/unhide    # back (also after three reports)
+curl -H "$T" -X POST $S/admin/designs/<id>/delete    # gone, from the game too
+curl -H "$T" -X POST $S/admin/designs/<id>/ban       # bans the design's owner
+```
+
+`<id>` is the design's public id. A hidden design cannot be released (409): unhide it. The
+actions take an optional `{"note": "...", "expect": "pending"}`; with `expect` the action applies
+only to a design in that state (409 otherwise), which is how the worker never overrides you: it
+releases, holds or hides only designs that are still pending.
+
+## Score admin
+
+For a public server: start it with `--server-id main` (or `FORZA_SERVER_ID=main`), before the
+first run with this code. The id is the name on rows written from then on. Nothing else needs a
+migration: the existing rows have no tags, show as before and are found with `build=none`.
+
+`/admin/scores` (operator only, like `/gift`) finds and moves rows by source:
+
+- `GET /admin/scores?<filters>`: the matching rows (at most 500) and how many there are;
+- `POST /admin/scores/unrank?<filters>`: ranked rows off the boards, kept for review with
+  their ghosts;
+- `POST /admin/scores/rank?<filters>`: unranked rows back on their boards, where they are
+  better than the player's row there (a kept ghost too, when it passes the checks);
+- `POST /admin/scores/delete?<filters>`: rows and their ghosts removed.
+
+Filters: `server`, `build` (`none`: the rows from before the tags), `verified` (0 or 1),
+`player` (an XUID in hex), `board` (`3:199:0` or `event-199`), `reason` (part of an unranked
+row's reason), and `state` (`ranked`, `unranked` or `all`, the default). A change needs a
+filter besides `state`, and a browser's cross-origin request (an `Origin` header) is refused.
+To take a bad build off the boards:
+`curl -X POST -H "X-Admin-Token: <token>" "http://host:21201/admin/scores/unrank?build=0.2.1/tu4"`.
+
+## Signed requests
+
+Players prove their XUID with a key pair, and the operator can let a new installation in or set a cutoff for old games; the options are in [configuration](configuration.md#signed-requests). Watch the `auth` block of the status page and the `auth: raw friends keys ... since start` log line before setting `--raw-key-cutoff`.
+
+## Backups and rollback
+
+Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it.
+
+To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
