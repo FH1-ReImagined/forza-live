@@ -259,7 +259,7 @@ forwards:
 
 ```
 docker network create --subnet 172.31.250.0/24 forza-screening
-iptables -I DOCKER-USER -s 172.31.250.0/24 -j DROP   # add to /boot/config/go to keep it
+iptables -I DOCKER-USER -s 172.31.250.0/24 -j DROP   # make it persistent with your firewall setup
 ```
 
 Then run the container with `--network forza-screening` and
