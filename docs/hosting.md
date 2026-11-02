@@ -1,10 +1,157 @@
-# Hosting a Forza Live server
+# How to make your own Forza Live Server
+
+This guide sets up your own Forza Live server with Docker Compose, so you and your friends can
+play online on it. The full reference (every option, the tunnels, the operator endpoints, the
+limits) is in the second half of this page, [below](#hosting-a-forza-live-server-reference).
+
+## Pre-requisites
+
+- A PC with at least 2 GB of RAM. The server itself uses about 100 MB with players online;
+  the rest is for the operating system and Docker.
+- A headless Linux operating system with docker, docker compose and git installed (Windows is
+  not recommended).
+- A router with the option to open UDP ports (or use [playit.gg](https://playit.gg)).
+
+## Steps
+
+### Preparing
+
+1. On the PC, clone the Forza Live repository and go into it:
+
+       git clone https://github.com/FH1-ReImagined/forza-live.git
+       cd forza-live
+
+2. Copy the example settings file and set the operator token (the password of the server's
+   operator endpoints) to a long random value:
+
+       cp .env.example .env
+       sed -i "s/^FORZA_ADMIN_TOKEN=.*/FORZA_ADMIN_TOKEN=$(openssl rand -hex 32)/" .env
+
+   Every other setting goes in `.env` too (the file has examples), so `compose.yaml` stays as
+   it is and updates never conflict with your changes.
+
+3. Optional, for the Horizon World's events and the Co-op Festival: copy the game's database
+   from your own game files (`media/db/gamedb.slt` in the extracted game) into `data/`, and
+   turn it on in `.env`:
+
+       mkdir -p data
+       cp /path/to/your/game/media/db/gamedb.slt data/
+       echo "FORZA_GAME_DB=/data/gamedb.slt" >> .env
+
+   Without it the server works, but the Co-op Festival playlist is not offered and the
+   Horizon World has only a few default events. The file is not included here: it is part
+   of the game.
+
+### Starting the server
+
+4. Build and start it:
+
+       docker compose up -d --build
+
+   The server restarts by itself after a crash or a reboot (`restart: unless-stopped`).
+
+5. Check that it runs. The log should end with `Forza Live listening on UDP 0.0.0.0:21200`
+   and `title servers and status page on http://0.0.0.0:21201/`:
+
+       docker compose logs --tail 20
+
+   and the status page answers with JSON (`"server": "forza-live"`, the number of players):
+
+       curl http://127.0.0.1:21201/status
+
+### Letting players in
+
+6. Open the two ports on your router and forward them to this PC's LAN address:
+
+   | Port  | Protocol | Use |
+   |-------|----------|-----|
+   | 21200 | UDP      | the game: sign-in, rendezvous, relay |
+   | 21201 | TCP      | the title services and the status page |
+
+   If the PC has a firewall, open them there too (for example `sudo ufw allow 21200/udp` and
+   `sudo ufw allow 21201/tcp`). Players forward nothing.
+
+   **No UDP on your connection** (some ISPs and CGNAT drop it)? Use a
+   [playit.gg](https://playit.gg) tunnel instead of the router:
+
+   1. Run the playit agent on the same PC and create two tunnels to the PC's LAN address: one
+      UDP to port 21200 and one TCP to port 21201. Note the public address and port of each.
+   2. Tell the server about the tunnel in `.env`: the agent's address (the PC's own LAN
+      address when the tunnels point at it, plus `127.0.0.1` if they point at 127.0.0.1), and
+      the public port of the TCP tunnel:
+
+          FORZA_TRUSTED_PROXIES=192.168.1.10,127.0.0.1
+          FORZA_PROXY_HTTP_PORT=<the TCP tunnel's public port>
+
+   3. Restart with `docker compose up -d`. Players then use the UDP tunnel's public address.
+
+   Without `FORZA_PROXY_HTTP_PORT` a tunnelled game says "The Horizon server is currently
+   unavailable". Players behind the tunnel use the server's relay; with PROXY protocol v2 they
+   can connect directly to each other again: see
+   [Behind a tunnel](#behind-a-tunnel-playitgg) and
+   [PROXY protocol v2](#proxy-protocol-v2-hole-punching-through-the-tunnel) below.
+
+7. Check it from outside your network (a friend's PC, or a phone hotspot), with Python 3 and a
+   copy of this repository:
+
+       python3 tools/server_probe.py your.public.address:21200
+
+   Both lines should say PASS. (It checks the TCP port one above the UDP port: give it the
+   UDP tunnel's address only when the TCP tunnel's port is that one plus 1.)
+
+8. Players connect in the launcher: **Settings**, **Online**, **My own server**, then type
+   your server's address (`host`, or `host:port` when it is not 21200). Optional: list the
+   names players type in `.env` (`FORZA_SERVER_NAMES=your.domain.example`, comma separated,
+   without the port), so the server refuses signatures made for other servers.
+
+### Keeping it running
+
+9. **Updating.** Get the new version and rebuild; the data folder stays, and the players in a
+   lobby or a Horizon World stay in it across the restart:
+
+       cd forza-live
+       git pull
+       docker compose up -d --build
+
+10. **Backups.** Everything the server keeps (players, friends, clubs, scores, photos,
+    designs) is in `data/`. Stop the server for a moment so every file is complete, and copy
+    the folder:
+
+        docker compose stop
+        tar czf forza-live-data-$(date +%F).tar.gz data
+        docker compose start
+
+    To restore one, stop the server, replace `data/` with the backup's, and run
+    `docker compose up -d`.
+
+### Troubleshooting
+
+- **`docker compose` is not found**: install Docker's Compose plugin (the
+  `docker-compose-plugin` package on most distributions).
+- **The container stops right away**: `docker compose logs` says why. A port in use means
+  another server already runs on this PC (an older `docker run` container, or the launcher's
+  This PC mode): stop it, then `docker compose up -d` again.
+- **The game says "The Horizon server is currently unavailable"** (no playlists, no
+  leaderboards): TCP 21201 is not reachable from outside, or, behind a tunnel,
+  `FORZA_PROXY_HTTP_PORT` is not set to the TCP tunnel's public port.
+- **Players sign in but cannot see or join each other**: UDP 21200 is not forwarded (check
+  with `tools/server_probe.py` from outside). Players behind a tunnel go through the
+  server's relay, which works but adds a little latency.
+- **No Co-op Festival playlist**: the game's database is missing (step 3). The log says
+  `co-op campaign: no events` at the start.
+- **Anything else**: `docker compose logs -f` follows the log while a player connects;
+  `curl http://127.0.0.1:21201/status` shows who is on.
+
+---
+
+# Hosting a Forza Live server: reference
 
 Forza Live is a standard-library Python server: UDP rendezvous/relay plus the HTTP title
 services (Turn 10's services, kept-alive connections) and a JSON status page.
 
-Paths: the server's files are at the root of this repository (in the game's repository it is the
-`server/` submodule). `tools/server_probe.py` and `tools/xtsw_decode.py` are here; the other
+Paths: the server is the `forza_live/` package of this repository, started by
+`forza_live_server.py` in its root (in the game's repository this repository is the `server/`
+submodule). `tools/server_probe.py`, `tools/xtsw_decode.py` and `tools/event_admin.py` are here; the other
 `tools/` and `docs/` paths are in [ForzaHorizon1-ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined), and the
 website's files in [website](https://github.com/FH1-ReImagined/website).
 
@@ -73,7 +220,7 @@ no per-address protection.
 
 With a tunnel's Proxy Protocol set to `proxy-protocol-v2` (playit.gg: the tunnel's page,
 Origin Configuration, Proxy Protocol; each tunnel has its own), the agent tells the server
-each player's public address in a PROXY v2 header (`forza_proxy.py`): on UDP once per flow,
+each player's public address in a PROXY v2 header (`forza_live/network/proxy.py`): on UDP once per flow,
 as a datagram of its own before the flow's first one (agents up to 0.15.26 put it in front
 of every datagram; 0.16.0 to 0.16.4 swap its two addresses: use 0.16.5 or newer); on TCP
 once at the start of the connection. The server reads headers only when told the tunnel
@@ -179,11 +326,11 @@ the XUID ([signed requests](#signed-requests-515)).
 ### Names are plain ASCII
 
 A name of combining marks, foreign scripts or emoji would be drawn on every other player's
-screen, so only ASCII reaches the game. `forza_limits.clean_gamertag` keeps letters, digits
+screen, so only ASCII reaches the game. `forza_live.core.limits.clean_gamertag` keeps letters, digits
 and single spaces (at most 15, like an Xbox 360 gamertag) after transliterating accents
 (`José` becomes `Jose`); when nothing is left the name is `Driver` plus 4 hex digits of
 the XUID. It runs on the HELLO name, the sign-in (Logon2) name and every name read back
-from the data files, and again when a name is written into a reply (`forza_xtsw.py`), so
+from the data files, and again when a name is written into a reply (`forza_live/network/xtsw.py`), so
 stored names can never reach the game unclean. Club tags (4), names (20), descriptions (128)
 and photo titles and descriptions are printable ASCII (0x20-0x7E; an empty club name
 becomes `Club <id>`). Text chat drops control characters, bidi overrides, zero-width
@@ -231,7 +378,15 @@ room are offered, so a full world of clubmates changes nothing, and a player wit
 or without a clubmate in an open world, is placed as before. The chat commands `/club` (in any
 channel: the clubmates online and where they are, by gamertag) and `/club join [gamertag]`
 (puts that clubmate's world first for 10 minutes) are answered only to the player who types
-them. Moderation (operator endpoints, same rules as `/gift`):
+them.
+
+In World chat, the world's host can type `/event random` to start a random race in the
+Horizon World or the Co-op Festival. The server picks once for the whole session from that
+mode's eligible events. The Horizon World needs the game's database (`--game-db`); the Co-op
+Festival keeps its usual event restrictions and rewards. Other players cannot change the
+host's selection.
+
+Moderation (operator endpoints, same rules as `/gift`):
 
 - `/admin/chat`: the last messages, and the mutes and bans with their seconds left;
 - `/admin/mute?who=<gamertag or XUID>&minutes=N`: the player's messages are refused (they
@@ -251,7 +406,7 @@ not use the relay.
 
 ## Leaderboards on the website (#148)
 
-`forza_leaderboards.py` serves the scoreboards as public, read-only JSON on the HTTP port (the
+`forza_live/competition/leaderboards.py` serves the scoreboards as public, read-only JSON on the HTTP port (the
 same one as the status page; 56678 on the public tunnel):
 
 - `GET /leaderboards`: the boards that have scores (`id`, `name`, `unit`, `better`, `players`,
@@ -300,12 +455,12 @@ tunnel publishing the HTTP port. To try the page against a local server:
 
 The boards (the game's and this JSON, the rollups and the Rivals) take results only from players
 signed in to this server: a title service call that carries its player's own key
-(`forza_live_lsp.caller_trusted`: a signature, or until `--raw-key-cutoff` the friends key of a
+(`forza_live.title_services.lsp.caller_trusted`: a signature, or until `--raw-key-cutoff` the friends key of a
 game before signed requests). A result from any other caller (a game before the friends key, or
 an XUID nobody signed in with here) is kept **unranked**: off the boards, for review, the
 player's best one per board. A caller that is refused, because its XUID has a key and the call
 does not carry it, leaves nothing at all. So is a
-Rivals time whose ghost fails the checks (`forza_ghost.py`: sizes, chunks, the version, one
+Rivals time whose ghost fails the checks (`forza_live/competition/ghost.py`: sizes, chunks, the version, one
 car and the row's, the event's track when the server has the game's database, a lap time and
 records that match the score; the game gets a failure and carries on, and the player's previous
 row stays). A ghost that passes is kept with its driver's gamertag cleared; the refused ones are
@@ -381,7 +536,7 @@ The launcher's *Prebuild shaders* step builds a list of pipelines before play. L
 pipeline *descriptions* (shader hashes and decoded render state, plus how to rebuild a shader from
 the player's own files; never shader code or game data) and the server publishes what several
 players saw ([shader prebuild](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/shader_prebuild.md#phase-3-lists-from-players-276)). Both endpoints
-are on `--http-port` (`forza_shader_lists.py`):
+are on `--http-port` (`forza_live/content/shader_lists.py`):
 
 - `POST /shader-lists/upload`: JSON `{"version", "pipelines", "shaders"}` in the list format
   (`tools/pipeline_list.py check`). Needs a signature ([signed requests](#signed-requests-515);
@@ -407,7 +562,7 @@ Photo mode's BIG SHOT ("upload it to ForzaMotorsport.net") becomes a community p
 website when the game signs its requests ([signed requests](#signed-requests-515)): the server
 publishes a 1920x1080 PNG it makes from the 3840x2160 BMP the game sends, credited by gamertag,
 with no XUID anywhere in the public output. Details, limits and the feed format:
-[title services](title_services.md#community-photos-forza_communitypy). Nothing to set up: the
+[title services](title_services.md#community-photos-forza_livecontentcommunitypy). Nothing to set up: the
 routes are on the HTTP port with the rest.
 
 - Public: `GET /community/gallery.json` (live photos, newest first, at most 500) and
@@ -504,7 +659,7 @@ use the routes above.
 ## Community designs
 
 The paint jobs and vinyl groups players share in the game's design storefront
-([title services](title_services.md#designs-on-the-website-forza_design_feedpy)) are listed in
+([title services](title_services.md#designs-on-the-website-forza_livecontentdesign_feedpy)) are listed in
 the game at once. The website's designs page shows one only after the
 [screening worker](#automatic-screening-screening) has passed its preview: until then it is
 `pending`. Every design that was on the server before this version starts `pending` too, at the
@@ -544,8 +699,8 @@ releases, holds or hides only designs that are still pending.
 ## Signed requests (#515)
 
 Games and launchers with signed requests have an Ed25519 key pair (`signing_seed` in the
-player's `live_identity.txt`) and sign every HELLO and HTTP request with it (`forza_auth.py`,
-`forza_ed25519.py`). The server keeps only the public key: nothing it receives or stores can
+player's `live_identity.txt`) and sign every HELLO and HTTP request with it (`forza_live/core/auth.py`,
+`forza_live/core/ed25519.py`). The server keeps only the public key: nothing it receives or stores can
 sign. Games up to 0.2.x sent their friends key itself in every HELLO and title service call
 instead, so a tunnel, anyone on the path or another server's operator could copy it, and this
 server kept its SHA-256.

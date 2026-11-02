@@ -6,7 +6,7 @@ others find it (GetUsersToJoin lists the clubs by their leader) and ask to join
 (RequestJoiningClan: a club that receives requests keeps it until a leader or co-leader
 accepts it, ApproveRequestToJoin; an "invite only" club takes none) or are invited
 (InviteToClan; AcceptClanInvite). Requests, invitations and the other club news reach the
-players as Message Center notifications (forza_notifications.py). Roles, as the game
+players as Message Center notifications (notifications.py). Roles, as the game
 labels them (sub_8282A260): 1 leader, 2 co-leader (at most 3), 3 member. The player's
 club is part of their UserData (clanId, clanTag, roleInClan: GetUserData, the
 leaderboards' rows). Members share cars to the club garage (SharedCar.Create: the car's
@@ -22,11 +22,11 @@ import logging
 import os
 import time
 
-import forza_notifications as notifications
-import forza_limits as limits
-import forza_xtsw as x
-import forza_xtsw_all as A
-import forza_durable as durable
+from forza_live.social import notifications
+from forza_live.core import limits
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -71,7 +71,7 @@ class Clubs:
 
 
 CLUBS = Clubs()
-PLAYER = None  # forza_live_lsp.load_player
+PLAYER = None  # lsp.load_player
 GAME_CARS = None  # Data_Car rows by id, for the club garage's listing
 
 
@@ -483,11 +483,11 @@ def game_car(model_id):
     global GAME_CARS
     if GAME_CARS is None:
         GAME_CARS = {}
-        import forza_world
-        if forza_world.GAME_DB and os.path.isfile(forza_world.GAME_DB):
+        from forza_live.world import world
+        if world.GAME_DB and os.path.isfile(world.GAME_DB):
             import sqlite3
             try:
-                db = sqlite3.connect("file:%s?mode=ro" % forza_world.GAME_DB, uri=True)
+                db = sqlite3.connect("file:%s?mode=ro" % world.GAME_DB, uri=True)
                 for row in db.execute("select Id, Year, MakeID, FamilyModelID, FamilyBodyID, "
                                       "CarTypeID, EnginePlacementID, BaseCost from Data_Car"):
                     GAME_CARS[row[0]] = row[1:]

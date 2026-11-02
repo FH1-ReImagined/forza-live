@@ -10,45 +10,15 @@ import tempfile
 import time
 import unittest
 
-import forza_live_lsp as lsp
-import forza_live_server as srv
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from tests.support import FakeTransport, hello, record, welcome_id
 
 KEY = lsp.WORLD_HOPPER
 
 
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
-
-    def kinds(self, addr):
-        return [d[4] for a, d in self.sent if a == addr]
-
-
-def hello(token, xuid, name, room="#TU4"):
-    room, name = room.encode(), name.encode()
-    body = struct.pack(">HQQIH", srv.VERSION, token, xuid, 0, 0)
-    body += bytes([len(room)]) + room + bytes([len(name)]) + name + bytes([1])
-    return srv.MAGIC + bytes([srv.HELLO]) + body
-
-
 def packet(kind, body=b""):
     return srv.MAGIC + bytes([kind]) + body
-
-
-def record(session_id, filled=1, slots=8):
-    info = bytearray(srv.SESSION_INFO_SIZE)
-    info[:8] = session_id
-    return bytes(info) + bytes([slots, 0, filled, 0]) + bytes(32)
-
-
-def welcome_id(transport, addr):
-    for a, d in reversed(transport.sent):
-        if a == addr and d[4] == srv.WELCOME:
-            return struct.unpack_from(">IH", d, 5)
-    return None
 
 
 class RestartTest(unittest.TestCase):

@@ -6,15 +6,8 @@ import struct
 import unittest
 from unittest import mock
 
-import forza_live_server as srv
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
+from forza_live import server as srv
+from tests.support import FakeTransport
 
 
 class InvitesTest(unittest.TestCase):

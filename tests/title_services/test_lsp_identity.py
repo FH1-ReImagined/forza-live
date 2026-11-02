@@ -1,4 +1,4 @@
-"""Who a title service call is from (forza_live_lsp.verify_caller): the game names its player
+"""Who a title service call is from (lsp.verify_caller): the game names its player
 in X-UserId, which anyone can write, and our game adds the friends key the XUID was bound to at
 its HELLO (X-Friends-Key). Forged calls are refused when they change anything; calls without a
 key (older games) are accepted but unverified. Drives the server's handlers directly."""
@@ -9,9 +9,9 @@ import struct
 import tempfile
 import unittest
 
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_xtsw as x
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.network import xtsw as x
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
 KEY = bytes(15) + bytes([7])   # DriverA's friends key (as in its live_identity.txt)

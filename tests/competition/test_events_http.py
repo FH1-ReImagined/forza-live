@@ -5,9 +5,9 @@ import tempfile
 import os
 import unittest
 from unittest.mock import patch
-import forza_events as ev
-import forza_live_server as srv
-import forza_live_lsp as lsp
+from forza_live.competition import events as ev
+from forza_live import server as srv
+from forza_live.title_services import lsp
 
 
 class EventsHTTPTest(unittest.IsolatedAsyncioTestCase):

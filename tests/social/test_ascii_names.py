@@ -1,15 +1,15 @@
-"""Player-chosen display strings are plain ASCII (forza_limits.clean_gamertag and friends):
+"""Player-chosen display strings are plain ASCII (limits.clean_gamertag and friends):
 Zalgo, CJK, emoji, bidi overrides, zero-width and control characters never reach the game."""
 
 import struct
 import tempfile
 import unittest
 
-import forza_chat as ch
-import forza_clubs as clubs
-import forza_limits as limits
-import forza_xtsw as x
-import forza_xtsw_all as A
+from forza_live.social import chat as ch
+from forza_live.social import clubs
+from forza_live.core import limits
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
 
 XUID = 0xE000123456789ABC
 

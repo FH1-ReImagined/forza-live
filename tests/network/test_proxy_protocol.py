@@ -1,4 +1,4 @@
-"""PROXY protocol v2 from the tunnel agent (forza_proxy.py): a tunnelled player's public
+"""PROXY protocol v2 from the tunnel agent (proxy.py): a tunnelled player's public
 address reaches the others for hole punching. The server never guesses whether a header is
 there: without --proxy-protocol-udp / --proxy-protocol-tcp it is byte for byte the server it
 was, and with them it takes a header only where the agent puts its own (first on a TCP
@@ -14,10 +14,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_proxy as proxy
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.network import proxy
+from tests.support import FakeTransport
 
 AGENT = "192.168.100.105"  # the tunnel agent's address, a trusted proxy
 TUNNEL = ("192.0.2.10", 56677)  # the tunnel's public address (the header's destination)
@@ -38,14 +39,6 @@ def playit_v6(src, dst, kind=0x22):
     return (proxy.SIGNATURE + bytes([0x21, kind]) + (36).to_bytes(2, "big") +
             socket.inet_pton(socket.AF_INET6, src[0]) + socket.inet_pton(socket.AF_INET6, dst[0]) +
             src[1].to_bytes(2, "big") + dst[1].to_bytes(2, "big"))
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
 
 
 def xuid(token):
@@ -244,7 +237,7 @@ class OffTest(ProxyServerTest):
         self.server.http_port, self.server.proxy_http_port = 21201, 56678
         pa = self.join((AGENT, 40001), 1)
         welcome = [d for ad, d in self.net.sent if ad == pa.addr and d[4] == srv.WELCOME][0]
-        # Everything up to the HTTP port is as before; the signing part (forza_auth) follows it.
+        # Everything up to the HTTP port is as before; the signing part (auth) follows it.
         before = (srv.MAGIC + bytes([srv.WELCOME]) +
                   struct.pack(">IHIHH", pa.id, self.server.epoch, 0, 0, 2) + b"hi" +
                   struct.pack(">H", 56678))

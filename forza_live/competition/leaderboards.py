@@ -16,7 +16,7 @@ Names: the server has none of its own. Without them a board is "Speed trap 230" 
 tools/extract_map_points.py --names writes from their own copy of the game (docs/hosting.md).
 
 CORS: the server's HTTP replies carry Access-Control-Allow-Origin: * (response() in
-forza_live_server.py), which covers these public, read-only answers.
+server.py), which covers these public, read-only answers.
 
 Answers are cached for CACHE_SECONDS and the work done to build them is rate limited, so
 the page cannot load the server.
@@ -32,9 +32,9 @@ import threading
 import time
 import urllib.parse
 
-import forza_limits as limits
-import forza_scores as scores
-import forza_durable as durable
+from forza_live.core import limits
+from forza_live.competition import scores
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -65,7 +65,7 @@ _clock = time.time
 
 
 def configure(data_dir=None):
-    """Forgets the cache and the secret; the scores come from forza_scores (its DATA_DIR)."""
+    """Forgets the cache and the secret; the scores come from scores (its DATA_DIR)."""
     global _salt, _names
     with _lock:
         _cache.clear()
@@ -75,7 +75,7 @@ def configure(data_dir=None):
 
 
 def forget_answers():
-    """The cached answers go (forza_scores.admin changed the rows)."""
+    """The cached answers go (scores.admin changed the rows)."""
     with _lock:
         _cache.clear()
 

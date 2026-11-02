@@ -10,9 +10,9 @@ import struct
 import tempfile
 import unittest
 
-import forza_scores as scores
-import forza_xtsw as x
-import forza_xtsw_all as A
+from forza_live.competition import scores
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
 
 A_XUID, B_XUID, C_XUID = 0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03
 TAGS = {A_XUID: "DriverA", B_XUID: "DriverB", C_XUID: "DriverC"}
@@ -192,8 +192,8 @@ class BoardsTest(unittest.TestCase):
     def test_speed_above_the_trap_record_not_kept(self):
         # #349: a fast travel onto the Red Rock trap (board 206, Xbox record 233.0 km/h) sent
         # the 440 km/h the car had on a freeway before it.
-        import forza_leaderboards
-        who = forza_leaderboards.player_id("%016X" % A_XUID)
+        from forza_live.competition import leaderboards
+        who = leaderboards.player_id("%016X" % A_XUID)
         self.submit(A_XUID, scores.SPEED_TRAP, 206, 41.0)            # 147.6 km/h: kept
         with self.assertLogs("forza-live", "WARNING") as logs:
             self.assertFalse(self.submit(A_XUID, scores.SPEED_TRAP, 206, 122.2)["uploadFiles"])
@@ -299,14 +299,14 @@ class BoardsTest(unittest.TestCase):
         self.legacy_store({"1:206:0": {A_XUID: 122.2, B_XUID: 55.0},   # 439.9 / 198 km/h
                            "1:218:0": {A_XUID: 121.0},                 # I-70 435.6: a real one
                            "2:101:0": {C_XUID: 140.0}})                # zone, 504 km/h
-        import forza_leaderboards
+        from forza_live.competition import leaderboards
         scores.configure(self.dir.name)
         with self.assertLogs("forza-live", "WARNING") as logs:
             got = self.rows(C_XUID, scores.SPEED_TRAP, 206)[0]
         self.assertEqual(got, [("DriverB", 55.0)])
         self.assertEqual(len(logs.output), 2)
         self.assertIn("removed %s's 439.9 km/h from board 206 type 1, above 233.0 km/h"
-                      % forza_leaderboards.player_id("%016X" % A_XUID), logs.output[0])
+                      % leaderboards.player_id("%016X" % A_XUID), logs.output[0])
         self.assertIn("from board 101 type 2, above 470.0 km/h", logs.output[1])
         self.assertEqual(self.rows(C_XUID, scores.SPEED_TRAP, 218)[0], [("DriverA", 121.0)])
         self.assertEqual(self.rows(A_XUID, scores.SPEED_ZONE, 101)[0], [])
@@ -369,18 +369,18 @@ class BoardsTest(unittest.TestCase):
         self.assertEqual(r["userRow"]["position"], 251)
 
     def test_club_board(self):
-        import forza_clubs
+        from forza_live.social import clubs
         self.submit(A_XUID, scores.SPEED_TRAP, 230, 45.0)
         self.submit(B_XUID, scores.SPEED_TRAP, 230, 50.0)
         self.assertEqual(self.rows(A_XUID, scores.SPEED_TRAP, 230, club=True)[0], [])
         club = {"id": 7, "tag": "HZN"}
-        orig = forza_clubs.membership
-        forza_clubs.membership = lambda xuid: (club, 1) if xuid == A_XUID else (None, 0)
+        orig = clubs.membership
+        clubs.membership = lambda xuid: (club, 1) if xuid == A_XUID else (None, 0)
         try:
             self.assertEqual(self.rows(A_XUID, scores.SPEED_TRAP, 230, club=True)[0],
                              [("DriverA", 45.0)])
         finally:
-            forza_clubs.membership = orig
+            clubs.membership = orig
 
 
 if __name__ == "__main__":

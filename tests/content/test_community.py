@@ -1,4 +1,4 @@
-"""Community photos (forza_community.py): photo mode uploads (LargeFileUpload.Create and
+"""Community photos (community.py): photo mode uploads (LargeFileUpload.Create and
 Content.UploadContent through the server's dispatch, signed, unsigned and with a raw friends key),
 big shots (BMP to PNG), the JPEG check and cleaning, the public feed and images, the operator's
 routes, caps, bans and removal. Every picture here is made by this file (make_jpeg, make_bmp): no
@@ -21,16 +21,17 @@ import zlib
 from types import SimpleNamespace
 from unittest import mock
 
-import forza_auth as auth
-import forza_community as community
-import forza_ed25519 as ed25519
-import forza_friends as friends
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_photos as photos
-import forza_xtsw as x
-import forza_xtsw_all as A
+from forza_live.core import auth
+from forza_live.content import community
+from forza_live.core import ed25519
+from forza_live.social import friends
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.content import photos
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from tests.support import decode_png
 
 try:
     from PIL import Image
@@ -134,32 +135,6 @@ def make_bmp(w, h, top_down=True, rows=None, header=40, bits=24, compression=0):
     info = struct.pack("<IiiHHIIiiII", header, w, -h if top_down else h, 1, bits, compression,
                        len(data), 0, 0, 0, 0) + bytes(header - 40)
     return b"BM" + struct.pack("<IHHI", 14 + len(info) + len(data), 0, 0, 14 + len(info)) + info + data
-
-
-def decode_png(data):
-    """(width, height, rows) of an 8-bit RGB PNG with filter types 0-3 (a plain reference decoder),
-    checking that it holds IHDR, IDAT and IEND only."""
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    i, chunks = 8, []
-    while i < len(data):
-        n, kind = struct.unpack(">I4s", data[i:i + 8])
-        body = data[i + 8:i + 8 + n]
-        assert struct.unpack(">I", data[i + 8 + n:i + 12 + n])[0] == zlib.crc32(kind + body)
-        chunks.append((kind, body))
-        i += 12 + n
-    assert [k for k, _ in chunks] == [b"IHDR", b"IDAT", b"IEND"], [k for k, _ in chunks]
-    w, h, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", chunks[0][1])
-    assert (depth, color, interlace) == (8, 2, 0)
-    raw, n, rows, prev = zlib.decompress(chunks[1][1]), w * 3, [], bytes(w * 3)
-    for y in range(h):
-        kind, f = raw[y * (n + 1)], raw[y * (n + 1) + 1:(y + 1) * (n + 1)]
-        out = bytearray(n)
-        for j in range(n):
-            left = out[j - 3] if j >= 3 else 0
-            out[j] = (f[j] + (0, left, prev[j], (left + prev[j]) // 2)[kind]) & 255
-        rows.append(bytes(out))
-        prev = out
-    return w, h, rows
 
 
 METADATA = (

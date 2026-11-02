@@ -7,12 +7,12 @@ continue?" YES sends LargeFileUpload.Create(24883254, overwriteOldest false, "Fo
 and the picture, a 3840x2160 24-bit BMP (top-down), in 256 KiB Content.UploadContent chunks; the
 game then says "Your Big Shot photo was successfully uploaded to the ForzaMotorsport.net server.
 You can retrieve it from there later." (TU4, October 2026). When such an upload finishes,
-forza_photos hands it here (photo_uploaded), and it becomes a community photo if:
+photos hands it here (photo_uploaded), and it becomes a community photo if:
 
-- the upload was signed with the player's own key (forza_auth, X-Forza-Auth): an older game, or
-  one carrying a raw friends key, has its big shots refused as before (forza_photos), and its
+- the upload was signed with the player's own key (auth, X-Forza-Auth): an older game, or
+  one carrying a raw friends key, has its big shots refused as before (photos), and its
   smaller uploads stay private files and nothing more;
-- the player is not on the ban list (DATA_DIR/banned_xuids.json, shared with forza_designs) and
+- the player is not on the ban list (DATA_DIR/banned_xuids.json, shared with designs) and
   has a gamertag on record;
 - the picture is one this module reads, MIN_SIZE to MAX_SIZE pixels: a 24-bit BMP (the big
   shot), published as a PNG halved down to COPY_MAX_WIDTH (bmp_to_png; not when every tile of it
@@ -20,7 +20,7 @@ forza_photos hands it here (photo_uploaded), and it becomes a community photo if
   greyscale or colour) rewritten with only what a decoder needs (clean_jpeg). Either way the
   file served is made here: no EXIF, XMP, GPS, comment, thumbnail or trailing data survives;
 - the player's caps (PER_DAY a day, PER_PLAYER in all) and the server's (PER_HOUR an hour) allow
-  it, and the disk quota (forza_limits) has room.
+  it, and the disk quota (limits) has room.
 
 Anything else is simply not published: the game's upload succeeds all the same. The same picture
 (SHA-256 of the published file) from the same player again moves its photo to the newer file
@@ -30,8 +30,8 @@ A photo is "live" (in the feed and served), "held" (waiting for screening: hold_
 queue below; nothing is held unless FORZA_COMMUNITY_HOLD=1) or "hidden" (by an operator). A
 banned player's photos are served to nobody, whatever their status, until the ban is lifted.
 When the player's file goes (an upload with overwriteOldest makes room by dropping the player's
-oldest file, forza_photos.remove), its community photo goes with it. A big shot is not kept as a
-file (forza_photos forgets it once it is here), and the game sends overwriteOldest false: a player
+oldest file, photos.remove), its community photo goes with it. A big shot is not kept as a
+file (photos forgets it once it is here), and the game sends overwriteOldest false: a player
 cannot withdraw one from the game; the operator removes it.
 
 Public routes, on the title services port (no side effects, never a XUID):
@@ -51,7 +51,7 @@ through the tunnel or a reverse proxy; requests with an Origin header are refuse
   POST /admin/photos/<id>/hide | unhide | hold | release | delete | ban
   POST /admin/photos/ban/<XUID> | unban/<XUID>
 
-Files: DATA_DIR/community.json (the index, forza_durable) and DATA_DIR/community/<id>.png or .jpg,
+Files: DATA_DIR/community.json (the index, durable) and DATA_DIR/community/<id>.png or .jpg,
 in the server's disk quota. A photo's id is random (ID_LEN base32 characters), never the file's
 id.
 """
@@ -67,9 +67,9 @@ import time
 import urllib.parse
 import zlib
 
-import forza_designs as designs
-import forza_durable as durable
-import forza_limits as limits
+from forza_live.content import designs
+from forza_live.core import durable
+from forza_live.core import limits
 
 log = logging.getLogger("forza-live")
 
@@ -441,7 +441,7 @@ def hold_new(xuid, title):
 
 
 def photo_uploaded(fid, rec, path, signed):
-    """forza_photos: the player's photo mode upload `fid` (its record and file) has arrived. The
+    """photos: the player's photo mode upload `fid` (its record and file) has arrived. The
     community photo's id, or None when it is not published."""
     xuid = rec["owner"]
     if not signed:
@@ -523,7 +523,7 @@ def drop(pid, why):
 
 
 def photo_removed(fid):
-    """forza_photos: the player's file `fid` is gone (overwritten by a newer upload): so is its
+    """photos: the player's file `fid` is gone (overwritten by a newer upload): so is its
     community photo."""
     d = load()
     gone = [pid for pid, p in d["photos"].items() if p["fileId"] == fid]

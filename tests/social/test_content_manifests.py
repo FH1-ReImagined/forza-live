@@ -1,22 +1,15 @@
-"""Content manifests (#567, forza_chat.py op 5): a game says which DLC offers and car mods it has,
+"""Content manifests (#567, chat.py op 5): a game says which DLC offers and car mods it has,
 the server tells the players of one session what they do not share (a car one game lacks is a
 plain placeholder in the other). Drives the server's handlers directly (no sockets)."""
 
 import struct
 import unittest
 
-import forza_chat as ch
-import forza_live_server as srv
+from forza_live.social import chat as ch
+from forza_live import server as srv
+from tests.support import FakeTransport
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
 
 
 def manifest(dlc=(), mods=()):

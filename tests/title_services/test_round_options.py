@@ -4,7 +4,7 @@ the game's own free roam preset), the Races playlist keeps its 255 for the class
 import unittest
 import xml.etree.ElementTree as ET
 
-import forza_live_lsp as lsp
+from forza_live.title_services import lsp
 
 
 def classes(xml):

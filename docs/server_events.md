@@ -31,7 +31,7 @@ these endpoints. Keep the admin token out of client configuration.
    friends credential:
 
    ```sh
-   python event_admin.py enroll 0009000000000001
+   python tools/event_admin.py enroll 0009000000000001
    ```
 
    A different key cannot inherit the enrolled player's grants. Enrollment will
@@ -56,9 +56,9 @@ these endpoints. Keep the admin token out of client configuration.
    ```
 
    ```sh
-   python event_admin.py create event.json
-   python event_admin.py start festival-night
-   python event_admin.py attendance festival-night
+   python tools/event_admin.py create event.json
+   python tools/event_admin.py start festival-night
+   python tools/event_admin.py attendance festival-night
    ```
 
    Enrolled updated clients poll through their current registration. Only polls
@@ -71,7 +71,7 @@ these endpoints. Keep the admin token out of client configuration.
    already owns. This first version does not inspect their complete local garage:
 
    ```sh
-   python event_admin.py award festival-night 0009000000000001 --owned-models 1197
+   python tools/event_admin.py award festival-night 0009000000000001 --owned-models 1197
    ```
 
    That grants online use without creating a duplicate car. If all event reward
@@ -83,13 +83,13 @@ these endpoints. Keep the admin token out of client configuration.
 4. Close the event when finished. Existing awards remain valid:
 
    ```sh
-   python event_admin.py close festival-night
+   python tools/event_admin.py close festival-night
    ```
 
    An organizer can revoke that event's grants for a player:
 
    ```sh
-   python event_admin.py revoke festival-night 0009000000000001
+   python tools/event_admin.py revoke festival-night 0009000000000001
    ```
 
    Another non-revoked event grant for the same model still permits it. Revoking

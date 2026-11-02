@@ -12,16 +12,16 @@ import tempfile
 import time
 import unittest
 
-import forza_auth as auth
-import forza_leaderboards as lb
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_scores as scores
-import forza_xtsw as x
-import forza_xtsw_all as A
-import test_forza_auth as ta
-import test_forza_ghost as tg
+from forza_live.core import auth
+from forza_live.competition import leaderboards as lb
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.competition import scores
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from tests.core import test_auth as ta
+from tests.competition import test_ghost as tg
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
 KEY = bytes(15) + bytes([7])
@@ -398,7 +398,7 @@ class OwnBestTest(Base):
         self.assertEqual(self.unranked()["%016X" % A_XUID][0], 60.0)
 
     def test_an_unverified_caller_does_not_tell_a_rival(self):
-        import forza_notifications as notifications
+        from forza_live.social import notifications
         notifications.configure(self.dir.name)
         self.submit(B_XUID, 120.0)
         self.submit(A_XUID, 125.0)   # a ranked row from before
@@ -477,7 +477,7 @@ class SignedScoresTest(ta.Base):
 
 
 class CallerTest(unittest.TestCase):
-    """Through forza_live_lsp.service_call: the caller's key decides, the build is the header's."""
+    """Through lsp.service_call: the caller's key decides, the build is the header's."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

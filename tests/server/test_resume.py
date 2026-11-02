@@ -6,8 +6,8 @@ directly (no sockets)."""
 import unittest
 from unittest.mock import patch
 
-import forza_live_server as srv
-from test_forza_live_restart import FakeTransport, hello, welcome_id
+from forza_live import server as srv
+from tests.support import FakeTransport, hello, welcome_id
 
 
 class ResumeTest(unittest.TestCase):

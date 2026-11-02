@@ -7,9 +7,9 @@ Run: python3 -m unittest discover -p 'test_*.py'
 
 import unittest
 
-import forza_live_lsp as lsp
-import forza_xtsw as x
-import forza_xtsw_all as A
+from forza_live.title_services import lsp
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
 
 
 class StringTableInfo(unittest.TestCase):

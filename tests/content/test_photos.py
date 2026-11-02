@@ -1,5 +1,5 @@
-"""Photo uploads (forza_photos.py): the calls photo mode's upload makes, as the game's type
-descriptors encode them (forza_xtsw_all.py).
+"""Photo uploads (photos.py): the calls photo mode's upload makes, as the game's type
+descriptors encode them (xtsw_all.py).
 
 Run: python3 -m unittest discover -p 'test_*.py'
 """
@@ -7,12 +7,12 @@ Run: python3 -m unittest discover -p 'test_*.py'
 import tempfile
 import unittest
 
-import forza_clubs as clubs
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_photos as photos
-import forza_xtsw as x
-import forza_xtsw_all as A
+from forza_live.social import clubs
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live.content import photos
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
 
 ALICE, BOB = 0x0009000000000A01, 0x0009000000000B02
 

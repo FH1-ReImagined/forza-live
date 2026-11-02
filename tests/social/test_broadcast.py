@@ -4,9 +4,9 @@ import tempfile
 import time
 import unittest
 
-import forza_live_lsp as lsp
-import forza_notifications as notices
-import forza_xtsw as x
+from forza_live.title_services import lsp
+from forza_live.social import notifications as notices
+from forza_live.network import xtsw as x
 
 A, B = 0x0009000000000001, 0x0009000000000002
 

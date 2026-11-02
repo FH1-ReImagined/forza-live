@@ -1,4 +1,4 @@
-"""The co-op campaign (#309, forza_campaign.py): EventRestrictions decoded as the game does,
+"""The co-op campaign (#309, campaign.py): EventRestrictions decoded as the game does,
 a campaign round's GameOptions XML, the Co-op Festival playlist (listed to games that have
 it, friends-only placement), /event and /events in WORLD chat, the CPU skill sent to every
 console of the world, and a player's result named with the round. Uses a small database
@@ -13,20 +13,20 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-import forza_campaign as cp
-import forza_chat as ch
-import forza_coop_ledger as ledger
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_world as world
-import forza_xtsw as x
-from test_forza_world_players import FakeTransport, record
+from forza_live.world import campaign as cp
+from forza_live.social import chat as ch
+from forza_live.world import coop_ledger as ledger
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.world import world
+from forza_live.network import xtsw as x
+from tests.support import FakeTransport, record
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT | lsp.COOP_FEATURE
 
 
 def make_db(path):
-    """The tables forza_campaign reads, with rows copied from the game's gamedb.slt: FR05
+    """The tables campaign reads, with rows copied from the game's gamedb.slt: FR05
     (event 4: circuit 324, 2 laps, class B, AWD only), FR50 (231: point to point, the
     1960s), a street race (38) and a showcase (8, left out)."""
     db = sqlite3.connect(path)
@@ -175,7 +175,7 @@ class CampaignDbTest(unittest.TestCase):
 
 class CoopWorldCase(unittest.TestCase):
     """A server with DriverA-C (and an older game, 4) online, the small game database, and
-    helpers for the Co-op Festival's messages (also test_forza_coop_ledger.py)."""
+    helpers for the Co-op Festival's messages (also tests/world/test_coop_ledger.py)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

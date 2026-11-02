@@ -1,4 +1,4 @@
-"""The club chat channel (FH1 #145, forza_chat.py): every other member of the sender's car club
+"""The club chat channel (FH1 #145, chat.py): every other member of the sender's car club
 who is online and knows the channel, wherever they are; the same limits and moderation as the
 other channels; the club tag the game is told. Drives the server's handlers directly (no
 sockets)."""
@@ -10,32 +10,13 @@ import tempfile
 import time
 import unittest
 
-import forza_chat as ch
-import forza_clubs as clubs
-import forza_live_lsp as lsp
-import forza_live_server as srv
+from forza_live.social import chat as ch
+from forza_live.social import clubs
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from tests.support import FakeTransport, make_clubs
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
-
-
-def make_clubs(*members):
-    """clubs.json in memory: club 1 TST and club 2 OTH, members = [(xuid, club id)]."""
-    clubs.CLUBS.__init__()
-    clubs.CLUBS.loaded = True
-    now = time.time()
-    clubs.CLUBS.data["clubs"] = {
-        str(i): {"id": i, "tag": tag, "name": tag + " club", "description": "", "open": True,
-                 "created": now, "requests": []} for i, tag in ((1, "TST"), (2, "OTH"))}
-    clubs.CLUBS.data["members"] = {
-        "%016X" % x: {"club": c, "role": clubs.MEMBER, "since": now} for x, c in members}
 
 
 class ClubChatTest(unittest.TestCase):

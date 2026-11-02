@@ -2,9 +2,9 @@
 
 Games up to 0.2.x proved their XUID with the friends key itself (16 random bytes in
 live_identity.txt): sent in the clear in every HELLO and title service call (X-Friends-Key), to
-whatever server the player chose, and kept here as its SHA-256 (forza_friends.Store "key"). Newer
+whatever server the player chose, and kept here as its SHA-256 (friends.Store "key"). Newer
 games and launchers have an Ed25519 key pair (the seed is in live_identity.txt too) and sign each
-request with it (forza_ed25519.py). The server keeps only the public key (Store "pub"): neither
+request with it (ed25519.py). The server keeps only the public key (Store "pub"): neither
 what is sent nor what is stored can sign.
 
 Canonical string, the ten lines joined by "\\n" (no "\\n" after the last), signed as it is:
@@ -54,7 +54,7 @@ binds an XUID bound to a raw key to the first valid public key instead.
 Transition. Raw keys are taken for XUIDs still bound to them until --raw-key-cutoff (unix time;
 env FORZA_RAW_KEY_CUTOFF); counters of their use are logged and on the status page.
 
-Cost: a check is about 1 ms (forza_ed25519). A proven player's keep-alive HELLOs that change
+Cost: a check is about 1 ms (ed25519). A proven player's keep-alive HELLOs that change
 nothing are checked once a minute (HELLO_RECHECK), not every 5 s; VERIFY_RATE bounds the whole
 server's checks and HELLO_CHECKS each player's, so floods of bad signatures cannot take the CPU.
 A HELLO left unchecked by them proves nothing, unless it is such an unchanged keep-alive."""
@@ -67,7 +67,7 @@ import os
 import struct
 import time
 
-import forza_ed25519 as ed25519
+from forza_live.core import ed25519
 
 log = logging.getLogger("forza-live")
 
@@ -202,7 +202,7 @@ def parse_header(value):
         return None
 
 
-# --- Bindings (forza_friends.Store: "pub" a public key, "key" SHA-256 of a raw friends key) ------
+# --- Bindings (friends.Store: "pub" a public key, "key" SHA-256 of a raw friends key) ------
 
 def bound_pub(store, xuid):
     """The public key the XUID is bound to, or None."""
@@ -225,7 +225,7 @@ def bound(store, xuid):
 
 
 def binding(record):
-    """What identifies a player's binding (forza_events.py): its public key, else its old hash."""
+    """What identifies a player's binding (events.py): its public key, else its old hash."""
     return ("pub:" + record["pub"]) if record.get("pub") else record.get("key", "")
 
 

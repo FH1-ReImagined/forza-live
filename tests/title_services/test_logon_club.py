@@ -7,10 +7,10 @@ import struct
 import tempfile
 import unittest
 
-import forza_clubs as clubs
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_xtsw as x
+from forza_live.social import clubs
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.network import xtsw as x
 
 LEADER, MEMBER, LONER = 0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03
 

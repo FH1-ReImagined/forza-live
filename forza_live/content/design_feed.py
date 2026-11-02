@@ -1,7 +1,7 @@
 """Forza Live: the design storefront's paint jobs and vinyl groups on the website, once their
 preview has passed the automatic screening (screening/: local models, no hosted service).
 
-Designs are listed in the game as soon as they are uploaded (forza_designs.py); nothing here
+Designs are listed in the game as soon as they are uploaded (designs.py); nothing here
 changes that. The website shows a design only after its preview was screened, so each design
 has a web state, kept with it in DATA_DIR/designs.json:
 
@@ -12,23 +12,23 @@ has a web state, kept with it in DATA_DIR/designs.json:
   held      left for the operator: the worker was not sure, or the preview cannot be converted.
             In the game as usual, not on the website.
   hidden    a confident screening hit, or the operator: hidden in the game too (listed to its
-            owner only, as three reports do; forza_designs.public) and not on the website.
+            owner only, as three reports do; designs.public) and not on the website.
 
 The website gets a design's public id (random, never the storefront's file id), type, share
-code, title, description, the creator's gamertag (forza_community.credit: none on record, not
+code, title, description, the creator's gamertag (community.credit: none on record, not
 listed), the car's name for a paint job, counts and the preview as a PNG. Never a XUID, never
 the payload (it holds the creator's XUID).
 
-Previews: the design's cxds texture converted by forza_cxds.py (gamma 1/2.2, an RGB PNG with
+Previews: the design's cxds texture converted by cxds.py (gamma 1/2.2, an RGB PNG with
 IHDR, IDAT and IEND only), kept as DATA_DIR/designs/<file id>.png beside the design. Converted
 when the design is first in the queue, the feed or an image route (a few milliseconds each, at
 most QUEUE_MAX in one queue answer); a preview that does not convert, or whose PNG the website
-would refuse (SITE_MIN_SIDE to forza_cxds.MAX_SIDE pixels a side, at most SITE_MAX_PNG bytes),
+would refuse (SITE_MIN_SIDE to cxds.MAX_SIDE pixels a side, at most SITE_MAX_PNG bytes),
 holds the design.
 
 Car names: a paint job's ModelId is the car's id in the game's database (Data_Car). Its name,
 "<year> <make> <model>", is the one the leaderboards show: the "cars" of the operator's
-DATA_DIR/leaderboard_names.json (forza_leaderboards.names; written from the operator's own copy
+DATA_DIR/leaderboard_names.json (leaderboards.names; written from the operator's own copy
 of the game by the game repository's tools/extract_map_points.py --names, which reads the
 --game-db's Data_Car and List_CarMake and the string tables they point to). The database alone
 holds only references into the game's compressed string tables, so without that file the car
@@ -44,7 +44,7 @@ Public routes, on the title services port (no side effects, never a XUID):
   GET /community/design-img/<id>.png   a design of the feed: nosniff, CSP default-src 'none',
                                        cached for IMAGE_SECONDS; at most IMAGES_PER_MINUTE a minute
 
-Operator routes, with forza_community's rules (lsp.is_local_admin: X-Admin-Token in its header,
+Operator routes, with community's rules (lsp.is_local_admin: X-Admin-Token in its header,
 never through the tunnel or a reverse proxy; requests with an Origin header are refused):
 
   GET  /admin/designs[?state=pending|clear|held|hidden]  every design, with its owner's XUID
@@ -64,12 +64,12 @@ import re
 import time
 import urllib.parse
 
-import forza_community as community
-import forza_cxds as cxds
-import forza_designs as designs
-import forza_durable as durable
-import forza_leaderboards as leaderboards
-import forza_limits as limits
+from forza_live.content import community
+from forza_live.content import cxds
+from forza_live.content import designs
+from forza_live.core import durable
+from forza_live.competition import leaderboards
+from forza_live.core import limits
 
 log = logging.getLogger("forza-live")
 
@@ -100,7 +100,7 @@ _images = []  # times of the design image requests of the last minute
 
 
 def configure():
-    """Forgets the caches (forza_designs.configure names the data folder) and reads the
+    """Forgets the caches (designs.configure names the data folder) and reads the
     designs, so that designs from before this module get their web state at start."""
     _feed.update({"key": None, "body": b"", "etag": ""})
     _ids.update({"version": None, "map": {}})

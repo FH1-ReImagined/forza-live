@@ -2,8 +2,8 @@
 
 Forza Horizon talks to Turn 10's servers for its Horizon sign-in, the Find Game playlists
 ("hoppers"), online XP, scoreboards, the storefront and more. The Forza Live server
-answers the calls online play needs (`forza_live_lsp.py`, the protocol in
-`forza_xtsw.py`). Everything below was read from the base `default.xex` (addresses
+answers the calls online play needs (`forza_live/title_services/lsp.py`, the protocol in
+`forza_live/network/xtsw.py`). Everything below was read from the base `default.xex` (addresses
 are guest addresses) and checked against the game's requests and its reaction to our
 answers.
 
@@ -51,15 +51,15 @@ X-Forza-Build: 0.2.0/tu4                                (our game, below)
 **Who is calling.** `X-UserId` is the only thing in the game's request that names the player,
 and anyone can send it. Our game signs every request on its title server connections with its
 Live identity's Ed25519 key (`signing_seed` in `live_identity.txt`), whose public key the server
-bound to the XUID at a HELLO (`forza_friends.py`; the launcher's shader list upload proves
+bound to the XUID at a HELLO (`forza_live/social/friends.py`; the launcher's shader list upload proves
 itself the same way): `X-Forza-Auth: FORZA-ED25519-V1 Server=<name>, Xuid=<16 hex>,
 Time=<unix>, Nonce=<32 hex>, Signature=<128 hex>`, a signature of the method, the target, the
 server's name, the XUID, the time, the nonce, `X-ClassName`, `X-Method` and the SHA-256 of the
-body (`forza_auth.py` has the scheme; `src/kernel/live_signing.h`, `lsp_request_header.h`: each
+body (`forza_live/core/auth.py` has the scheme; `src/kernel/live_signing.h`, `lsp_request_header.h`: each
 request is held until its body is complete and the line goes in before its blank line). Games
 before signed requests sent their friends key itself (`X-Friends-Key: <32 hex digits>`), taken
 for an XUID still bound to it until `--raw-key-cutoff`
-([`hosting.md`](hosting.md#signed-requests-515)). The server (`forza_live_lsp.verify_caller`)
+([`hosting.md`](hosting.md#signed-requests-515)). The server (`forza_live.title_services.lsp.verify_caller`)
 refuses a call that changes anything (every method but `Get*`/`Search*`/`Download*`, and
 `Hopper.GetGameOptions`, which moves a world's event along) when the signature (or friends key)
 is not the XUID's or is missing for an XUID with a key on record, and takes a call for an XUID
@@ -139,7 +139,7 @@ Notifications, Transaction}`. What the game calls, in order:
 
 | When | Call | Our answer |
 | --- | --- | --- |
-| Sign-in (about 50 s after boot) | `User.Logon2(loginData)` | `responseData`: profile valid, a permission table allowing every feature (below), `userData` (XUID, gamertag, **currentXPTotal = the player's online XP**, and the player's club: `clanId`, `clanTag`, `roleInClan`, [below](#car-clubs-and-the-club-garage-forza_clubspy)), timeouts |
+| Sign-in (about 50 s after boot) | `User.Logon2(loginData)` | `responseData`: profile valid, a permission table allowing every feature (below), `userData` (XUID, gamertag, **currentXPTotal = the player's online XP**, and the player's club: `clanId`, `clanTag`, `roleInClan`, [below](#car-clubs-and-the-club-garage-forza_livesocialclubspy)), timeouts |
 | | `OnlineProfile.UpdateAllTables`, `UpdateAll` | success; `UpdateAll`'s `playerRaceHistory` (level, XP, **onlineXP**, online races and wins) and `playerHistory` (credits) are kept per player |
 | | `DLCMetadata.GetStringTableInfo("EN")` | no table (`Id` -1, #79); with the empty answer the game also asked `Xls Content.DownloadContent(0, 0, 0x40000)` x2 and saved a nameless file to `marketplace:\` |
 | Party lobby | `Hopper.GetList(maxCategoryResults 2, maxHopperResults 32)`; Title Update 4: `GetListEx` (each hopper also has `requiredOfferId`, u64) | the playlists (below) |
@@ -149,14 +149,14 @@ Notifications, Transaction}`. What the game calls, in order:
 | End of a Rivals race (also retiring) | `User.WriteRaceStatsEx(id, raceStats, scoreData)` | kept per player (`userXP`, credits, the race) |
 | After the sign-in (single player too) | `Xls Notifications.RetrieveForUser` `notificationPollIntervalSeconds` after `Logon2`, then every `nextRetrieveSeconds` (`StartNewSession` on some paths) | the player's notifications (Message Center, below), 15 s then 60 s (with 0 the game polled 7 times a second) |
 | Sometimes | `Xls User.SetFriends` | empty |
-| Photo mode, BIG SHOT ("upload it to ForzaMotorsport.net") | `LargeFileUpload.Create(24883254, overwriteOldest false, "ForzaBigshot.bmp")`, then `Xls Content.UploadContent(contentId, payloadOffset, payloadTotalSize, uploadData)` in 256 KiB chunks: a 3840x2160 24-bit BMP | `contentFileId`, then `payloadUploadedSize` = bytes held so far (`forza_photos.py`). Answered empty before, the game never saw its upload finish (#71); with the 2 MB limit the Create failed ("The Forza Horizon service is not available"). Now taken from signed games and published as a [community photo](#community-photos-forza_communitypy) |
+| Photo mode, BIG SHOT ("upload it to ForzaMotorsport.net") | `LargeFileUpload.Create(24883254, overwriteOldest false, "ForzaBigshot.bmp")`, then `Xls Content.UploadContent(contentId, payloadOffset, payloadTotalSize, uploadData)` in 256 KiB chunks: a 3840x2160 24-bit BMP | `contentFileId`, then `payloadUploadedSize` = bytes held so far (`forza_live/content/photos.py`). Answered empty before, the game never saw its upload finish (#71); with the 2 MB limit the Create failed ("The Forza Horizon service is not available"). Now taken from signed games and published as a [community photo](#community-photos-forza_livecontentcommunitypy) |
 | Photo mode, SHARE to the storefront (MY SHARED PHOTOS) | `StorefrontPhoto.Create(fileHeader, photoDesc, payloadSize, previewData)` (27 KB: header, car/track ids and a thumbnail), then `UploadContent` as above; the pages and files are read with `Storefront.GetPhotoPageList`, `GetFileListForPage`, `GetStats`, `GetFeaturedPhotos`, `GetMostDownloadedPhotos`, `GetTopRatedPhotos` | the shared photos below (#82) |
 
 The game keeps one HTTP connection to the title server for all its calls. The server must
 leave it open while idle: when it closed idle connections after 15 s, the game's next call
 minutes later (Rivals from the single-player free roam) was never sent and failed as
 "The Forza Horizon server is not available", until the game found its title server again
-(about 12 minutes later in one test). `forza_live_server.py` now waits 6 hours.
+(about 12 minutes later in one test). `forza_live/server.py` now waits 6 hours.
 
 ### Permissions (features)
 
@@ -210,7 +210,7 @@ game database's `HopperRaces` table (preset, track, laps: (1, 322, 3), (2, 155, 
 3), (2, 145, 1)), picked by `roundNum`; `DATA_DIR/hoppers/<id>.xml` replaces them. The
 Playground Games playlist (2) serves the game's own Infected (4, arena track 215), Cat &
 Mouse (5, track 322, 2 laps) and King (6, track 215, 180 s) presets in turn
-(`playground_rounds.xml`, copied from `GameOptionPresets.xml` with their buckets,
+(`forza_live/title_services/playground_rounds.xml`, copied from `GameOptionPresets.xml` with their buckets,
 tag and scoring options; the game's own playground hopper default is a free roam);
 `--playground-games 6,4` picks and orders them.
 
@@ -290,7 +290,7 @@ wait for this check.
 
 Tested with the fix (TU4, local server, `FORZA_LOBBY_LOG=1`): three games with
 `--playground-games 6,5` and both rounds made 60 s timed ones (a scratch copy of
-`playground_rounds.xml`), then two after the third left: 8 lobbies after a round (4 King ->
+`forza_live/title_services/playground_rounds.xml`), then two after the third left: 8 lobbies after a round (4 King ->
 Cat & Mouse, 4 Cat & Mouse -> King, half of them with three players) all started 33 s after
 they opened (the 30 s intermission); one, King -> Cat & Mouse with two players, drew
 `1 1 0 0 0 | 1 0 1 0 0` and was drawn again once. Then two players on the full Cat & Mouse
@@ -320,7 +320,7 @@ Live server), those with a free slot only, the fullest first. The **session host
 `GetGameOptions` for the **next** round when a round starts (the answer is the round the
 lobby shows after this one; a vote to skip asks again). In the Horizon World the server
 answers it with a festival event when one was requested for that world
-(`forza_world.py`, [`online_vision.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/online_vision.md) phase 2).
+(`forza_live/world/world.py`, [`online_vision.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/online_vision.md) phase 2).
 
 ### Find Custom Game (#61, 2026-10-15)
 
@@ -389,7 +389,7 @@ and joins, A saves King and leaves. Before, a search for Infected listed the Kin
 both fixes King lists it as "KING 03:00, class B, host DriverB" and Infected finds nothing;
 B's setup changed to Cat and Mouse moved both records to key 6. With an older game as B
 (v0.1.33 behaviour) and only the server fixed, a third game C found it under King with
-A's last King details and joined it. `test_forza_lobby_details.py`.
+A's last King details and joined it. `tests/server/test_lobby_details.py`.
 
 Not reproduced: a player who was in a King round for the others but never appeared in one
 player's game (the second part of #391). That player's log has every join of the lobby in
@@ -422,7 +422,7 @@ properties), 0xB0010-15, 0xB0018 (sessions), 0xB001C, 0xB001E, 0xB001F, 0xB0021
 
 | Leaderboard (where) | Written by | Read by | Server |
 | --- | --- | --- | --- |
-| Speed traps (speed cameras: 21 in `gamemodes.zip` `Colorado/speed_camera.xml`, `scoreboard_id` 201-230) | passing one: `SubmitScore(type 1, board, speed in m/s)` (`CAmbientChallengeLeaderboard`, its queue `sub_82992520`, sent at `0x829911CC`); the HUD shows the speed and the save's PB | at the trap `GetRows(type 1, view 5, board, 1, 200)` (`sub_82979C60`: type 2 for a zone, else 1); the map (filter Speed Cameras, X LEADERBOARD on one): `GetRows(1, view 2, board, 1, 50)`, X changes the filter | `forza_scores.py`, best speed per player; at the trap the game places a new score by walking up from `userRow.position` through the rows (`row[position - 2]`, `sub_82979E80`), so view 5 puts a player ranked below the 200 rows sent at place 201 (rank unchanged), and `src/hooks/ambient_leaderboard.cpp` keeps the game within the rows for any server (#288) |
+| Speed traps (speed cameras: 21 in `gamemodes.zip` `Colorado/speed_camera.xml`, `scoreboard_id` 201-230) | passing one: `SubmitScore(type 1, board, speed in m/s)` (`CAmbientChallengeLeaderboard`, its queue `sub_82992520`, sent at `0x829911CC`); the HUD shows the speed and the save's PB | at the trap `GetRows(type 1, view 5, board, 1, 200)` (`sub_82979C60`: type 2 for a zone, else 1); the map (filter Speed Cameras, X LEADERBOARD on one): `GetRows(1, view 2, board, 1, 50)`, X changes the filter | `forza_live/competition/scores.py`, best speed per player; at the trap the game places a new score by walking up from `userRow.position` through the rows (`row[position - 2]`, `sub_82979E80`), so view 5 puts a player ranked below the 200 rows sent at place 201 (rank unchanged), and `src/hooks/ambient_leaderboard.cpp` keeps the game within the rows for any server (#288) |
 | Speed zones (average speed: 9 in `Colorado/average_speed.xml`, boards 101-112) | `SubmitScore(type 2, board, average speed)` | as speed traps, type 2 | the same |
 | A friend's speed beaten | `NotifyRival(board, type 1/2, rival)` (`0x82990744`) | the rival's Message Center (RIVAL CHALLENGE) | `notify_rival` ("Speed Trap 30"; the game's names are in `List_SpeedCameras.str`) |
 | Events (festival events, street races, showcases; board = the event's `Events.Id`) | at the finish `SubmitScoreEx(type 3, board, best lap or race time)` (`0x829495CC`, `0x829496F8`) and the ghost (`UploadFile`) | Race Central LEADERBOARDS: an event `GetRows(3, view, board, 1, 50)`; VIEW OVERALL `GetRollupRows(0, view, pivot, eventTypeId 1-3)` | best time per player; rollups over the type-3 boards |
@@ -432,7 +432,7 @@ properties), 0xB0010-15, 0xB0018 (sessions), 0xB001C, 0xB001E, 0xB001F, 0xB0021
 | 1000 Club (pause menu, Title Update 4) | `Challenge.ChallengeCompleted(car, thumbprint)` | `GetRows(5, view 5, board 1, 1, 200)` (`0x824CE230`), its LEADERBOARDS `GetRows(5, view 2, ...)` | medals per player |
 | Car club boards | - | `GetRows(..., isClubBoard)` | the caller's club's rows |
 | Storefront (Design Storefront creators) | - | `GetStorefrontRows` (`0x828E1964`) | not answered (no Storefront on the server) |
-| TrueSkill (Xbox LIVE stats view `0xFFFF0000`) | at the end of an online game `XSessionWriteStats` (XGI 0xB0025, `sub_83164D60`; the task `0x82D624A8` built at `0x82D63DDC`): per player `X_PROPERTY_RELATIVE_SCORE` (0x1000800A) and `X_PROPERTY_SESSION_TEAM` (0x1000800B) | `XUserReadStats` (0xB0021, `sub_82B2B238`, called at `0x82CC0BFC`) when the party session is created | `forza_stats.py`: rated per game, rows with rank and skill |
+| TrueSkill (Xbox LIVE stats view `0xFFFF0000`) | at the end of an online game `XSessionWriteStats` (XGI 0xB0025, `sub_83164D60`; the task `0x82D624A8` built at `0x82D63DDC`): per player `X_PROPERTY_RELATIVE_SCORE` (0x1000800A) and `X_PROPERTY_SESSION_TEAM` (0x1000800B) | `XUserReadStats` (0xB0021, `sub_82B2B238`, called at `0x82CC0BFC`) when the party session is created | `forza_live/competition/stats.py`: rated per game, rows with rank and skill |
 | Skill chains, popularity, MY PROFILE (speed traps and zones triggered, ...) | the save only | the save | no online board |
 
 Two players (A and B, copies of one save, local server): A drove the Rt. 29 speed trap
@@ -480,7 +480,7 @@ traps (175-200 km/h on Sth Rt. 38, board 210, where it said 132).
 Not done: an event board (type 3) was not driven again with the new board keys
 (unit-tested); the Storefront's rows (`GetStorefrontRows`) stay empty.
 
-### Scoreboards, leaderboards and Rivals (`forza_scores.py`)
+### Scoreboards, leaderboards and Rivals (`forza_live/competition/scores.py`)
 
 The method stubs (`Forza.WebServices.Scoreboard`, all calling `sub_82A92018`) and their
 callers:
@@ -624,14 +624,14 @@ nothing; they may not all have counted as the skill.)
 Seen with two players ([`dlc.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/dlc.md), 1000 Club): "1 DriverB 1 (medal icon) 10/15/2026,
 2 DriverA 1 ...", "YOU ARE IN THE TOP 100% OF 2 PLAYERS"; the score shows as the medal
 count and `submittedTime` as the date; the filters (views 2, 3, 1, 0) all list the board.
-Unit tests: `test_forza_scores.py` (`python3 -m unittest discover -p
+Unit tests: `tests/competition/test_scores.py` (`python3 -m unittest discover -p
 'test_*.py'`).
 
 The thumbprint names the challenge: the Aventador's ONE EIGHTY SKILL sent `carId 1398,
 challengeThumbprint 0xAE6828D3` both times it was completed (the second time after a
 restart had lost the medal: the career must be saved, [`dlc.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/dlc.md)).
 
-#### Rivals ghosts (`forza_ghost.py`, FH1 #517)
+#### Rivals ghosts (`forza_live/competition/ghost.py`, FH1 #517)
 
 The game builds the upload (`sub_82C82A58`, base game addresses) from two streams of its lap
 recorder and reads it back the same way (`sub_82C83AC0`, which extracts them to
@@ -653,7 +653,7 @@ ReplayInit 2,748 bytes) and the Saleen S7, car 432, in 138.412 s (20,280 bytes, 
 4-lap race's best lap, lap 2 in 117.704 s (18,349 bytes, 733 records). The records start at
 0.002-0.015 s and end within 0.012 s of the score: a race's lap is recorded from its own start.
 
-`forza_ghost.check` refuses a ghost over 256,000 bytes (the game's download buffer) or whose
+`forza_live.competition.ghost.check` refuses a ghost over 256,000 bytes (the game's download buffer) or whose
 sizes, chunks or records do not add up, with another version or more than one car, another
 car than the row's, another track than the event's races (`Races`, when the server has the
 game's database), a lap time more than 0.01 s from the score, records spanning more than
@@ -663,7 +663,7 @@ retry, no message, the results go on. The kept copy has the driver's gamertag cl
 its ReplayInit deflated again by Python's zlib: raced as a rival, the game loaded it and drove
 the ghost car with the row's gamertag over it.
 
-### Car clubs and the club garage (`forza_clubs.py`)
+### Car clubs and the club garage (`forza_live/social/clubs.py`)
 
 At the festival the CAR CLUB sign (X) calls `Xls User.GetUserData`: with no club the menu
 is MY CLUB (CREATE, JOIN CLUB). JOIN CLUB is `Xls Clan.GetUsersToJoin(filter 1, 8)`: the
@@ -695,7 +695,7 @@ Multiplayer's party lobby reads that copy and makes no club call of its own: wit
 the lobby lists `[TST] gamertag` with the club shield and offers INVITE CLUB MEMBERS, without
 it a plain gamertag and no such entry. `Logon2` used to leave the club out of `userData`, so
 Multiplayer knew the club only after the car club sign's `GetUserData` had filled the copy in
-that session; `Logon2` now sends the club like `GetUserData` does (`forza_clubs.clan_fields`; both
+that session; `Logon2` now sends the club like `GetUserData` does (`forza_live.social.clubs.clan_fields`; both
 answers use the same `UserData` record). Tested with the TU4 game and a local server: a player
 in a club went from the main menu straight to Multiplayer and saw `[TST]` and INVITE CLUB
 MEMBERS with no `GetUserData` call; without the club in `Logon2` the same steps showed neither
@@ -721,7 +721,7 @@ poll: MEMBERSHIP ACCEPTED "Welcome to the club. Your membership to the Horizon K
 has been accepted." (In an invite-only club the game offers only SHOW GAMER CARD and ADD
 AS FAVORITE on that row.)
 
-### The Auction House and car gifts (`forza_market.py`)
+### The Auction House and car gifts (`forza_live/content/market.py`)
 
 The server side is complete and unit-tested (`Auction.*`: GetGlobalConfig, Create,
 UploadAuctionTextures, SearchForAuction, GetAuctions, GetDetails, GetMyAuctions,
@@ -786,7 +786,7 @@ the recipient list (`sub_826EA0A0`: popup screen 0xDE over the friends list; eve
 player online is a friend here) and on the choice (action 7, `sub_826F0330`) runs
 `Forza::CGiftingTransactionSendCarGift` (`sub_8289D9E8` -> `SendCarGift`).
 
-### Photos and the photo storefront (`forza_photos.py`, #71, #82)
+### Photos and the photo storefront (`forza_live/content/photos.py`, #71, #82)
 
 Photo mode > PHOTO SHARE has BROWSE PHOTOS (PG PICKS, most downloaded, top rated, search) and
 MY SHARED PHOTOS (the player's own storefront, `SLOTS AVAILABLE n/m`). Uploading from there
@@ -824,7 +824,7 @@ gives the slot back (25/25 on reopening). The thumbnails of the photo saved on a
 session are black. Not seen: other players' photos (no second account), ratings, search
 results with a match, `Purchase`, the 27 KB request (a photo of the player's own).
 
-### Community photos (`forza_community.py`)
+### Community photos (`forza_live/content/community.py`)
 
 Photo mode's large photo is the **Big Shot**: TAKE PHOTO, RB switches STANDARD : 0.9 MEGAPIXEL to
 BIG SHOT : 8.3 MEGAPIXEL, A asks "You are about to create a large photo and upload it to
@@ -837,11 +837,11 @@ Big Shot photo was successfully uploaded to the ForzaMotorsport.net server. You 
 from there later." On Turn 10's service those photos went to the website; here they go to the
 community gallery on the project's website.
 
-`forza_photos.py` takes a file over 2 MB (a "big shot", up to 32 MiB) only from a request signed
+`forza_live/content/photos.py` takes a file over 2 MB (a "big shot", up to 32 MiB) only from a request signed
 with the player's own key (`X-Forza-Auth`), at most 60 started an hour on the whole server and
 one unfinished per player; an older game's big shot fails as before. Once it has arrived it is
-handed to `forza_community.py` and forgotten: big shots are not kept as private files.
-`forza_community.py` publishes it when the upload was signed (its Create and the call that
+handed to `forza_live/content/community.py` and forgotten: big shots are not kept as private files.
+`forza_live/content/community.py` publishes it when the upload was signed (its Create and the call that
 completed it), the player is not banned (`DATA_DIR/banned_xuids.json`) and has a gamertag, the
 caps allow it (10 a day and 200 in all per player, 60 an hour on the server) and the picture
 reads as a BMP of 640x360 to 7680x4320 (aspect at most 3:1). The published copy is made by the
@@ -870,14 +870,14 @@ no big shot file, so a player cannot withdraw a photo from the game: the operato
 | `GET /community/img/<id>.png` | a live photo (`.jpg` for a JPEG), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 image requests a minute (then 429) |
 | `/admin/photos...` | the operator's ([hosting](hosting.md#community-photos)) |
 
-Files: `DATA_DIR/community.json` (forza_durable) and `DATA_DIR/community/<id>.png`, in the disk
+Files: `DATA_DIR/community.json` (forza_live.core.durable) and `DATA_DIR/community/<id>.png`, in the disk
 quota. Seen in a game (TU4 at game main 3896de8, a copy of the test save, a local server): a big
 shot with `--readback_resolve=full` became a live 1920x1080 PNG in the feed, served with the
 headers above, and the website's `build_gallery.py` published it from the feed; with the default
 readback the server logged the failed capture and published nothing; the game said the upload
 succeeded both times.
 
-### The design storefront (`forza_designs.py`)
+### The design storefront (`forza_live/content/designs.py`)
 
 Paint Shop > DESIGN STOREFRONT: paint jobs (liveries) and vinyl groups that players share,
 browse, buy and apply. Forza Horizon has no tune or replay sharing (MY UPGRADE SETUPS offers
@@ -886,7 +886,7 @@ reporting tuning (0) or replays (4) in the page list gives MY SHARED DESIGNS unn
 
 | Call | What the game sends and needs |
 | --- | --- |
-| `StorefrontLivery.Create` | From LOAD DESIGN > a paint job of the car the player is in > UPLOAD TO STOREFRONT, after `Auction.UploadAuctionTextures` (the livery as a 1024x1024 JPEG texture, `forza_market.py`). `fileHeader` Type 2, Quantity -1 (no limit), SubmissionTime "now" with milliseconds; `liveryDesc` MakeId, ModelId, TextureId; `previewData` the paint job's 288x160 `cxds` thumbnail (the bytes of its `thumb.xdc`). Answer `contentFileId`; the payload follows in `UploadContent`: the plaintext `crlv` design (not encrypted or compressed; it holds the creator's online XUID) |
+| `StorefrontLivery.Create` | From LOAD DESIGN > a paint job of the car the player is in > UPLOAD TO STOREFRONT, after `Auction.UploadAuctionTextures` (the livery as a 1024x1024 JPEG texture, `forza_live/content/market.py`). `fileHeader` Type 2, Quantity -1 (no limit), SubmissionTime "now" with milliseconds; `liveryDesc` MakeId, ModelId, TextureId; `previewData` the paint job's 288x160 `cxds` thumbnail (the bytes of its `thumb.xdc`). Answer `contentFileId`; the payload follows in `UploadContent`: the plaintext `crlv` design (not encrypted or compressed; it holds the creator's online XUID) |
 | `StorefrontLayerGroup.Create` | From MY VINYL GROUPS > UPLOAD TO STOREFRONT: Type 1, `layerGroupDesc` NumLayers, a 256x128 `cxds` preview; the payload is the plaintext `lvyg` group |
 | `GetDesignPageList`, `GetFileListForPage` | MY SHARED DESIGNS: pages 1 and 2 with their slots, then one file at a time |
 | `GetFeaturedDesigns`, `GetMostDownloadedDesigns`, `GetTopRatedDesigns` | Entering the storefront (PG PICKS and the other tabs; paint jobs and vinyl groups together). `clientContentFlag` is always `{High 0x800000000, Low 1}` |
@@ -909,7 +909,7 @@ one rating per player, never the owner's, only from proven callers; three distin
 hide a file at once. Each file has a six-character share code: typed into a search's gamertag
 or text field, it finds that file alone. A `held` state (listed to its owner only) is ready for
 screening uploads before they are listed; nothing is held for now: a design is listed at once.
-A design the screening or the operator hid for the website ([below](#designs-on-the-website-forza_design_feedpy))
+A design the screening or the operator hid for the website ([below](#designs-on-the-website-forza_livecontentdesign_feedpy))
 is hidden in the game too, as after three reports. Files: `DATA_DIR/designs.json` and
 `DATA_DIR/designs/<id>.bin` / `.prev` (and `.png`, the website's copy of the preview), in the
 disk quota; design ids start at 100,000,000, so the calls shared with photos (`Purchase`,
@@ -920,7 +920,7 @@ job and a vinyl group with signed requests; B found each by its share code, boug
 applied it ("Successfully applied design from design catalog"; the livery on B's car in free
 roam).
 
-### Designs on the website (`forza_design_feed.py`)
+### Designs on the website (`forza_live/content/design_feed.py`)
 
 The website's designs page shows the paint jobs and vinyl groups players share, with their
 preview, and the share code to find each one in the game. A design is listed in the game as soon
@@ -936,7 +936,7 @@ a web state, kept with it in `designs.json`:
 | `hidden`: a confident screening hit, or the operator | listed to its owner only, as after three reports | no |
 
 The preview is the game's `cxds` texture (288x160 for a paint job, 256x128 for a vinyl group).
-`forza_cxds.py` decodes it with the standard library: the `cxds` v2 header (the texture's size
+`forza_live/content/cxds.py` decodes it with the standard library: the `cxds` v2 header (the texture's size
 twice and its packed size), the raw-deflated texture (exactly that size, nothing after it), its
 format word at 0x20 (tiled 8_8_8_8 only) and size word (13 bits each, at most 1024 pixels), the
 ARGB pixels in the Xbox 360's tiled order (the port of the game repository's
@@ -959,7 +959,7 @@ references into the game's compressed string tables, so without that file `car` 
 | `GET /community/design-img/<id>.png` | the preview of a design in the feed, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 design image requests a minute (then 429) |
 | `/admin/designs...` | the operator's and the screening worker's ([hosting](hosting.md#community-designs)), with the community photos' rules |
 
-### Notifications (Message Center) (`forza_notifications.py`)
+### Notifications (Message Center) (`forza_live/social/notifications.py`)
 
 The Message Center is in the pause menu (START, MESSAGE CENTER; not in multiplayer). It
 lists what `Xls Notifications.RetrieveForUser(nonce, maxResults 512, cbParameterBlockSize
@@ -1037,7 +1037,7 @@ gift's DOWNLOAD called `RetrieveCreditsGift` and the save's credits went from 64
 ## Testing these services
 
 `--dump-requests` saves every call under `DATA_DIR/requests`; `tools/xtsw_decode.py -n 20
-DATA_DIR` decodes the last ones with `forza_xtsw_all.py` (all 292 records). The
+DATA_DIR` decodes the last ones with `forza_live/network/xtsw_all.py` (all 292 records). The
 career tests used a copy of the user's Xenia save (`tools/play.sh --xenia`, a copy per
 instance under its `XDG_DATA_HOME`), which starts at the GoPro Millennia Masters sign-up;
 the map (BACK) fast-travels (X on a festival icon) to Race Central, the Car Club, the

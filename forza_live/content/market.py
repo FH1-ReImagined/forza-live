@@ -31,11 +31,11 @@ import os
 import time
 import uuid
 
-import forza_notifications as notifications
-import forza_limits as limits
-import forza_xtsw as x
-import forza_xtsw_all as A
-import forza_durable as durable
+from forza_live.social import notifications
+from forza_live.core import limits
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -620,7 +620,7 @@ def gift_credits(recipient, amount, message="", sender=0, sender_tag="Forza Live
 def gift_stock_car(recipient, model, sender=0, sender_tag="Forza Live", idempotency_key=None):
     """A stock car (the game database's Data_Car id), collected from the Message Center
     (RetrieveCarGift): no parts, tuning or livery, a new car's history."""
-    import forza_clubs
+    from forza_live.social import clubs
     MARKET.load()
     existing = next((g for g in MARKET.gifts.values()
                      if idempotency_key is not None and g.get("deliveryKey") == idempotency_key), None)
@@ -635,7 +635,7 @@ def gift_stock_car(recipient, model, sender=0, sender_tag="Forza Live", idempote
             "SenderXuid": sender, "SenderGamerTag": sender_tag, "Reason": 0},
             idempotency_key=idempotency_key)
         return gid
-    info = forza_clubs.game_car(model)
+    info = clubs.game_car(model)
     if not info:
         raise ValueError("no car %d in the game database" % model)
     year, make = info[0], info[1]

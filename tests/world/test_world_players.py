@@ -8,26 +8,12 @@ import time
 import unittest
 from unittest import mock
 
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_world as world
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.world import world
+from tests.support import FakeTransport, record
 
 KEY = lsp.WORLD_HOPPER
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
-
-
-def record(session_id, filled, slots=8):
-    """A session record: the XSESSION_INFO (the session id first), then the public slots."""
-    info = bytearray(srv.SESSION_INFO_SIZE)
-    info[:8] = session_id
-    return bytes(info) + bytes([slots, 0, filled, 0]) + bytes(32)
 
 
 class WorldPlayersTest(unittest.TestCase):
@@ -161,10 +147,10 @@ class WorldPlayersTest(unittest.TestCase):
         for p in (b, c, d):
             self.standby(p, sid)
         self.server.drop(host, "left")
-        with mock.patch("forza_world_host.time.monotonic", return_value=100.0):
+        with mock.patch("forza_live.world.world_host.time.monotonic", return_value=100.0):
             self.standby(b, sid, host=True)
         self.assertEqual(self.first_host(e), b.id)
-        with mock.patch("forza_world_host.time.monotonic", return_value=130.0):
+        with mock.patch("forza_live.world.world_host.time.monotonic", return_value=130.0):
             self.standby(c, sid, host=True)
         self.assertEqual(self.first_host(e), c.id)
         self.assertEqual(self.server.world_sessions()[sid][0].name, "C")

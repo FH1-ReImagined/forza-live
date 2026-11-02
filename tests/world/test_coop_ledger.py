@@ -1,10 +1,10 @@
-"""The co-op campaign's ledger (#309 milestones 1 and 2, forza_coop_ledger.py): a campaign round
+"""The co-op campaign's ledger (#309 milestones 1 and 2, coop_ledger.py): a campaign round
 opened by its host's own call and closed by the world's next round, each player's first own
 report for that world's session, the field size from the round, only the requester's game's
 XSessionWriteStats, each player's result offered to its own launcher (signed like the shader
 list upload), a guest's place only with the host game's agreeing write, waiting results capped
 per player, confirmations and the file. Drives the server's handlers directly (no sockets), with
-the small game database of test_forza_campaign."""
+the small game database of tests/world/test_campaign."""
 
 import json
 import os
@@ -12,14 +12,14 @@ import struct
 import time
 import unittest
 
-import forza_chat as ch
-import forza_coop_ledger as ledger
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_stats as stats
-import forza_xtsw as x
-import forza_world as world
-from test_forza_campaign import CoopWorldCase
+from forza_live.social import chat as ch
+from forza_live.world import coop_ledger as ledger
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.competition import stats
+from forza_live.network import xtsw as x
+from forza_live.world import world
+from tests.world.test_campaign import CoopWorldCase
 
 
 class LedgerTest(CoopWorldCase):
@@ -359,7 +359,7 @@ class LedgerTest(CoopWorldCase):
         return results["specialMultiplier"]
 
     def test_the_race_multiplier_knob_turns_per_campaign_round(self):
-        import forza_campaign as cp
+        from forza_live.world import campaign as cp
         self.assertEqual(self.multiplier(self.a), 1.0)
         cp.RACE_MULTIPLIERS = [0.0, 2.0]
         self.addCleanup(setattr, cp, "RACE_MULTIPLIERS", [1.0])
@@ -473,7 +473,7 @@ class OperatorAndPlaylistTest(CoopWorldCase):
         self.assertEqual(self.search(self.b, lsp.COOP_HOPPER), [])
 
     def test_no_playlist_without_events(self):
-        import forza_campaign as cp
+        from forza_live.world import campaign as cp
         body = bytes(lsp.x.encode(lsp.x.HopperGetList_Params,
                                   {"maxCategoryResults": 2, "maxHopperResults": 32}))
 

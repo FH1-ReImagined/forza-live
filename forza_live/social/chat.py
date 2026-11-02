@@ -4,11 +4,11 @@ the Horizon World, and direct messages between friends.
 The server only relays: a message goes to the players online now and is gone. For
 moderation it keeps the last RING messages in memory (time, sender, channel, recipient,
 text; never written to disk), which the admin reads at /admin/chat. Admin actions (with
-the admin token, see forza_live_lsp.is_admin): /admin/mute?who=<gamertag|XUID>&minutes=N
+the admin token, see lsp.is_admin): /admin/mute?who=<gamertag|XUID>&minutes=N
 (0 lifts it) stops a player's messages, /admin/kick?who=...&minutes=N drops the player and
 refuses its sign-in for N minutes (a ban; 0 lifts it). Mutes and bans are kept in
 DATA_DIR/moderation.json until they run out. Players mute others for themselves (MUTE;
-kept in friends.json with their friends); a player's blocks (forza_friends.py) hide its
+kept in friends.json with their friends); a player's blocks (friends.py) hide its
 messages too, both ways.
 
 Games say they have chat with HELLO features 0x04 (FEATURE); games without it neither send
@@ -17,12 +17,12 @@ nor get messages.
 Channels: SESSION, the players in a session with the sender (the game reports the ids of
 the sessions it hosts or joined, Horizon World sessions excepted); WORLD, the players in the
 sender's Horizon World or Co-op Festival world (what matchmaking knows); DIRECT, one friend;
-CLUB, every other member of the sender's car club (forza_clubs.py) who is online, wherever
+CLUB, every other member of the sender's car club (clubs.py) who is online, wherever
 they are (rooms and worlds do not matter, as for DIRECT). A game says it knows the CLUB
 channel by asking for it (CLUB below) and is told the tag of the club it is in (CLUBTAG),
 so older games neither show the channel nor get club messages.
 A line starting with "/" may be a server command instead (Chat.commands: /event and /events
-in a Co-op Festival world, forza_campaign.py; /club, forza_club_world.py); commands are
+in a Co-op Festival world, campaign.py; /club, club_world.py); commands are
 answered with NOTICEs.
 
 Message CHAT (UDP kind 23), body op u8 then (big endian; text u16 length + UTF-8):
@@ -55,11 +55,11 @@ import struct
 import unicodedata
 import time
 
-import forza_auth as auth
-import forza_clubs as clubs
-import forza_friends as friends
-import forza_limits as limits
-import forza_durable as durable
+from forza_live.core import auth
+from forza_live.social import clubs
+from forza_live.social import friends
+from forza_live.core import limits
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -153,7 +153,7 @@ class Chat:
         self.bans = {}   # xuid -> until
         self.buckets = {}
         # commands(peer, channel, text) -> True when a "/" line was a server command
-        # (forza_live_server.chat_command: the Co-op Festival's /event), not relayed
+        # (server.chat_command: the Co-op Festival's /event), not relayed
         self.commands = None
 
     # --- moderation state ---

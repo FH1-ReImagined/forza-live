@@ -1,4 +1,4 @@
-"""Friends (#92, forza_friends.py): requests, accept, decline, remove, block, caps, rate
+"""Friends (#92, friends.py): requests, accept, decline, remove, block, caps, rate
 limits, the friends key, the list in parts, search, the file, and old games left alone.
 Drives the server's handlers directly (no sockets)."""
 
@@ -7,22 +7,15 @@ import struct
 import tempfile
 import unittest
 
-import forza_friends as fr
-import forza_live_server as srv
+from forza_live.social import friends as fr
+from forza_live import server as srv
+from tests.support import FakeTransport
 
 KEY = bytes(range(16))
 
 
 def s8(text):
     return fr.text8(text)
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
 
 
 class FriendsTest(unittest.TestCase):

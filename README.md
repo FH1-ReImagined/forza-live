@@ -1,95 +1,69 @@
 # Forza Live
 
-The online server of [Forza Horizon 1: ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined):
-a self-hostable stand-in for Xbox LIVE and Turn 10's title services, so the PC port can play
-online. One Python 3 program, standard library only, nothing to install.
+**[Host your own server](docs/hosting.md#how-to-make-your-own-forza-live-server)**: the
+step-by-step guide (Docker Compose, the ports, playit.gg, updates and backups).
+
+Forza Live is the online server of
+[Forza Horizon 1: ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined). It
+stands in for Xbox LIVE and Turn 10's title services, so the PC port can play online: sign-in,
+friends and chat, the Horizon World, the Co-op Festival, leaderboards and Rivals, car clubs,
+photos and designs. One Python 3 program, standard library only.
 
 - **UDP 21200**: sign-in, presence, rendezvous (UDP hole punching) and a relay for the players
   who cannot reach each other directly.
-- **TCP 21201**: the title services the game asks Turn 10's servers for (the Horizon sign-in,
-  Find Game playlists, online XP, scoreboards, leaderboards and Rivals ghosts, car clubs,
-  photos and designs, notifications), a JSON status page at `/`, and the community photos and
-  shared designs the website copies (`/community/gallery.json`, `/community/designs.json`).
-- Friends and text chat, the Horizon World (a shared free roam with festival events), the
-  Co-op Festival campaign, head-to-head challenges, the players' shader lists.
+- **TCP 21201**: the title services the game asks Turn 10's servers for, a JSON status page at
+  `/status`, and the community photos and designs the website shows.
 
-The public server is `forza-reimagined.playit.plus:56677`, the launcher's default. The
-launcher's **This PC** mode runs this server on the player's own machine; it comes with every
-release of the game's launcher (the game's repository has this one as its `server/` submodule).
-
-A car club has its own chat channel (Club: the members who are online, wherever they are), and
-`/club` in any chat channel lists them and where they are. A player in a club is placed in a
-Horizon World with a clubmate when one has room.
-
-In World chat, the world's host can type `/event random` to start a random race in
-Horizon World or Co-op Festival. The server picks once for the whole session from
-that mode's eligible events. Horizon World needs the game database configured;
-Co-op Festival keeps its usual event restrictions and rewards. Other players cannot
-change the host's selection.
-
-## Run it
-
-    python3 forza_live_server.py --http-port 21201
-
-or with Docker Compose (`compose.yaml`; the data goes to `./data`):
-
-    cp .env.example .env    # then set FORZA_ADMIN_TOKEN in .env
-    docker compose up -d --build
-
-or with plain Docker:
-
-    docker build -t forza-live .
-    docker run -d --name forza-live --restart unless-stopped --network host \
-        -e FORZA_ADMIN_TOKEN=choose-a-token -v /path/to/data:/data forza-live --host 0.0.0.0
-
-To update, pull the new code and run `docker compose up -d --build` again; the data folder stays.
-
-Players set the server's address in the launcher (Settings, Online, My own server). Ports,
-tunnels (playit.gg), the operator endpoints, the leaderboards and the data folder are in
-[`docs/hosting.md`](docs/hosting.md). `python3 forza_live_server.py --help` lists every option.
+The launcher's default is the public server; its **This PC** mode runs this server on the
+player's own machine, and **My own server** connects to one you host.
 
 ## Layout
 
 | Path | What |
 |------|------|
-| `forza_live_server.py` | the UDP server, the HTTP port and the command line |
-| `forza_live_lsp.py`, `forza_xtsw.py`, `forza_xtsw_all.py` | Turn 10's title services and their wire format |
-| `forza_*.py` | friends, chat, stats, scores and leaderboards, clubs, photos and community photos, the design storefront and its designs on the website, market, notifications, the Horizon World, the co-op campaign, challenges, shader lists, limits |
-| `playground_rounds.xml` | the round presets the playlists serve |
-| `test_*.py` | unit tests |
-| `docs/hosting.md` | running a server |
+| `forza_live_server.py` | the entry point: `python3 forza_live_server.py --help` lists every option |
+| `forza_live/server.py` | the server: the UDP port, the HTTP port, the command line |
+| `forza_live/core/` | signed requests (`auth`, `ed25519`), abuse limits (`limits`), saves that survive a power cut (`durable`) |
+| `forza_live/network/` | the title services' wire format (`xtsw`) and all its records (`xtsw_all`), the PROXY protocol behind a tunnel (`proxy`) |
+| `forza_live/title_services/` | Turn 10's title services on the HTTP port (`lsp`) and the playlists' round presets (`playground_rounds.xml`) |
+| `forza_live/social/` | friends, chat, car clubs, Message Center notifications, the Discord status message |
+| `forza_live/competition/` | scores and leaderboards, Rivals ghosts, community events, head-to-head challenges, Xbox LIVE stats |
+| `forza_live/world/` | the Horizon World, who hosts it, clubs in it, the Co-op Festival and its results |
+| `forza_live/content/` | photos and community photos, designs and their previews, the Auction House and gifts, shader lists |
+| `tests/` | the unit tests, one folder per `forza_live/` folder (`tests/server/` for `server.py`); shared helpers in `tests/support.py` |
+| `docs/hosting.md` | running a server: the guide, then the reference |
 | `docs/title_services.md` | the title services as the game calls them (the protocol) |
+| `docs/server_events.md` | organizer-approved community events |
 | `tools/server_probe.py` | checks a server from outside (status page, UDP HELLO -> WELCOME) |
 | `tools/xtsw_decode.py` | decodes the requests a server saved with `--dump-requests` |
-| `screening/` | the automatic screening worker for community photos and designs (its own Docker image; [`screening/README.md`](screening/README.md)) |
+| `tools/event_admin.py` | manages community events on a server |
+| `screening/` | the screening worker for community photos and designs (its own Docker image, [`screening/README.md`](screening/README.md)) |
+| `Dockerfile`, `compose.yaml`, `.env.example` | the server's image and how to run it |
 
-## Tests
+## Development
 
-    python3 -m unittest discover -p 'test_*.py'
+Run the server from a checkout (Python 3.12 or newer, nothing to install):
 
-`test_forza_shader_lists` also compares the server's copy of the shader list format with its
-definition in the game's repository (`tools/pipeline_list.py`): it runs when this repository is
-the game's `server/` submodule, or with `FORZA_REPO_TOOLS=/path/to/ForzaHorizon1-ReImagined/tools`,
-and is skipped otherwise. CI (`.github/workflows/tests.yml`) runs the tests on every push and
-pull request, with those files checked out, and builds the Docker image. `server-probe.yml`
-checks the public server from outside every 6 hours.
+    python3 forza_live_server.py --http-port 21201
 
-## Changing the server
+Run the tests:
+
+    python3 -m unittest discover -s tests -t .
+
+`tests/content/test_shader_lists.py` and `tests/content/test_design_feed.py` also compare the
+server's code with the game repository's `tools/` (`pipeline_list.py`, `fxobj_shaders.py`,
+`xdc_decode.py`): they run when this repository is the game's `server/` submodule, or with
+`FORZA_REPO_TOOLS=/path/to/ForzaHorizon1-ReImagined/tools`, and are skipped otherwise. The
+screening worker has its own tests (`python3 -m unittest discover -s screening -p 'test_screen_*.py'`,
+with numpy and Pillow). CI (`.github/workflows/tests.yml`) runs them all on every push and pull
+request, on Linux and Windows, and builds the Docker image; `server-probe.yml` checks the public
+server from outside every 6 hours.
 
 The game's repository pins a commit of this one in `server/`. A change that the game or the
 launcher needs lands here first; then the game's repository moves its submodule to it
 (`git -C server fetch && git -C server checkout <commit> && git add server`). Keep the server
-compatible with released games: players update the launcher on their own schedule.
-
-Experimental organizer-approved community events are documented in
-[`docs/server_events.md`](docs/server_events.md). Enforcement is opt-in and needs
-the updated TU4 client in [game PR #231](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/pull/231);
-it is not authoritative anti-cheat or proof that a player finished a race.
-
-## History
-
-The server lived in `server/` of the game's repository until October 2026; its history came
-along when it moved here.
+compatible with released games: players update the launcher on their own schedule. The server
+lived in `server/` of the game's repository until October 2026; its history came along.
 
 ## License
 

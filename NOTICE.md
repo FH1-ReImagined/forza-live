@@ -54,7 +54,7 @@ SOFTWARE.
 ## Third-party components
 
 The server uses only the Python standard library and contains no vendored third-party code.
-`forza_cxds.py` (design previews to PNG) is a port of `tools/xdc_decode.py` in the game's
+`forza_live/content/cxds.py` (design previews to PNG) is a port of `tools/xdc_decode.py` in the game's
 repository, [ForzaHorizon1-ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined)
 (GPL-3.0-or-later, by Dyotson and Sean O'Connor); section 13 of the GNU GPL version 3 and of the
 GNU AGPL version 3 allows the combination, and the port is distributed here under the AGPL.

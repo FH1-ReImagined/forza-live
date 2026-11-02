@@ -22,10 +22,10 @@ keeps its friends-only placement. Nothing here is written to disk.
 
 import time
 
-import forza_chat as chat
-import forza_clubs as clubs
-import forza_live_lsp as lsp
-import forza_world as world
+from forza_live.social import chat
+from forza_live.social import clubs
+from forza_live.title_services import lsp
+from forza_live.world import world
 
 JOIN_SECONDS = 600
 MAX_LISTED = 8

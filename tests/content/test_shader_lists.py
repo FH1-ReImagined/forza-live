@@ -1,4 +1,4 @@
-"""Players' shader lists (#276, forza_shader_lists.py): who may upload, the caps, validation of
+"""Players' shader lists (#276, shader_lists.py): who may upload, the caps, validation of
 every field, the distinct-player threshold, the seed list and persistence. No sockets."""
 
 import json
@@ -8,14 +8,15 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-import forza_friends as fr
-import forza_shader_lists as sl
+from forza_live.social import friends as fr
+from forza_live.content import shader_lists as sl
+from tests.support import GAME_TOOLS
 
 VERSION = "fbo:20260228/20261018"
 # The list format's own definition is the game repository's tools/pipeline_list.py and
-# tools/fxobj_shaders.py: found beside this folder when it is that repository's server/
+# tools/fxobj_shaders.py: found beside this repository when it is that repository's server/
 # submodule, or where FORZA_REPO_TOOLS says (the CI checks those two files out).
-TOOLS = os.environ.get("FORZA_REPO_TOOLS") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+TOOLS = GAME_TOOLS
 HAVE_TOOLS = all(os.path.isfile(os.path.join(TOOLS, n)) for n in ("pipeline_list.py", "fxobj_shaders.py"))
 
 

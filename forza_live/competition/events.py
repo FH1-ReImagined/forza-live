@@ -11,9 +11,9 @@ import struct
 import time
 import uuid
 
-import forza_auth as auth
-import forza_market as market
-import forza_notifications as notifications
+from forza_live.core import auth
+from forza_live.content import market
+from forza_live.social import notifications
 
 KIND, FEATURE = 24, 0x20  # 0x08: Co-op Festival; 0x10: lobby descriptions (#394)
 MODELS = (320, 326, 330, 1082, 1197, 1233, 1488)
@@ -82,7 +82,7 @@ class Events:
         return auth.binding(row) if row and peer.friends_ok else ""
 
     def rebind(self, xuid, old, new):
-        """The player's binding moved to its public key (forza_auth.rebind): its enrollment,
+        """The player's binding moved to its public key (auth.rebind): its enrollment,
         attendance and grants follow."""
         with self.db:
             for table in ("identities", "attendance", "grants"):

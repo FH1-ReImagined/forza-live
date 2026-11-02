@@ -1,4 +1,4 @@
-"""Signed requests (forza_auth.py, forza_ed25519.py, #515): games and launchers sign with an
+"""Signed requests (auth.py, ed25519.py, #515): games and launchers sign with an
 Ed25519 key and the server keeps only public keys. RFC 8032's vectors; the canonical string and a
 vector shared with the game and the launcher; the clock window, replays, server names; the UDP
 challenge and binding on first use; the upgrade from a raw friends key and the refusal of raw keys
@@ -15,13 +15,13 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import forza_auth as auth
-import forza_ed25519 as ed25519
-import forza_friends as friends
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_shader_lists as shader_lists
-import forza_xtsw as x
+from forza_live.core import auth
+from forza_live.core import ed25519
+from forza_live.social import friends
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.content import shader_lists
+from forza_live.network import xtsw as x
 
 SEED = bytes(range(32))   # DriverA's signing seed (live_identity.txt signing_seed)
 KEY = bytes(range(16))    # DriverA's friends key (games before signed requests sent it)
@@ -797,7 +797,7 @@ class RawKeyTest(Base):
 
 
 class LauncherEndpointTest(unittest.TestCase):
-    """The shader list upload and co-op results (forza_shader_lists.authenticate)."""
+    """The shader list upload and co-op results (shader_lists.authenticate)."""
 
     def setUp(self):
         reset_auth()

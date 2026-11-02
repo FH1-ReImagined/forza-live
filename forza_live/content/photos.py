@@ -28,12 +28,12 @@ upload it to ForzaMotorsport.net") is LargeFileUpload.Create(24883254, overwrite
 "ForzaBigshot.bmp"): a 3840x2160 24-bit BMP. Files over limits.MAX_BLOB ("big shots", up to
 MAX_BIG) are taken only from a request signed with the player's own key, at most BIG_PER_HOUR
 are started an hour on the whole server, and a player has one unfinished at a time. A big
-shot is not kept as a file: once it has arrived it goes to forza_community (which publishes a
+shot is not kept as a file: once it has arrived it goes to community (which publishes a
 smaller copy, or nothing) and is forgotten.
 
 A finished photo mode upload (kind "large") is handed to configure(finished=) with whether it was
 signed by the player's own key (its Create and the call that completed it; configure(proven=),
-forza_live_lsp.caller_signed): forza_community publishes the signed ones. Every file removed is
+lsp.caller_signed): community publishes the signed ones. Every file removed is
 told to configure(removed=).
 """
 
@@ -42,11 +42,11 @@ import logging
 import os
 import time
 
-import forza_clubs as clubs
-import forza_limits as limits
-import forza_xtsw as x
-import forza_xtsw_all as A
-import forza_durable as durable
+from forza_live.social import clubs
+from forza_live.core import limits
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
