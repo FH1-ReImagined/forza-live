@@ -9,7 +9,7 @@ from forza_live.title_services import lsp
 from forza_live import server as srv
 from tests.support import FakeTransport
 
-PROXY = "192.168.100.105"
+PROXY = "192.0.2.10"
 
 
 def hello(token, name, room="r"):

@@ -13,7 +13,7 @@ leaderboards already show.
 Names: the server has none of its own. Without them a board is "Speed trap 230" and a car
 "Car 797". An operator adds them in DATA_DIR/leaderboard_names.json:
 {"boards": {"speed-trap-230": "Rt. 29 Speed Trap"}, "cars": {"1398": "2012 ..."}}, which
-tools/extract_map_points.py --names writes from their own copy of the game (docs/hosting.md).
+tools/extract_map_points.py --names writes from their own copy of the game (docs/website-data.md).
 
 CORS: the server's HTTP replies carry Access-Control-Allow-Origin: * (response() in
 server.py), which covers these public, read-only answers.

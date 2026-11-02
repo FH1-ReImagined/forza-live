@@ -1,7 +1,7 @@
 """Saves that survive a power cut.
 
 The server writes each data file to <name>.tmp and renames it over <name>. The rename alone
-is not enough: on XFS (Unraid's cache) and ext4 the rename can reach the disk before the
+is not enough: on XFS and ext4 the rename can reach the disk before the
 file's contents, so a power cut leaves an empty file. On 2026-10-26 that emptied
 scoreboards.json, friends.json and live_state.json, and the server started with none.
 

@@ -615,7 +615,7 @@ SERVICES = {
 # (friends.Store; the launcher's shader list upload proves itself the same way). Games
 # before signed requests sent their friends key itself (X-Friends-Key, 32 hex digits), taken
 # for an XUID still bound to it until --raw-key-cutoff. Addresses can't stand in for either:
-# behind a tunnel (docs/hosting.md, playit.gg) every HTTP connection and every UDP datagram come
+# behind a tunnel (docs/configuration.md, playit.gg) every HTTP connection and every UDP datagram come
 # from the tunnel agent's address, and the TCP source ports have nothing to do with the
 # players' UDP ports.
 #   TRUSTED     signed by the XUID's key (or its friends key, for an XUID still bound to it)
