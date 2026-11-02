@@ -1,0 +1,30 @@
+# Forza Live with Docker Compose: copy .env.example to .env, set the token, then
+#   docker compose up -d --build
+# Players set this server's address in the launcher (Settings, Online, My own server).
+# Ports, tunnels and every option: docs/hosting.md, or `python3 forza_live_server.py --help`.
+services:
+  forza-live:
+    build: .
+    image: forza-live:latest
+    container_name: forza-live
+    # UDP 21200 (game) and TCP 21201 (title services, website, operator endpoints).
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "1"
+    env_file: .env
+    volumes:
+      - ./data:/data
+    command:
+      - --host=0.0.0.0
+      # The game's database enables the Horizon World event list: copy media/db/gamedb.slt
+      # from your game files into ./data, then uncomment.
+      # - --game-db=/data/gamedb.slt
+      # Behind a tunnel or reverse proxy: trust it, so player addresses are real.
+      # - --trusted-proxy=127.0.0.0/8
+      # A name for this server's leaderboard rows (default: data/server_id.txt).
+      # - --server-id=my-server

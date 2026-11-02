@@ -31,11 +31,18 @@ change the host's selection.
 
     python3 forza_live_server.py --http-port 21201
 
-or with Docker:
+or with Docker Compose (`compose.yaml`; the data goes to `./data`):
+
+    cp .env.example .env    # then set FORZA_ADMIN_TOKEN in .env
+    docker compose up -d --build
+
+or with plain Docker:
 
     docker build -t forza-live .
     docker run -d --name forza-live --restart unless-stopped --network host \
         -e FORZA_ADMIN_TOKEN=choose-a-token -v /path/to/data:/data forza-live --host 0.0.0.0
+
+To update, pull the new code and run `docker compose up -d --build` again; the data folder stays.
 
 Players set the server's address in the launcher (Settings, Online, My own server). Ports,
 tunnels (playit.gg), the operator endpoints, the leaderboards and the data folder are in

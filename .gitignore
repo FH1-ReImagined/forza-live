@@ -3,3 +3,5 @@ forza_live_data/
 __pycache__/
 *.pyc
 .game-repo/
+.env
+data/
