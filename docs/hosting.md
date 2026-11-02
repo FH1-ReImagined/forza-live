@@ -129,7 +129,8 @@ starts with a header). And never leave an option on once its tunnel's setting is
 (The moderation of community photos and designs has stricter rules: [below](#community-photos).)
 
 `GET /gift?to=<gamertag|XUID>&credits=<n>[&message=..]` or `&car=<id>`,
-`GET /notify?to=..&type=..`, and `GET /world/event?session=all|<id>[&event=<id>]` are
+`GET /notify?to=..&type=..`, `GET /broadcast?type=0x100&Message=..[&days=1-30]` (one
+Message Center notification for every player, new ones included, stored once), and `GET /world/event?session=all|<id>[&event=<id>]` are
 operator-only. They are answered for requests from the server's own machine (loopback, not
 through a reverse proxy), or with `FORZA_ADMIN_TOKEN` (header `X-Admin-Token: <token>` or
 `?token=<token>`); everything else gets 403. From the host or Unraid terminal:

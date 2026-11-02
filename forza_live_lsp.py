@@ -731,7 +731,7 @@ ADMIN_TOKEN = os.environ.get("FORZA_ADMIN_TOKEN", "")
 
 
 def is_admin(peer, headers, query):
-    """Operator endpoints (/gift, /notify, /world/event): requests from this machine, or
+    """Operator endpoints (/gift, /notify, /broadcast, /world/event): requests from this machine, or
     carrying the FORZA_ADMIN_TOKEN (header X-Admin-Token or ?token=). A request that came
     through a reverse proxy (X-Forwarded-For / X-Real-IP) counts as remote."""
     if ADMIN_TOKEN:
@@ -771,6 +771,37 @@ def find_player(who):
     return None
 
 
+def notification_params(ntype, arg):
+    """A notification's parameters from operator query fields (missing ones zero)."""
+    fields = dict(notifications.TYPES[ntype][1].sub)
+    params = {}
+    for name, value in arg.items():
+        if name in fields:
+            kind = fields[name].kind
+            params[name] = (float(value) if kind == "F32" else value if kind in (
+                "WSTR", "SYSTIME") else int(value, 0))
+    return params
+
+
+def broadcast_request(query):
+    """GET /broadcast?type=<n>[&days=<1-30>][&field=value...] (operator only): one Message
+    Center notification for every player, stored once (forza_notifications.broadcast)."""
+    arg = {k: v[0] for k, v in query.items()}
+    arg.pop("token", None)
+    try:
+        ntype = int(arg.pop("type", ""), 0)
+        days = int(arg.pop("days", notifications.KEEP_DAYS))
+    except ValueError:
+        return 400, "text/plain", b"bad type or days"
+    if ntype not in notifications.TYPES or not 1 <= days <= notifications.KEEP_DAYS:
+        return 400, "text/plain", b"unknown type or days out of range"
+    try:
+        nid = notifications.broadcast(ntype, notification_params(ntype, arg), days)
+    except (ValueError, OverflowError) as e:
+        return 400, "text/plain", str(e).encode()
+    return 200, "application/json", json.dumps({"id": nid}).encode()
+
+
 def notify_request(query):
     """GET /notify?to=<gamertag|XUID>&type=<n>[&field=value...] (from this machine only):
     queue a Message Center notification, its parameters from the query (missing ones
@@ -787,14 +818,7 @@ def notify_request(query):
         ntype = int(kind, 0)
         if ntype not in notifications.TYPES:
             return 400, "text/plain", b"unknown type"
-        fields = dict(notifications.TYPES[ntype][1].sub)
-        params = {}
-        for name, value in arg.items():
-            if name in fields:
-                kind = fields[name].kind
-                params[name] = (float(value) if kind == "F32" else value if kind in (
-                    "WSTR", "SYSTIME") else int(value, 0))
-        ids = [notifications.send(to, ntype, params)]
+        ids = [notifications.send(to, ntype, notification_params(ntype, arg))]
     return 200, "application/json", json.dumps({"to": "%016X" % to, "ids": ids}).encode()
 
 
@@ -846,11 +870,12 @@ def handle(server, method, path, headers, body, peer):
     if community.handles(url.path):  # community photos (forza_community.py)
         return community.handle(method, path, headers, body,
                                 lambda: is_local_admin(peer, headers))
-    if url.path in ("/notify", "/gift"):
+    if url.path in ("/notify", "/gift", "/broadcast"):
         query = urllib.parse.parse_qs(url.query)
         if not is_admin(peer, headers, query):
             return 403, "text/plain", b"forbidden"
-        return (notify_request if url.path == "/notify" else gift_request)(query)
+        return {"/notify": notify_request, "/gift": gift_request,
+                "/broadcast": broadcast_request}[url.path](query)
     if url.path.startswith("/storage/") and method == "GET":
         data = stored_file(url.path)
         if data is not None:
