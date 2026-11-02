@@ -9,9 +9,9 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_xtsw as x
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live.network import xtsw as x
 
 A = 0x0009000000001241
 

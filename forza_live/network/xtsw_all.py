@@ -1,4 +1,4 @@
-"""Every title-service record of Forza Horizon (base default.xex), in forza_xtsw.py's types.
+"""Every title-service record of Forza Horizon (base default.xex), in xtsw.py's types.
 
 Generated from the game's type descriptors (read from a running game, see
 docs/title_services.md): <Class><Method>_Params and _Results for all 292 records. Names keep
@@ -8,7 +8,7 @@ Title Update 4 has the same records and 7 more (at the end; read from a running 
 capacities not read).
 """
 
-from forza_xtsw import ARR, BOOL, BYTES, F32, GUID, I16, I32, I64, S, SYSTIME, U8, U16, U32, U64, WSTR, XNKID  # noqa: F401
+from forza_live.network.xtsw import ARR, BOOL, BYTES, F32, GUID, I16, I32, I64, S, SYSTIME, U8, U16, U32, U64, WSTR, XNKID  # noqa: F401
 
 UserAcceptClanInvites_Params = S(("acceptingClanInvites", BOOL))
 UserGetUserData_Results = S(("userData", S(("qwXuid", U64), ("wzGamerTag", WSTR(16)), ("flags", U8), ("clanId", I32), ("clanTag", WSTR(5)), ("roleInClan", I32), ("currentCareerLevel", U8), ("currentBadgeId", I16), ("currentPlayerTitleId", I16), ("currentXPTotal", U32))))

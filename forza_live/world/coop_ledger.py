@@ -1,16 +1,16 @@
 """The co-op campaign's ledger (#309, milestones 1 and 2; docs/coop_campaign.md).
 
-A Co-op Festival campaign round (forza_campaign.py) runs as an online race, which writes no
+A Co-op Festival campaign round (campaign.py) runs as an online race, which writes no
 career state. The server keeps what the career needs instead, and the player's launcher
 applies it to the save after the session (launcher/forza_launcher/coop_grant.py):
 
-- the round, from its start (forza_world.Worlds.next_round: the event round's own prefetch,
+- the round, from its start (world.Worlds.next_round: the event round's own prefetch,
   asked by the world's host with its own friends key) until the world's next round starts
   (close): the world session, the event, its grid (the MaxPlayers it was served with), the
   player that asked for it (/event, the world's host) and the humans in the world;
 - each human's place: the first report of its own (User.WriteRaceStatsEx with its own
-  friends key, forza_live_lsp.caller_trusted, for this world's session id, while the round is
-  open), and the requester's own XSessionWriteStats for the session (forza_stats: relative
+  friends key, lsp.caller_trusted, for this world's session id, while the round is
+  open), and the requester's own XSessionWriteStats for the session (stats: relative
   score = cars - place; first write after the start, from the requester's game only);
 - which results are a career's (check): every human's own (milestone 2: the host's and each
   guest's), finished, on the grid, and agreeing with the requester's game's write. The
@@ -48,7 +48,7 @@ import os
 import threading
 import time
 import urllib.parse
-import forza_durable as durable
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -243,7 +243,7 @@ class Ledger:
         return r["id"]
 
     def host_score(self, writer, session, target, score, now=None):
-        """XSessionWriteStats' relative score for a player (forza_stats.on_skill_write): the
+        """XSessionWriteStats' relative score for a player (stats.on_skill_write): the
         requester's game writes every human's cars - place at the end of the race. Only its
         own writes count, and the first after the round's start: the game writes again for the
         world's session when its next free roam ends (scores of the humans only)."""
@@ -349,7 +349,7 @@ def configure(data_dir):
 
 def handle(server, method, path, headers, body, authenticate):
     """(status, content type, body) for /coop/...; None for another path. authenticate(store,
-    headers, method, path, body) -> XUID or None (forza_shader_lists.authenticate)."""
+    headers, method, path, body) -> XUID or None (shader_lists.authenticate)."""
     url = urllib.parse.urlsplit(path)
     if url.path not in ("/coop/results", "/coop/results/applied"):
         return None

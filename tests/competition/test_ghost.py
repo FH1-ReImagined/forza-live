@@ -1,4 +1,4 @@
-"""The checks of an uploaded Rivals ghost (forza_ghost.py), on ghosts laid out as the game writes
+"""The checks of an uploaded Rivals ghost (ghost.py), on ghosts laid out as the game writes
 them (a Rivals lap of GoPro Millennia Masters, Clear Springs Circuit, in the Aventador).
 
 Run: python3 -m unittest discover -p 'test_*.py'
@@ -8,7 +8,7 @@ import struct
 import unittest
 import zlib
 
-import forza_ghost as g
+from forza_live.competition import ghost as g
 
 LAP, AVENTADOR, CLEAR_SPRINGS = 138.513, 1398, 156
 

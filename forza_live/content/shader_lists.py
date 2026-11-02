@@ -10,7 +10,7 @@ microcode cannot hide in an upload.
 
     POST /shader-lists/upload     JSON {"version": "fbo:20260228/20261018", "pipelines": [...],
                                   "shaders": {hash: recipe}}; signed with the friends key of
-                                  the player's live_identity.txt (X-Forza-Auth, forza_auth.py),
+                                  the player's live_identity.txt (X-Forza-Auth, auth.py),
                                   which the XUID has been bound to by a HELLO. Answers
                                   {"accepted": n}.
     GET  /shader-lists?version=V  the merged list of that storage version (list format 2): the
@@ -32,8 +32,8 @@ import threading
 import time
 import urllib.parse
 
-import forza_auth as auth
-import forza_durable as durable
+from forza_live.core import auth
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -52,7 +52,7 @@ TITLE = "4D5309C9"
 LIST_FORMAT = 2
 
 # (name, valid values) of a pipeline's `fields`, in tools/pipeline_list.py FIELDS order: the render
-# pass key, the state, and four render targets of seven fields. test_forza_shader_lists compares
+# pass key, the state, and four render targets of seven fields. tests/content/test_shader_lists compares
 # this with the tool's table.
 _RT = (15, 15, 5, 15, 15, 5, 16)
 FIELD_VALUES = ((3, 32, 2, 16, 16, 16, 16, 2) +
@@ -116,9 +116,9 @@ def player_id(xuid):
 
 
 def authenticate(store, headers, method="POST", path="/shader-lists/upload", body=b""):
-    """The XUID of the player that signed the request (X-Forza-Auth, forza_auth.py), or None.
+    """The XUID of the player that signed the request (X-Forza-Auth, auth.py), or None.
     Same proof as the friends list: the signature is that of the key the XUID was bound to
-    (forza_friends.Store, at a HELLO). An XUID that never joined the server is refused, so
+    (friends.Store, at a HELLO). An XUID that never joined the server is refused, so
     uploads come from players. Launchers before signed requests send X-Xuid and the friends
     key itself (X-Friends-Key), taken for an XUID still bound to it until --raw-key-cutoff."""
     checked = auth.check_request(store, method, path, headers, body)

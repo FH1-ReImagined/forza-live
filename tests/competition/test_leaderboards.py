@@ -1,4 +1,4 @@
-"""The public leaderboards JSON (forza_leaderboards.py): shape, no XUIDs, ASCII names, cache,
+"""The public leaderboards JSON (leaderboards.py): shape, no XUIDs, ASCII names, cache,
 rate limit, CORS.
 
 Run: python3 -m unittest discover -p 'test_*.py'
@@ -9,10 +9,10 @@ import os
 import tempfile
 import unittest
 
-import forza_leaderboards as lb
-import forza_live_lsp as lsp
-import forza_live_server as live
-import forza_scores as scores
+from forza_live.competition import leaderboards as lb
+from forza_live.title_services import lsp
+from forza_live import server as live
+from forza_live.competition import scores
 
 XUIDS = [0x0009000000000A00 + i for i in range(1, 6)]
 

@@ -1,11 +1,11 @@
 """Co-op campaign (#309, docs/coop_campaign.md): the festival's events as rounds of a
 Co-op Festival world.
 
-The Co-op Festival playlist (forza_live_lsp.COOP_HOPPER) is a Horizon World whose
-placement only finds worlds led by a friend (forza_live_server.on_match). Its host types
+The Co-op Festival playlist (lsp.COOP_HOPPER) is a Horizon World whose
+placement only finds worlds led by a friend (server.on_match). Its host types
 `/event <id or code>` (Events.Id or Events.HorizonEventID, e.g. FR05) in WORLD chat;
-forza_chat.Chat hands that to command() and the world's next round becomes the event,
-through the world event path (forza_world.Worlds, the client's world_events.cpp).
+chat.Chat hands that to command() and the world's next round becomes the event,
+through the world event path (world.Worlds, the client's world_events.cpp).
 
 A campaign round carries the single-player event's settings (campaign_xml):
 - the track, laps and circuit / point to point (`Races`), the class (`TargetClass`);

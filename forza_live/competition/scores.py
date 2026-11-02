@@ -5,7 +5,7 @@ the scoreboard id of the event, the time or score, the car, its class and perfor
 index, assists and tuning) and reads scoreboards for its leaderboard screens and for
 Rivals (GetRows, GetRival, GetRivalAndPersonalBest, GetBestScores). The answer to a
 submission asks for the ghost (uploadFiles) when the score is the player's new best; the
-game then uploads it (UploadFile: the lap's recording, up to 250 KB, checked by forza_ghost.py
+game then uploads it (UploadFile: the lap's recording, up to 250 KB, checked by ghost.py
 and kept without its driver's name) and another player racing that score as a rival
 downloads it (DownloadFile, by the row's ghostFileId). docs/title_services.md has the details.
 
@@ -13,12 +13,12 @@ The 1000 Club (Title Update 4) reports each car challenge a player completes
 (Challenge.ChallengeCompleted: the car and the challenge's thumbprint); its leaderboard
 (GetRows type 5) ranks the players by the challenges (medals) they completed.
 
-Integrity (FH1 #517). The boards (the game's and the public JSON, forza_leaderboards.py) take
+Integrity (FH1 #517). The boards (the game's and the public JSON, leaderboards.py) take
 results only from players signed in to this server: a call that carries its player's own key
-(forza_live_lsp.caller_trusted). Each new row keeps the server that took it (SERVER_ID) and
+(lsp.caller_trusted). Each new row keeps the server that took it (SERVER_ID) and
 the build the game names (X-Forza-Build). A result kept off the boards is "unranked", as osu!
 does: kept for review (STORE.unranked, the player's best one per board) but never shown. That
-is a result from an unverified caller, one whose ghost fails the checks (forza_ghost.py; the
+is a result from an unverified caller, one whose ghost fails the checks (ghost.py; the
 player's previous row stays), and rows an operator unranks. An unverified
 caller is still told its own unranked best (own_best), to itself alone, so the game does not
 send its slower times again; a signed-in caller is told its ranked best only. /admin/scores
@@ -40,11 +40,11 @@ import time
 import urllib.parse
 import uuid
 
-import forza_ghost as ghostfile
-import forza_limits as limits
-import forza_xtsw as x
-import forza_xtsw_all as A
-import forza_durable as durable
+from forza_live.competition import ghost as ghostfile
+from forza_live.core import limits
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -104,7 +104,7 @@ MAX_BOARDS = 4096   # boards on the server (the game has about 160)
 MAX_PENDING_GHOSTS = 4096  # new bests waiting for their ghost (UploadFile follows at once)
 
 # The server that takes a row (--server-id; without it an id made at the first start and kept
-# in DATA_DIR/server_id.txt) and who the call is from (forza_live_lsp.service_call sets it for
+# in DATA_DIR/server_id.txt) and who the call is from (lsp.service_call sets it for
 # each call: whether it carries its player's own key, and the build the game names). Outside a
 # call (tests, tools) a submission is the server's own: trusted, no build.
 SERVER_ID = ""
@@ -311,9 +311,9 @@ def drop_impossible_speeds(boards):
 
 def public_id(xuid):
     """The player (an XUID, or a board's key for one) as the public leaderboards name them
-    (forza_leaderboards.player_id)."""
-    import forza_leaderboards  # it imports this module
-    return forza_leaderboards.player_id(xuid if isinstance(xuid, str) else "%016X" % xuid)
+    (leaderboards.player_id)."""
+    from forza_live.competition import leaderboards  # it imports this module
+    return leaderboards.player_id(xuid if isinstance(xuid, str) else "%016X" % xuid)
 
 
 def tag(entry, trusted, build):
@@ -468,7 +468,7 @@ def remove_review_ghost(entry):
 
 def upload_file(xuid, body):
     """UploadFile(scoreId, data): the ghost of a new best (submit asked for it). A ghost that
-    fails the checks (forza_ghost.check) is refused: the row goes unranked with it, the player's
+    fails the checks (ghost.check) is refused: the row goes unranked with it, the player's
     previous row comes back, and the game gets a failure (it carries on to the results as after
     a success; it does not upload again). A ghost that passes is kept without its driver's name."""
     params, _ = x.decode(x.ScoreboardUploadFile_Params, body)
@@ -534,11 +534,11 @@ def download_file(xuid, body):
 
 
 def user_data(entry):
-    """The row's player, with their car club when they are in one (forza_clubs)."""
-    import forza_clubs
+    """The row's player, with their car club when they are in one (clubs)."""
+    from forza_live.social import clubs
     u = {"qwXuid": int(entry["xuid"], 16), "wzGamerTag": entry["gamertag"],
          "currentCareerLevel": entry.get("level", 0)}
-    club, role = forza_clubs.membership(u["qwXuid"])
+    club, role = clubs.membership(u["qwXuid"])
     if club:
         u.update(clanId=club["id"], clanTag=club["tag"], roleInClan=role)
     return u
@@ -636,12 +636,12 @@ def club_entries():
 def club_only(entries, xuid):
     """A club board (isClubBoard): the rows of the caller's car club's members (none when
     the caller is in no club)."""
-    import forza_clubs
-    club, _ = forza_clubs.membership(xuid)
+    from forza_live.social import clubs
+    club, _ = clubs.membership(xuid)
     if not club:
         return []
     return [e for e in entries
-            if (forza_clubs.membership(int(e["xuid"], 16))[0] or {}).get("id") == club["id"]]
+            if (clubs.membership(int(e["xuid"], 16))[0] or {}).get("id") == club["id"]]
 
 
 def get_rows(xuid, body):
@@ -684,11 +684,11 @@ def events():
     global EVENTS
     if EVENTS is None:
         EVENTS = {}
-        import forza_world
-        if forza_world.GAME_DB and os.path.isfile(forza_world.GAME_DB):
+        from forza_live.world import world
+        if world.GAME_DB and os.path.isfile(world.GAME_DB):
             import sqlite3
             try:
-                db = sqlite3.connect("file:%s?mode=ro" % forza_world.GAME_DB, uri=True)
+                db = sqlite3.connect("file:%s?mode=ro" % world.GAME_DB, uri=True)
                 EVENTS = {i: ((h or "")[:2], lvl) for i, h, lvl in
                           db.execute("select Id, HorizonEventID, Level from Events")}
                 db.close()
@@ -709,11 +709,11 @@ def tracks_of(key):
         return {t[4] for t in TIME_TRIALS if t[0] == sbid} or None
     if RACE_TRACKS is None:
         RACE_TRACKS = {}
-        import forza_world
-        if forza_world.GAME_DB and os.path.isfile(forza_world.GAME_DB):
+        from forza_live.world import world
+        if world.GAME_DB and os.path.isfile(world.GAME_DB):
             import sqlite3
             try:
-                db = sqlite3.connect("file:%s?mode=ro" % forza_world.GAME_DB, uri=True)
+                db = sqlite3.connect("file:%s?mode=ro" % world.GAME_DB, uri=True)
                 for event, track in db.execute("select EventId, TrackId from Races"):
                     RACE_TRACKS.setdefault(event, set()).add(track)
                 db.close()
@@ -759,7 +759,7 @@ def online_xp_entries():
     out = []
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
         if not name.endswith(".json"):
-            continue  # .bak copies (forza_durable) and leftovers
+            continue  # .bak copies (durable) and leftovers
         try:
             record = durable.load(os.path.join(folder, name))
         except (OSError, ValueError):
@@ -844,7 +844,7 @@ AMBIENT_NAMES = {SPEED_TRAP: "Speed Trap %d", SPEED_ZONE: "Speed Zone %d"}
 def notify_rival(xuid, body):
     """The game says it beat the rival's score: the rival gets a Message Center message
     (Rivals: "<player> beat your time")."""
-    import forza_notifications as notifications
+    from forza_live.social import notifications
     p, _ = x.decode(x.ScoreboardNotifyRival_Params, body)
     log.info("title: %016X beat rival %016X on board %d (type %d)", xuid, p["rivalXuid"],
              p["gameScoreboardId"], p["type"])
@@ -921,7 +921,7 @@ def get_time_trials(xuid, body):
         "timeTrials": trials[:p["maxTimeTrialResults"]]})
 
 
-# ---- /admin/scores: rows by source (operators only: forza_live_server.py, lsp.is_admin) ----
+# ---- /admin/scores: rows by source (operators only: server.py, lsp.is_admin) ----
 #   GET  /admin/scores?<filters>         the matching rows (at most ADMIN_LIST_MAX), their count
 #   POST /admin/scores/unrank?<filters>  ranked rows off the boards, kept for review (and ghosts)
 #   POST /admin/scores/rank?<filters>    unranked rows back on their boards, where better than
@@ -945,8 +945,8 @@ def admin_filter(query):
         raise ValueError("state: ranked, unranked or all")
     board = arg.get("board")
     if board is not None and not re.fullmatch(r"\d+:-?\d+:[01]", board):
-        import forza_leaderboards
-        parsed = forza_leaderboards.parse_board(board)
+        from forza_live.competition import leaderboards
+        parsed = leaderboards.parse_board(board)
         if parsed is None:
             raise ValueError("board: 3:199:0 or event-199")
         board = board_key(*parsed)
@@ -1079,8 +1079,8 @@ def admin(method, path, query):
     changed = sum(admin_change(action, key, where, entry) for where, key, entry in rows)
     if changed:
         STORE.save()
-        import forza_leaderboards
-        forza_leaderboards.forget_answers()
+        from forza_live.competition import leaderboards
+        leaderboards.forget_answers()
     log.warning("title: /admin/scores/%s %s: %d of %d rows", action,
                 urllib.parse.urlencode({k: v[0] for k, v in query.items() if k != "token"}),
                 changed, len(rows))

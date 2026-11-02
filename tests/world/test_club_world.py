@@ -1,4 +1,4 @@
-"""Car clubs in the Horizon World (FH1 #145, forza_club_world.py): placement prefers the worlds
+"""Car clubs in the Horizon World (FH1 #145, club_world.py): placement prefers the worlds
 with the searcher's online clubmates, /club lists them and /club join names a world; nothing
 changes for players without a club or without a clubmate in an open world. Drives the server's
 matchmaking handlers directly (no sockets)."""
@@ -7,29 +7,15 @@ import struct
 import time
 import unittest
 
-import forza_chat as ch
-import forza_club_world as cw
-import forza_clubs as clubs
-import forza_live_lsp as lsp
-import forza_live_server as srv
-from test_forza_club_chat import make_clubs
+from forza_live.social import chat as ch
+from forza_live.world import club_world as cw
+from forza_live.social import clubs
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from tests.support import FakeTransport, make_clubs, record
 
 KEY = lsp.WORLD_HOPPER
 S = lambda n: bytes([n]) * 8  # a session id
-
-
-def record(session_id, filled, slots=8):
-    info = bytearray(srv.SESSION_INFO_SIZE)
-    info[:8] = session_id
-    return bytes(info) + bytes([slots, 0, filled, 0]) + bytes(32)
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
 
 
 class ClubWorldTest(unittest.TestCase):

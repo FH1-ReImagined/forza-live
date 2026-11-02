@@ -34,9 +34,9 @@ import os
 import threading
 import time
 
-import forza_xtsw as x
-import forza_durable as durable
-from forza_xtsw import BOOL, F32, I32, U8, U16, U32, U64, S, SYSTIME, WSTR
+from forza_live.network import xtsw as x
+from forza_live.core import durable
+from forza_live.network.xtsw import BOOL, F32, I32, U8, U16, U32, U64, S, SYSTIME, WSTR
 
 log = logging.getLogger("forza-live")
 
@@ -296,7 +296,7 @@ def services():
 
 
 # Samples for --test-notifications (from the sender, to the recipient). Not the gifts,
-# which need a gift on the server (forza_market.gift_credits, gift_stock_car), nor the
+# which need a gift on the server (market.gift_credits, gift_stock_car), nor the
 # auction ones: the Message Center lists those without a title or text.
 def samples(sender, sender_tag):
     club = {"clanName": "Horizon Kings", "clanTag": "HZN"}

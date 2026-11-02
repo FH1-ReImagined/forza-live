@@ -1,6 +1,6 @@
 """A photo's bytes to the picture the models see, treated as hostile input: PNG or JPEG only, within
-the sizes the server publishes (forza_community MIN_SIZE to MAX_SIZE; a design's preview,
-forza_design_feed: DESIGN_MIN to DESIGN_MAX), decompression bombs refused, at most MAX_WIDTH wide
+the sizes the server publishes (community.MIN_SIZE to MAX_SIZE; a design's preview,
+design_feed.DESIGN_MIN to DESIGN_MAX), decompression bombs refused, at most MAX_WIDTH wide
 for the models. And its perceptual hash (pHash: a 64-bit DCT hash), to find a re-upload of a
 hidden photo or design."""
 
@@ -13,7 +13,7 @@ from PIL import Image
 MIN_SIZE = (640, 360)
 MAX_SIZE = (7680, 4320)
 DESIGN_MIN = (32, 32)       # a paint job's preview is 288x160, a vinyl group's 256x128
-DESIGN_MAX = (1024, 1024)   # forza_cxds.MAX_SIDE
+DESIGN_MAX = (1024, 1024)   # forza_live.content.cxds.MAX_SIDE
 MAX_WIDTH = 1920
 
 

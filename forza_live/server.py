@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Forza Live: a self-hostable Xbox LIVE stand-in for the Forza Horizon PC port.
 
 Adapted from RecompiledHaloReach's Reach Live server (the rendezvous, relay, presence and
@@ -6,7 +5,7 @@ session core is game-agnostic). Players point the game at a server with live_ser
 "host[:port]" (or FORZA_SERVER=host[:port]); tools/play.sh starts one on this machine when
 none is set. Everyone connected to the same server (and room) is on one virtual network
 and sees the others online (games up to v0.1.14 count them all as LIVE friends; newer ones
-keep a friends list here, forza_friends.py), and game traffic flows between them: directly
+keep a friends list here, friends.py), and game traffic flows between them: directly
 when UDP hole punching works, through this server when it doesn't. Nothing here talks to Microsoft or
 Turn 10 services.
 
@@ -28,25 +27,25 @@ import sys
 import time
 import urllib.parse
 
-import forza_auth as auth
-import forza_challenge as challenge
-import forza_chat as chat
-import forza_club_world as club_world
-import forza_community as community
-import forza_design_feed as design_feed
-import forza_discord_status as discord_status
-import forza_friends as friends
-import forza_events as events
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_proxy as proxy
-import forza_scores as scores
-import forza_stats as stats
-import forza_campaign as campaign
-import forza_coop_ledger as coop_ledger
-import forza_world as world
-import forza_world_host as world_host
-import forza_durable as durable
+from forza_live.core import auth
+from forza_live.competition import challenge
+from forza_live.social import chat
+from forza_live.world import club_world
+from forza_live.content import community
+from forza_live.content import design_feed
+from forza_live.social import discord_status
+from forza_live.social import friends
+from forza_live.competition import events
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live.network import proxy
+from forza_live.competition import scores
+from forza_live.competition import stats
+from forza_live.world import campaign
+from forza_live.world import coop_ledger
+from forza_live.world import world
+from forza_live.world import world_host
+from forza_live.core import durable
 
 MAGIC = b"RLV1"
 VERSION = 1
@@ -62,12 +61,12 @@ INVITE_LIMIT, INVITE_WINDOW = 4, 30.0
 # (#90). Invites from or to a game without it are dropped.
 FEATURE_INVITE_PICK = 0x01
 # FEATURE_FRIENDS: the game shows the server's friends list (FRIEND messages,
-# forza_friends.py, #92) instead of everyone in the room; its signed auth block (or, from games
+# friends.py, #92) instead of everyone in the room; its signed auth block (or, from games
 # before signed requests, its friends key) follows the features byte (u8 length + bytes;
-# forza_auth.py, which also adds the server's time and a challenge to the WELCOME).
+# auth.py, which also adds the server's time and a challenge to the WELCOME).
 FEATURE_FRIENDS = friends.FEATURE
 FRIEND = friends.KIND  # 22
-# FEATURE_CHAT: the game has text chat (CHAT messages, forza_chat.py, #92).
+# FEATURE_CHAT: the game has text chat (CHAT messages, chat.py, #92).
 FEATURE_CHAT = chat.FEATURE
 # FEATURE_LOBBY: the game's standby records follow the lobby: its search key (a custom
 # game's game type) when the host changes the setup, and, from the player the game made the
@@ -76,8 +75,8 @@ FEATURE_CHAT = chat.FEATURE
 FEATURE_LOBBY = 0x10
 CHAT = chat.KIND  # 23
 WORLD_EVENT = 18  # server -> a Horizon World's host: end the free roam for an event
-CHALLENGE = challenge.KIND  # 19: head-to-head challenges in the world (forza_challenge.py)
-STATS, STATS_ROWS = 20, 21  # Xbox LIVE stats written and read, the rows (forza_stats.py)
+CHALLENGE = challenge.KIND  # 19: head-to-head challenges in the world (challenge.py)
+STATS, STATS_ROWS = 20, 21  # Xbox LIVE stats written and read, the rows (stats.py)
 MAX_MATCH_RECORD = 1300
 MATCH_RESULTS_MAX = 25  # sessions answered per search (Forza asks for up to 25)
 SESSION_INFO_SIZE = 0x3C  # XSESSION_INFO: session id, host XNADDR, key-exchange key
@@ -120,7 +119,7 @@ MAX_PEERS_PER_IP = 16  # registered players behind one public address (a LAN, a 
 PACKETS_PER_IP = (2500, 5000)
 HELLOS_PER_IP = (2, 20)  # new registrations/s and burst from one address
 ERRORS_PER_IP = (2, 10)  # "not registered" replies/s and burst to one address
-# PROXY protocol v2 on UDP (--proxy-protocol-udp, forza_proxy.py). A playit agent sends
+# PROXY protocol v2 on UDP (--proxy-protocol-udp, proxy.py). A playit agent sends
 # its header only when it opens a flow, and closes a flow at most 106 s after the player's
 # last datagram (90 s, checked every 16 s). A header is believed only as the first datagram
 # of an agent socket not heard for PROXY_FLOW_IDLE s, and not for PROXY_FLOW_IDLE s after
@@ -203,7 +202,7 @@ class Peer:
         self.features = 0  # HELLO's features byte (FEATURE_*)
         self.friends_ok = False  # FEATURE_FRIENDS and its friends key owns the XUID's friends
         self.events_identity = None  # fresh HELLO proof; never restored from live_state.json
-        self.chat_sessions = set()  # the session ids the game reports for chat (forza_chat.py)
+        self.chat_sessions = set()  # the session ids the game reports for chat (chat.py)
         # Matchmaking: the session it hosts and the one it is in (see ForzaLive.on_match)
         self.match = None  # (playlist key, record, since)
         self.standby = None
@@ -259,7 +258,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         # server, or not remembered while the flows were full): its header is not taken.
         self.proxy_unsure_until = time.monotonic() + PROXY_FLOW_IDLE
         self.proxy_stats = {"udp_headers": 0, "http_headers": 0, "rejected": 0}
-        self.proxy_told = set()  # the one-time log lines of forza_proxy said already
+        self.proxy_told = set()  # the one-time log lines of proxy said already
         self.state_path = None  # where registrations are kept across a restart (#93)
         self.state_dirty = False
         self.state_saved = 0.0  # monotonic time of the last write
@@ -353,7 +352,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         except Exception as e:  # a malformed datagram must never end the server
             log.debug("bad packet from %s: %r", addr, e)
 
-    # --- PROXY protocol v2 from the tunnel agent (--proxy-protocol-udp, forza_proxy.py) ---
+    # --- PROXY protocol v2 from the tunnel agent (--proxy-protocol-udp, proxy.py) ---
     # A trusted proxy's flow whose header named its player's public address gives that
     # address to the first game that says HELLO on it, in WELCOME, and to the others in
     # forward_header, as for a player connecting directly: they punch to it, and the relay
@@ -495,7 +494,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         name = limits.clean_gamertag(body[pos + 1:pos + 1 + name_len].decode("utf-8", "replace"), xuid)
         pos += 1 + name_len
         features = body[pos] if pos < len(body) else 0
-        signed = body[:pos + 1]  # what a HELLO's signature covers (forza_auth.py)
+        signed = body[:pos + 1]  # what a HELLO's signature covers (auth.py)
         friend_key = b""  # after the features byte: u8 length + an auth block or the friends key
         if pos + 1 < len(body):
             friend_key = body[pos + 2:pos + 2 + body[pos + 1]]
@@ -581,7 +580,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         welcome = body + self.motd + struct.pack(">H", http_port)
         if peer.features & events.FEATURE:
             welcome += bytes([self.events.required])
-        welcome += auth.welcome(self.friends.store, peer)  # last: signed requests (forza_auth.py)
+        welcome += auth.welcome(self.friends.store, peer)  # last: signed requests (auth.py)
         self.send(addr, WELCOME, welcome)
         self.events.hello(peer)
 
@@ -742,7 +741,7 @@ class ForzaLive(asyncio.DatagramProtocol):
     # registered until it times out), its standby records stand in for it: searchers get
     # the record of the member the game made its host (the client sees the game's host
     # flag and sends op 4 instead of op 2; the latest one), else of the oldest remaining
-    # member, with the number of members as the filled slots (forza_world_host.py).
+    # member, with the number of members as the filled slots (world_host.py).
 
     def standby_sessions(self, src, key):
         """Advertisable standby sessions for playlist key: [(peer, record, since)]."""
@@ -878,7 +877,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         if key == lsp.COOP_HOPPER:
             found = self.coop_placement(peer, found)
         # the fullest first, then the oldest; in the Horizon World the worlds with clubmates
-        # of the searcher come before that (forza_club_world.py)
+        # of the searcher come before that (club_world.py)
         club = club_world.preference(self, peer, key)
         found.sort(key=lambda f: (club.rank(f[1]), -self.match_slots(f[1])[0], f[2]))
         if found:
@@ -907,7 +906,7 @@ class ForzaLive(asyncio.DatagramProtocol):
             self.send(peer.addr, MATCH_RESULTS, body)
 
     def on_stats(self, peer, body):
-        """Xbox LIVE stats (forza_stats.py): op 1 a write (for the player or a player in its
+        """Xbox LIVE stats (stats.py): op 1 a write (for the player or a player in its
         room: a game's host writes everyone's result), op 2 a read answered with STATS_ROWS."""
         if body[0] == 1:
             room = {p.xuid: p.name for p in self.room_peers(peer)}
@@ -920,7 +919,7 @@ class ForzaLive(asyncio.DatagramProtocol):
             if self.spend(peer, len(reply)):
                 self.send(peer.addr, STATS_ROWS, reply)
 
-    # --- Horizon World events (forza_world.py) ---
+    # --- Horizon World events (world.py) ---
 
     def world_sessions(self):
         """The Horizon World and Co-op Festival sessions: {session id: (its host peer,
@@ -964,7 +963,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         """Every 2 s: tell each world's host about an event waiting for it (op u8 1,
         event id u32); the client ends the free roam once the event is its next round. A
         campaign round's CPU skill goes to every console of its world (op 2,
-        forza_campaign.ai_message) until the round starts."""
+        campaign.ai_message) until the round starts."""
         worlds = self.world_sessions()
         scheduled = {sid for sid in worlds if self.world_keys.get(sid) == lsp.WORLD_HOPPER}
         for sid, event in world.WORLDS.tick(set(worlds), scheduled):
@@ -1002,7 +1001,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                                "event": world.WORLDS.request(sid, event_id)[0]} for sid in sids],
                 "worlds": [sid.hex() for sid in worlds]}
 
-    # --- head-to-head challenges (forza_challenge.py) ---
+    # --- head-to-head challenges (challenge.py) ---
 
     def challenge_send(self, peer_id, body):
         peer = self.peers.get(peer_id)
@@ -1020,7 +1019,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                 return bytes(record[1][:8])
         return None
 
-    # --- the Co-op Festival (forza_campaign.py, #309) ---
+    # --- the Co-op Festival (campaign.py, #309) ---
 
     def features_of(self, xuid):
         """The HELLO features of the game signed in with this XUID (lsp.client_features),
@@ -1030,7 +1029,7 @@ class ForzaLive(asyncio.DatagramProtocol):
 
     def coop_placement(self, peer, found):
         """Co-op Festival placement: only worlds led by one of the searcher's friends (the
-        friends list kept by forza_friends.py, accepted both ways), both of them proven by
+        friends list kept by friends.py, accepted both ways), both of them proven by
         their friends keys (friends_ok: a HELLO's XUID alone could be anyone's). Without one
         the searcher's game opens a world of its own, which its friends are then placed
         into."""
@@ -1047,10 +1046,10 @@ class ForzaLive(asyncio.DatagramProtocol):
         return kept
 
     def chat_command(self, peer, channel, text):
-        """A chat line starting with "/" (forza_chat.Chat.say): True when it was a command
+        """A chat line starting with "/" (chat.Chat.say): True when it was a command
         (answered with notices, not relayed). /event and /events, in WORLD chat; /club in any."""
         word = text.split()[0].lower()
-        if word == "/club":  # in any channel (forza_club_world.py)
+        if word == "/club":  # in any channel (club_world.py)
             return club_world.command(self, peer, text)
         if word not in ("/event", "/events"):
             return False
@@ -1447,13 +1446,13 @@ def response(status, body, content_type="application/octet-stream", extra=()):
               429: "Too Many Requests", 500: "Internal Server Error"}
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
             f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *",
-            f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (forza_auth.py)
+            f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (auth.py)
     return ("\r\n".join(head) + "\r\n\r\n").encode() + body
 
 
 async def http_handler(server, reader, writer):
     """The HTTP side of the server, on --http-port. The game reaches it as its title
-    servers ("LSP"; forza_live_lsp.py) and keeps the connection open between calls
+    servers ("LSP"; lsp.py) and keeps the connection open between calls
     (Connection: Keep-Alive). GET / or /status returns a JSON status page for people and
     web front ends."""
     peer = writer.get_extra_info("peername") or ("?", 0)
@@ -1486,7 +1485,7 @@ async def http_handler(server, reader, writer):
                                  "application/json", conn)
             elif path.startswith("/admin/") and not (community.handles(path)
                                                      or design_feed.handles(path)):
-                # Chat moderation (forza_chat.py): /admin/chat, /admin/mute, /admin/kick.
+                # Chat moderation (chat.py): /admin/chat, /admin/mute, /admin/kick.
                 # (Community photos' /admin/photos and the designs' /admin/designs have their
                 # own rules: lsp.handle.)
                 url = urllib.parse.urlsplit(path)
@@ -1494,7 +1493,7 @@ async def http_handler(server, reader, writer):
                 if not lsp.is_admin(peer, headers, query):
                     reply = response(403, b"forbidden", "text/plain", conn)
                 elif url.path == "/admin/scores" or url.path.startswith("/admin/scores/"):
-                    # Leaderboard rows by source (forza_scores.admin, #517).
+                    # Leaderboard rows by source (scores.admin, #517).
                     if method == "POST" and "origin" in headers:
                         reply = response(403, b"use curl, not a cross-origin browser request",
                                          "text/plain", conn)
@@ -1696,7 +1695,8 @@ async def main():
         server.events.db.close()
 
 
-if __name__ == "__main__":
+def run():
+    """The command line (forza_live_server.py in the repository's root calls this)."""
     # SIGTERM (docker stop) ends the server like Ctrl+C; as a container's first process
     # it would otherwise be ignored.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
@@ -1704,3 +1704,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == "__main__":
+    run()

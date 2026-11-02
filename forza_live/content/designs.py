@@ -4,7 +4,7 @@ vinyl groups that players share in the game, and other players browse, buy and a
 What the game does (Title Update 4, a live game against this server, 2026-10-30):
 
 - Upload. LOAD DESIGN > a paint job of the car the player is in > UPLOAD TO STOREFRONT sends
-  Auction.UploadAuctionTextures (the livery as a 1024x1024 JPEG texture, forza_market keeps it),
+  Auction.UploadAuctionTextures (the livery as a 1024x1024 JPEG texture, market keeps it),
   then StorefrontLivery.Create: fileHeader (Title, Description, Price, Quantity, SubmissionTime,
   Type 2, KeywordOne/Two), liveryDesc (MakeId, ModelId, TextureId, ForStorefrontUse), payloadSize
   and previewData; then Xls.Content.UploadContent with the payload. MY VINYL GROUPS > UPLOAD TO
@@ -28,24 +28,24 @@ What the game does (Title Update 4, a live game against this server, 2026-10-30)
 
 Rules of this server:
 
-- Uploads only from a game that signed the request with the player's own key (forza_auth,
+- Uploads only from a game that signed the request with the player's own key (auth,
   configure(proven=)); anything else gets a clean failure, which the game reports as an upload
   that did not succeed. Downloads, lists and searches are open.
 - At most SLOTS files per player and kind (the storefront's SLOTS AVAILABLE), PER_DAY uploads a
   day per player, PER_HOUR uploads an hour on the whole server. A banned XUID
   (DATA_DIR/banned_xuids.json, a list of hex XUIDs the operator edits, read again when it
-  changes; forza_community's /admin/photos/ban writes it too) uploads nothing, and its files are
+  changes; community's /admin/photos/ban writes it too) uploads nothing, and its files are
   listed to nobody but itself. The payload must have the kind's magic and at most MAX_PAYLOAD
   bytes, the preview must be a cxds texture of at most MAX_PREVIEW bytes.
 - Free: Price is stored and answered as 0, Quantity as -1 (no limit), whatever the player chose.
 - A rating (1-5) and a download count once per player (a later rating replaces the earlier one),
   never the owner's. REPORT_HIDE distinct players reporting a file hide it at once. Only the
   owner removes a file or changes its description. Ratings, reports, downloads and views count
-  only from callers proven by their key (forza_live_lsp.caller_trusted), whom no one else can
+  only from callers proven by their key (lsp.caller_trusted), whom no one else can
   impersonate.
 - A file is "live" (listed), "held" (seen by its owner only: the hook for screening uploads
   before they are listed, hold_new(); nothing is held for now) or "hidden" (reported).
-- A file also has a web state (forza_design_feed.py, the website's designs): "pending" (new,
+- A file also has a web state (design_feed.py, the website's designs): "pending" (new,
   and every file there before the website's designs, until the screening worker sees its
   preview), "clear" (on the website), "held" (left for the operator: not on the website) or
   "hidden" (a confident screening hit or the operator: hidden in the game too, listed to its
@@ -53,13 +53,13 @@ Rules of this server:
 - Each file has a share code (CODE_LEN characters, no 0/O/1/I) for the website: typed in a
   search's gamertag or text field it finds that file.
 - Nothing here is served outside the game's protocol: payloads and XUIDs never leave it (the
-  website gets the preview, title, description, share code and counts: forza_design_feed.py).
+  website gets the preview, title, description, share code and counts: design_feed.py).
 
-Files: DATA_DIR/designs.json (the index, forza_durable), DATA_DIR/designs/<id>.bin (payload),
-<id>.prev (preview) and <id>.png (the preview as the website shows it, forza_design_feed.py);
-counted in the server's disk quota (forza_limits). Design ids start at
-FIRST_ID so that they never meet photo ids (forza_photos): the storefront calls name a file by
-its id only, and the calls shared with photos go to forza_photos for the ids below FIRST_ID.
+Files: DATA_DIR/designs.json (the index, durable), DATA_DIR/designs/<id>.bin (payload),
+<id>.prev (preview) and <id>.png (the preview as the website shows it, design_feed.py);
+counted in the server's disk quota (limits). Design ids start at
+FIRST_ID so that they never meet photo ids (photos): the storefront calls name a file by
+its id only, and the calls shared with photos go to photos for the ids below FIRST_ID.
 """
 
 import json
@@ -68,17 +68,17 @@ import os
 import secrets
 import time
 
-import forza_clubs as clubs
-import forza_durable as durable
-import forza_limits as limits
-import forza_photos as photos
-import forza_xtsw as x
-import forza_xtsw_all as A
+from forza_live.social import clubs
+from forza_live.core import durable
+from forza_live.core import limits
+from forza_live.content import photos
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
 
 log = logging.getLogger("forza-live")
 
 DATA_DIR = "forza_live_data"
-FIRST_ID = 100_000_000   # design ids; photo ids stay below (forza_photos)
+FIRST_ID = 100_000_000   # design ids; photo ids stay below (photos)
 SLOTS = 25               # files per player and kind (the storefront page's slots)
 PER_DAY = 10             # uploads a day per player
 PER_HOUR = 120           # uploads an hour on the whole server
@@ -91,7 +91,7 @@ REPORT_HIDE = 3          # distinct reporters that hide a file
 CODE_LEN = 6
 CODE_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 LIVE, HELD, HIDDEN = "live", "held", "hidden"
-PENDING, CLEAR = "pending", "clear"  # web states, with HELD and HIDDEN (forza_design_feed.py)
+PENDING, CLEAR = "pending", "clear"  # web states, with HELD and HIDDEN (design_feed.py)
 WEB_ID_LEN = 12
 WEB_ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
@@ -105,9 +105,9 @@ PAGES = {spec[3]: kind for kind, spec in KINDS.items()}
 
 INDEX = {"nextId": FIRST_ID, "files": {}, "uploads": {}, "serverUploads": []}
 _loaded = [False]
-_version = [0]  # counts the saves: forza_design_feed builds its feed again after one
+_version = [0]  # counts the saves: design_feed builds its feed again after one
 _bans = {"mtime": None, "xuids": frozenset()}
-# Who is calling (forza_live_lsp): proven(), the request is signed by the caller's own key;
+# Who is calling (lsp): proven(), the request is signed by the caller's own key;
 # trusted(), signed or carrying the caller's raw friends key (games before signed requests).
 _caller = {"proven": lambda: False, "trusted": lambda: False}
 
@@ -591,7 +591,7 @@ def purchase(xuid, body):
 
 
 def by_file(params_t, design_fn, photo_fn=None):
-    """A call naming a file: designs here, photos (ids below FIRST_ID) to forza_photos."""
+    """A call naming a file: designs here, photos (ids below FIRST_ID) to photos."""
     def handler(xuid, body):
         p, _ = x.decode(params_t, body)
         if not is_design(p["fileId"]):

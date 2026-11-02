@@ -67,7 +67,7 @@ thresholds (the decision table above), with these differences:
 
 - **The picture is the design's preview**, as the game draws it for the storefront: a paint job's
   is 288x160 (the car from the front three-quarter view), a vinyl group's 256x128. The server
-  makes it a PNG from the game's texture (`forza_cxds.py`). Being small, it is scored as a whole
+  makes it a PNG from the game's texture (`forza_live/content/cxds.py`). Being small, it is scored as a whole
   frame (`[designs] grids = []`), with no tiles. RapidOCR scales a small picture up itself: words
   about 26 px tall in a 288x160 preview are read (`test_screen_e2e`).
 - **The title and the description** are what the player typed, and for designs they matter most:
@@ -169,11 +169,11 @@ This works because of how Docker routes the request and how the server checks it
 
 - Docker delivers the request locally on `docker0` without NAT, so the server sees the
   container's own address, 172.17.0.x.
-- `forza_live_server.http_handler` finds 172.17.0.x is not a trusted proxy, so it requires no
+- `forza_live.server.http_handler` finds 172.17.0.x is not a trusted proxy, so it requires no
   PROXY header and counts the worker under the normal per-address limit.
-- `forza_live_lsp.is_local_admin` admits the request: it has no `X-Forwarded-For`, `X-Real-IP` or
+- `forza_live.title_services.lsp.is_local_admin` admits the request: it has no `X-Forwarded-For`, `X-Real-IP` or
   `Forwarded` header, does not come from a trusted proxy, and carries the right `X-Admin-Token`.
-- `forza_community` refuses requests with an `Origin` header. The worker sends none, follows no
+- `forza_live.content.community` refuses requests with an `Origin` header. The worker sends none, follows no
   redirects and ignores proxy environment variables.
 
 `test_screen_client.BridgeAddress` checks all of this against the server's code.

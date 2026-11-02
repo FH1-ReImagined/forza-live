@@ -1,4 +1,4 @@
-"""Xbox LIVE stats in-process (forza_stats.py): XSessionWriteStats of the TrueSkill view,
+"""Xbox LIVE stats in-process (stats.py): XSessionWriteStats of the TrueSkill view,
 the rating of a game, XUserReadStats rows.
 
 Run: python3 -m unittest discover -p 'test_*.py'
@@ -8,8 +8,8 @@ import struct
 import tempfile
 import unittest
 
-import forza_limits as limits
-import forza_stats as stats
+from forza_live.core import limits
+from forza_live.competition import stats
 
 A, B, C = 0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03
 TAGS = {A: "DriverA", B: "DriverB", C: "DriverC"}

@@ -12,12 +12,12 @@ import unittest
 import urllib.error
 import urllib.request
 
-import forza_limits
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_xtsw as x
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.network import xtsw as x
+from tests.support import ROOT
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 MAGIC = b"RLV1"
 
 
@@ -62,7 +62,7 @@ class ServerTest(unittest.TestCase):
         cls.proc = subprocess.Popen(
             # Windows venv's python.exe is a launcher; terminating it leaves its
             # child server alive, now holding events.sqlite3 open at cleanup.
-            [getattr(sys, "_base_executable", sys.executable), os.path.join(HERE, "forza_live_server.py"), "--host", "127.0.0.1",
+            [getattr(sys, "_base_executable", sys.executable), os.path.join(ROOT, "forza_live_server.py"), "--host", "127.0.0.1",
              "--port", str(cls.port), "--http-port", str(cls.http), "--data-dir", cls.data.name],
             stderr=subprocess.DEVNULL, env=env)
         cls.base = "http://127.0.0.1:%d" % cls.http
@@ -131,7 +131,7 @@ class ServerTest(unittest.TestCase):
     def test_the_udp_port_outlives_replies_to_closed_ports(self):
         """Answers to a socket closed meanwhile (a game that quit) come back as ICMP port
         unreachable, which on Windows once stopped the server's UDP port for good
-        (forza_live_server.ignore_port_unreachable); test_garbage_udp_and_http closes its socket
+        (server.ignore_port_unreachable); test_garbage_udp_and_http closes its socket
         so too. Registers no player (test_welcome_is_small_and_peers_per_ip_capped counts them
         from this address): a HELLO of another protocol version is answered with an ERROR."""
         other = MAGIC + b"\x01" + struct.pack(">HQQIH", 0xFFFF, 7, 0x0009000000000399, 0, 1) + b"\0\2Pn"
@@ -205,7 +205,7 @@ class PortUnreachableTest(unittest.TestCase):
 class LimitsTest(unittest.TestCase):
     def test_blob_cap(self):
         with self.assertRaises(ValueError):
-            forza_limits.accept(forza_limits.MAX_BLOB + 1)
+            limits.accept(limits.MAX_BLOB + 1)
 
     def test_array_length_is_bounded(self):
         data = struct.pack(">I", 0xFFFFFFFF)

@@ -36,7 +36,7 @@ field in declaration order:
 
 import struct
 
-import forza_limits as limits
+from forza_live.core import limits
 
 
 class T:
@@ -114,7 +114,7 @@ def _club_desc(v):
     return limits.clean_ascii_text(v, limits.CLUB_DESC_MAX)
 
 
-# Fields holding a player-chosen display string: plain ASCII on the way out (forza_limits).
+# Fields holding a player-chosen display string: plain ASCII on the way out (limits).
 _PLAYER_TEXT = {"clanTag": _club_tag, "clanName": _club_name, "clanDescription": _club_desc, "senderClanTag": _club_tag,
                 "originalOwner": _tag, "creatorName": _tag,
                 "SenderGamerTag": _tag, "sellerTag": _tag}

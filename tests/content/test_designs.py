@@ -1,5 +1,5 @@
-"""The design storefront (forza_designs.py): the calls the game's Paint Shop storefront makes, as
-its type descriptors encode them (forza_xtsw_all.py), through the server's dispatch with signed
+"""The design storefront (designs.py): the calls the game's Paint Shop storefront makes, as
+its type descriptors encode them (xtsw_all.py), through the server's dispatch with signed
 and unsigned callers. Synthetic payloads and previews only (no game data).
 
 Run: python3 -m unittest discover -p 'test_*.py'
@@ -14,16 +14,16 @@ import unittest
 import zlib
 from types import SimpleNamespace
 
-import forza_auth as auth
-import forza_clubs as clubs
-import forza_designs as designs
-import forza_ed25519 as ed25519
-import forza_friends as friends
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_photos as photos
-import forza_xtsw as x
-import forza_xtsw_all as A
+from forza_live.core import auth
+from forza_live.social import clubs
+from forza_live.content import designs
+from forza_live.core import ed25519
+from forza_live.social import friends
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live.content import photos
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
 
 ALICE, BOB, CAROL, DAVE, EVE = (0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03,
                                0x0009000000000D04, 0x0009000000000E05)

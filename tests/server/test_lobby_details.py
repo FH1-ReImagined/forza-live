@@ -6,17 +6,10 @@ server's matchmaking handlers directly (no sockets)."""
 import struct
 import unittest
 
-import forza_live_server as srv
+from forza_live import server as srv
+from tests.support import FakeTransport
 
 INFECTED, KING = 5, 7  # Find Custom Game's search keys: the game type (property 0x10000030)
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
 
 
 def record(session_id, details, filled=1, game_type=INFECTED):

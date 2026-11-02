@@ -1,11 +1,11 @@
-"""forza_durable: saves survive a power cut that empties the file (2026-10-26)."""
+"""durable: saves survive a power cut that empties the file (2026-10-26)."""
 import json
 import os
 import tempfile
 import unittest
 from unittest import mock
 
-import forza_durable as durable
+from forza_live.core import durable
 
 
 class Durable(unittest.TestCase):

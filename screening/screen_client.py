@@ -1,5 +1,5 @@
-"""The operator API of the community photos (forza_community.py) and of the designs on the website
-(forza_design_feed.py) as the screening worker uses it.
+"""The operator API of the community photos (community.py) and of the designs
+on the website (design_feed.py) as the screening worker uses it.
 
 The token goes only in the X-Admin-Token header and never into a log line, an exception or a URL.
 Requests go straight to the server: no proxy from the environment (a proxy could add

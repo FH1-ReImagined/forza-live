@@ -3,6 +3,9 @@
 .game-repo
 docs
 tools
+!tools/event_admin.py
 forza_live_data
 __pycache__
 screening
+tests
+**/__pycache__

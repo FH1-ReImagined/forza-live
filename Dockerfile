@@ -3,7 +3,9 @@
 # (or -p 21200:21200/udp -p 21201:21201; --network host keeps players' public ports intact)
 FROM python:3.12-slim
 WORKDIR /app
-COPY *.py *.xml ./
+COPY forza_live_server.py ./
+COPY forza_live ./forza_live
+COPY tools/event_admin.py ./tools/
 COPY LICENSE NOTICE.md ./
 EXPOSE 21200/udp 21201/tcp
 VOLUME /data

@@ -45,7 +45,7 @@ def free_port(kind=socket.SOCK_STREAM):
 
 
 def seed(data_dir, pictures):
-    """Held community photos in a data folder, as forza_community keeps them: {id: (PNG bytes,
+    """Held community photos in a data folder, as community.py keeps them: {id: (PNG bytes,
     title)}. Returns the ids."""
     os.makedirs(os.path.join(data_dir, "community"), exist_ok=True)
     photos = {}
@@ -64,11 +64,12 @@ def seed(data_dir, pictures):
 
 
 def cxds_of(img):
-    """A design preview as the game uploads it (forza_cxds.py: a tiled 8_8_8_8 texture in a cxds
-    file) of a Pillow picture, its pixels darkened by the gamma the server takes off again."""
+    """A design preview as the game uploads it (forza_live/content/cxds.py: a tiled 8_8_8_8
+    texture in a cxds file) of a Pillow picture, its pixels darkened by the gamma the server
+    takes off again."""
     sys.path.insert(0, ROOT)
     try:
-        import forza_cxds
+        from forza_live.content import cxds
     finally:
         sys.path.remove(ROOT)
     w, h = img.size
@@ -78,7 +79,7 @@ def cxds_of(img):
     rgb = img.convert("RGB").tobytes().translate(dark)
     for y in range(h):
         for x in range(w):
-            o, at = forza_cxds.tiled_offset(x, y, pitch), (y * w + x) * 3
+            o, at = cxds.tiled_offset(x, y, pitch), (y * w + x) * 3
             pixels[o:o + 4] = b"\xff" + rgb[at:at + 3]
     header = bytearray(52)
     header[0x20:0x28] = struct.pack(">II", 0x86, (w - 1) | (h - 1) << 13)
@@ -89,7 +90,7 @@ def cxds_of(img):
 
 
 def seed_designs(data_dir, previews):
-    """Pending designs in a data folder, as forza_designs keeps them: {public id: (cxds preview,
+    """Pending designs in a data folder, as designs.py keeps them: {public id: (cxds preview,
     title, description)}; even ones are paint jobs, odd ones vinyl groups. Returns the ids."""
     os.makedirs(os.path.join(data_dir, "designs"), exist_ok=True)
     files = {}
@@ -552,12 +553,12 @@ class BridgeAddress(unittest.TestCase):
 
     def setUp(self):
         sys.path.insert(0, ROOT)
-        import forza_limits
-        import forza_live_lsp
-        self.limits, self.lsp = forza_limits, forza_live_lsp
-        self.old_token = forza_live_lsp.ADMIN_TOKEN
-        forza_live_lsp.ADMIN_TOKEN = TOKEN
-        forza_limits.configure_proxies("127.0.0.0/8", "192.168.100.105")
+        from forza_live.core import limits
+        from forza_live.title_services import lsp
+        self.limits, self.lsp = limits, lsp
+        self.old_token = lsp.ADMIN_TOKEN
+        lsp.ADMIN_TOKEN = TOKEN
+        limits.configure_proxies("127.0.0.0/8", "192.168.100.105")
 
     def tearDown(self):
         self.lsp.ADMIN_TOKEN = self.old_token
@@ -576,10 +577,10 @@ class BridgeAddress(unittest.TestCase):
             self.assertFalse(admin(("172.17.0.2", 41000), dict(ok, **{header: "1.2.3.4"})))
 
     def test_origin_is_refused(self):
-        import forza_community
-        answer = forza_community.handle("GET", "/admin/photos/queue",
-                                        {"origin": "http://x", "x-admin-token": TOKEN}, b"",
-                                        lambda: True)
+        from forza_live.content import community
+        answer = community.handle("GET", "/admin/photos/queue",
+                                  {"origin": "http://x", "x-admin-token": TOKEN}, b"",
+                                  lambda: True)
         self.assertEqual(answer[0], 403)
 
     def test_the_client_sends_no_proxy_or_origin_header(self):

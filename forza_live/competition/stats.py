@@ -7,9 +7,9 @@ online game it writes each player's X_PROPERTY_RELATIVE_SCORE (0x1000800A) and
 X_PROPERTY_SESSION_TEAM (0x1000800B) to that view (XSessionWriteStats, one view per call),
 and it reads the standard skill view 0xFFFE0000 for its party (XUserReadStats): both are
 one view here (stored_view). Its leaderboards (events, speed traps, Rivals, the 1000 Club)
-are title services instead (forza_scores.py).
+are title services instead (scores.py).
 
-The game sends the writes and reads to the server over UDP (forza_live_server.py, STATS):
+The game sends the writes and reads to the server over UDP (server.py, STATS):
 
   write: op 1, session id u64, XUID u64, view count u8, per view: view id u32, property
          count u8, per property: id u32, XUSER_DATA type u8, value (8 bytes as in the game)
@@ -37,8 +37,8 @@ import os
 import struct
 import time
 
-import forza_limits as limits
-import forza_durable as durable
+from forza_live.core import limits
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -55,7 +55,7 @@ MAX_ROWS_BYTES = 1400  # an answer fits one datagram
 
 RELATIVE_SCORE, SESSION_TEAM = 0x1000800A, 0x1000800B
 # Called with (writer XUID, session, target XUID, relative score) for every skill-view write
-# taken (forza_coop_ledger.Ledger.host_score: a campaign round's places, cars - score).
+# taken (coop_ledger.Ledger.host_score: a campaign round's places, cars - score).
 on_skill_write = None
 COL_SKILL, COL_GAMES, COL_MU, COL_SIGMA = 61, 62, 63, 64
 TYPE_INT32, TYPE_INT64, TYPE_DOUBLE, TYPE_NULL = 1, 2, 3, 0xFF

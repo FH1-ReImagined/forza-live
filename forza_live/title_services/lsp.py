@@ -1,8 +1,8 @@
 """Forza Live title servers ("LSP"): Turn 10's title services for Forza Horizon.
 
-forza_live_server.py calls handle() for every HTTP request on --http-port that isn't the
+server.py calls handle() for every HTTP request on --http-port that isn't the
 status page. The game calls Turn 10's services with POST /Services.Horizon/o.xtsw
-(X-ClassName, X-Method; forza_xtsw.py has the format, docs/title_services.md the
+(X-ClassName, X-Method; xtsw.py has the format, docs/title_services.md the
 services). This answers the ones online play needs:
 
     Forza.WebServices.User     Logon2 (the "Horizon server" sign-in, with a permission
@@ -15,20 +15,20 @@ services). This answers the ones online play needs:
                                GetGameOptions (each round's track and game type),
                                GetSessionListFilterSettings, UserRegister, ReportQosData,
                                ReportVoting, GetRaceMultipliers
-    Forza.WebServices.Scoreboard  scores, leaderboards, Rivals and ghosts (forza_scores.py)
-    Forza.WebServices.Auction, Gifting  the Auction House and car gifts (forza_market.py)
+    Forza.WebServices.Scoreboard  scores, leaderboards, Rivals and ghosts (scores.py)
+    Forza.WebServices.Auction, Gifting  the Auction House and car gifts (market.py)
     Xls.WebServices.Clan, User; Forza.WebServices.CarClub, SharedCar  car clubs and the
-                               club garage (forza_clubs.py)
+                               club garage (clubs.py)
     Forza.WebServices.LargeFileUpload, StorefrontPhoto.Create, Storefront (photos); Xls.WebServices.Content
-                               photo uploads and their downloads (forza_photos.py)
+                               photo uploads and their downloads (photos.py)
     Forza.WebServices.StorefrontLivery, StorefrontLayerGroup, Storefront (designs)
-                               the design storefront: paint jobs and vinyl groups (forza_designs.py)
+                               the design storefront: paint jobs and vinyl groups (designs.py)
     GET /community/..., /admin/photos  community photos: signed photo mode uploads published
-                               for the website's gallery (forza_community.py)
+                               for the website's gallery (community.py)
     GET /community/designs.json, /community/design-img/..., /admin/designs
                                the design storefront's designs on the website, after
-                               screening (forza_design_feed.py)
-    Xls.WebServices.Notifications  the Message Center (forza_notifications.py): Rivals,
+                               screening (design_feed.py)
+    Xls.WebServices.Notifications  the Message Center (notifications.py): Rivals,
                                gifts, auctions and car club messages
 
 Other methods get an empty answer: success and zero bytes, which read as zero, false,
@@ -48,26 +48,26 @@ import os
 import time
 import urllib.parse
 
-import forza_auth as auth
-import forza_campaign as campaign
-import forza_clubs as clubs
-import forza_community as community
-import forza_coop_ledger as coop_ledger
-import forza_design_feed as design_feed
-import forza_designs as designs
-import forza_friends as friends
-import forza_limits as limits
-import forza_leaderboards as leaderboards
-import forza_market as market
-import forza_notifications as notifications
-import forza_photos as photos
-import forza_scores as scores
-import forza_shader_lists as shader_lists
-import forza_stats as stats
-import forza_world as world
-import forza_xtsw as x
-import forza_xtsw_all as A
-import forza_durable as durable
+from forza_live.core import auth
+from forza_live.world import campaign
+from forza_live.social import clubs
+from forza_live.content import community
+from forza_live.world import coop_ledger
+from forza_live.content import design_feed
+from forza_live.content import designs
+from forza_live.social import friends
+from forza_live.core import limits
+from forza_live.competition import leaderboards
+from forza_live.content import market
+from forza_live.social import notifications
+from forza_live.content import photos
+from forza_live.competition import scores
+from forza_live.content import shader_lists
+from forza_live.competition import stats
+from forza_live.world import world
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
 
@@ -87,7 +87,7 @@ WORLD_ROUND_MINUTES = 0.0
 # Find Game lists the first category's hoppers; "Horizon World" is its first row.
 WORLD_HOPPER = 3
 PLAYGROUND_HOPPER_ID = 2
-# The Co-op Festival (#309, forza_campaign.py): a Horizon World whose placement only finds
+# The Co-op Festival (#309, campaign.py): a Horizon World whose placement only finds
 # worlds led by a friend, where the host starts festival events with /event in WORLD chat.
 # Listed only to games that run it as a world (HELLO feature COOP_FEATURE: drop-in, events,
 # the campaign CPU drivers' skill); older games would run it as a plain free roam.
@@ -96,7 +96,7 @@ PLAYGROUND_HOPPER_ID = 2
 COOP_HOPPER = 20
 COOP_FEATURE = 0x08
 WORLD_HOPPERS = (WORLD_HOPPER, COOP_HOPPER)
-# The features byte of the HELLO of the game signed in with a XUID (forza_live_server sets
+# The features byte of the HELLO of the game signed in with a XUID (server sets
 # it; None: unknown, as in tests without a server).
 client_features = None
 # Find Game lists the first category's hoppers only, so all of them are in it.
@@ -179,11 +179,11 @@ def add_arguments(parser):
                              "an id made at the first start, kept in DATA_DIR/server_id.txt)")
     parser.add_argument("--time-trials", action="store_true",
                         help="offer the server's Monthly Rivals time trials "
-                             "(forza_scores.TIME_TRIALS; a trial needs a score on its board "
+                             "(scores.TIME_TRIALS; a trial needs a score on its board "
                              "to have a rival)")
     parser.add_argument("--trap-limits", action="store_true",
                         help="reject speed trap scores above the trap's Xbox record "
-                             "(forza_scores.SPEED_TRAP_LIMIT_KMH) and trap/zone speeds above "
+                             "(scores.SPEED_TRAP_LIMIT_KMH) and trap/zone speeds above "
                              "470 km/h, and remove kept ones at start; by default they are "
                              "only logged (modified and modded cars go faster)")
     parser.add_argument("--no-trap-limits", action="store_true", help=argparse.SUPPRESS)
@@ -268,7 +268,7 @@ def save_player(xuid, record):
     path = player_path(xuid)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if not os.path.exists(path) and sum(n.endswith(".json") for n in os.listdir(os.path.dirname(path))) \
-            >= limits.MAX_PLAYERS:  # players only: not their .bak copies (forza_durable)
+            >= limits.MAX_PLAYERS:  # players only: not their .bak copies (durable)
         log.warning("player limit reached: %016X not saved", xuid)
         return
     tmp = path + ".tmp"
@@ -332,7 +332,7 @@ def user_logon2(xuid, body):
 
 def race_multipliers(xuid, body):
     """Hopper.GetRaceMultipliers at a race's start: 1.0, or the campaign's for the players of
-    an open campaign round (forza_campaign.RACE_MULTIPLIERS, a test knob)."""
+    an open campaign round (campaign.RACE_MULTIPLIERS, a test knob)."""
     value = 1.0
     rid = coop_ledger.LEDGER.open_round_of(xuid)
     if rid is not None and campaign.RACE_MULTIPLIERS != [1.0]:
@@ -357,7 +357,7 @@ def user_write_race_stats(xuid, body):
              stats["userFinishPosition"], stats["maxPlaces"], stats["finished"],
              stats["userLevel"], stats["userXP"], stats["currentCredits"],
              "" if caller_trusted() else " (unverified caller)")
-    if caller_trusted():  # what the player's last co-op round paid online (forza_coop_ledger)
+    if caller_trusted():  # what the player's last co-op round paid online (coop_ledger)
         coop_ledger.LEDGER.race_written(xuid, stats["onlineWinnings"])
     if stats["hopperId"] in WORLD_HOPPERS:
         world.WORLDS.result(xuid, stats["userFinishPosition"], stats["maxPlaces"],
@@ -533,7 +533,7 @@ def hopper_get_game_options(server, xuid, body):
     media/gametunablesettings Default*HopperOptions.xml). DATA_DIR/hoppers/<hopperId>.xml
     overrides the built-in rotation (HOPPER_ROUNDS, picked by roundNum). In the Horizon
     World the session host asks for the next round when a round starts, and again when the
-    server asked it to run an event (forza_world.py)."""
+    server asked it to run an event (world.py)."""
     params, _ = x.decode(x.HopperGetGameOptions_Params, body)
     hopper, round_num = params["hopperId"], params["roundNum"]
     path = os.path.join(DATA_DIR, "hoppers", "%d.xml" % hopper)
@@ -610,9 +610,9 @@ SERVICES = {
 
 # --- Who is calling ---------------------------------------------------------------------------
 # The game names the player of a call in X-UserId, which anyone can write. Our game signs each
-# call with its Live identity's Ed25519 key (X-Forza-Auth, forza_auth.py; forza-recomp
+# call with its Live identity's Ed25519 key (X-Forza-Auth, auth.py; forza-recomp
 # src/kernel/live_auth.cpp), whose public key the XUID was bound to at a HELLO
-# (forza_friends.Store; the launcher's shader list upload proves itself the same way). Games
+# (friends.Store; the launcher's shader list upload proves itself the same way). Games
 # before signed requests sent their friends key itself (X-Friends-Key, 32 hex digits), taken
 # for an XUID still bound to it until --raw-key-cutoff. Addresses can't stand in for either:
 # behind a tunnel (docs/hosting.md, playit.gg) every HTTP connection and every UDP datagram come
@@ -753,7 +753,7 @@ def came_through_proxy(peer, headers):
 
 def is_local_admin(peer, headers):
     """is_admin for the operator endpoints that must never be used from the internet (community
-    photos' and the designs' moderation, forza_community.py and forza_design_feed.py): the
+    photos' and the designs' moderation, community.py and design_feed.py): the
     token only in its header (a query string ends
     up in logs and browser history), and nothing that came through the tunnel or a proxy (the
     token would cross it in plain text). From the LAN, an ssh tunnel or this machine."""
@@ -785,7 +785,7 @@ def notification_params(ntype, arg):
 
 def broadcast_request(query):
     """GET /broadcast?type=<n>[&days=<1-30>][&field=value...] (operator only): one Message
-    Center notification for every player, stored once (forza_notifications.broadcast)."""
+    Center notification for every player, stored once (notifications.broadcast)."""
     arg = {k: v[0] for k, v in query.items()}
     arg.pop("token", None)
     try:
@@ -852,22 +852,22 @@ def handle(server, method, path, headers, body, peer):
                  headers.get("x-method", "?"), len(body))
         return 200, "bin/xtsw", service_call(headers, body, server, method, path)
     log.info("LSP request %s %s (%d bytes)", method, path, len(body))
-    if url.path.startswith("/shader-lists"):  # players' shader lists (forza_shader_lists.py)
+    if url.path.startswith("/shader-lists"):  # players' shader lists (shader_lists.py)
         answer = shader_lists.handle(server, method, path, headers, body)
         if answer is not None:
             return answer
-    if url.path.startswith("/coop/"):  # co-op campaign results (forza_coop_ledger.py)
+    if url.path.startswith("/coop/"):  # co-op campaign results (coop_ledger.py)
         answer = coop_ledger.handle(server, method, path, headers, body, shader_lists.authenticate)
         if answer is not None:
             return answer
-    if url.path.startswith("/leaderboards"):  # public leaderboards as JSON (forza_leaderboards.py)
+    if url.path.startswith("/leaderboards"):  # public leaderboards as JSON (leaderboards.py)
         answer = leaderboards.handle(method, path)
         if answer is not None:
             return answer
-    if design_feed.handles(url.path):  # designs on the website (forza_design_feed.py)
+    if design_feed.handles(url.path):  # designs on the website (design_feed.py)
         return design_feed.handle(method, path, headers, body,
                                   lambda: is_local_admin(peer, headers))
-    if community.handles(url.path):  # community photos (forza_community.py)
+    if community.handles(url.path):  # community photos (community.py)
         return community.handle(method, path, headers, body,
                                 lambda: is_local_admin(peer, headers))
     if url.path in ("/notify", "/gift", "/broadcast"):

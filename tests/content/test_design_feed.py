@@ -1,4 +1,4 @@
-"""The designs on the website (forza_design_feed.py) and their previews (forza_cxds.py): cxds to
+"""The designs on the website (design_feed.py) and their previews (cxds.py): cxds to
 PNG, the web states and what they do in the game, the public feed and images, the operator's
 routes and their rules, car names. Every preview here is drawn by this file (make_cxds): no game
 data.
@@ -21,18 +21,18 @@ import zlib
 from types import SimpleNamespace
 from unittest import mock
 
-import forza_auth as auth
-import forza_cxds as cxds
-import forza_design_feed as feed
-import forza_designs as designs
-import forza_ed25519 as ed25519
-import forza_friends as friends
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_xtsw as x
-import forza_xtsw_all as A
-from test_forza_community import decode_png
+from forza_live.core import auth
+from forza_live.content import cxds
+from forza_live.content import design_feed as feed
+from forza_live.content import designs
+from forza_live.core import ed25519
+from forza_live.social import friends
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.network import xtsw as x
+from forza_live.network import xtsw_all as A
+from tests.support import GAME_TOOLS, decode_png
 
 ALICE, BOB, CAROL, DAVE, EVE = (0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03,
                                0x0009000000000D04, 0x0009000000000E05)
@@ -51,10 +51,10 @@ ANY = {"PriceMax": -1, "MakeId": -1, "ModelId": -1, "ClassId": -1, "KeywordOneId
        "NumLayers": -1, "GamerTag": ""}
 FEED_FIELDS = {"id", "type", "code", "title", "description", "gamertag", "car", "layers",
                "downloads", "rating", "createdAt", "preview", "w", "h", "sha256"}
-# The game repository's tools/xdc_decode.py, the decoder forza_cxds ports: beside this folder
+# The game repository's tools/xdc_decode.py, the decoder cxds ports: beside this repository
 # when it is that repository's server/ submodule, or where FORZA_REPO_TOOLS says (the CI checks
 # it out).
-TOOLS = os.environ.get("FORZA_REPO_TOOLS") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+TOOLS = GAME_TOOLS
 HAVE_XDC = os.path.isfile(os.path.join(TOOLS, "xdc_decode.py"))
 
 

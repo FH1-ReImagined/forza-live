@@ -1,6 +1,6 @@
 """Ed25519 signatures (RFC 8032), pure Python with the standard library only (#515).
 
-forza_auth.py verifies the signatures of games and launchers with it; the launcher signs with a
+auth.py verifies the signatures of games and launchers with it; the launcher signs with a
 copy (launcher/forza_launcher/ed25519.py, the same file). The arithmetic is that of the reference
 implementation in RFC 8032, section 6, rearranged for speed:
 

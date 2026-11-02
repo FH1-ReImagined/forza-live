@@ -4,22 +4,12 @@ per-address limits and keeps its players on the server relay."""
 import struct
 import unittest
 
-import forza_limits as limits
-import forza_live_lsp as lsp
-import forza_live_server as srv
+from forza_live.core import limits
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from tests.support import FakeTransport
 
 PROXY = "192.168.100.105"
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
-
-    def kinds(self, addr):
-        return [d[4] for a, d in self.sent if a == addr]
 
 
 def hello(token, name, room="r"):

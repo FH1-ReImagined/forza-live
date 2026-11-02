@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 from unittest import mock
 
-import forza_discord_status as ds
+from forza_live.social import discord_status as ds
 
 
 class DiscordStatusTest(unittest.TestCase):

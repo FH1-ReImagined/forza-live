@@ -22,7 +22,7 @@ services:
     command:
       - --host=0.0.0.0
       # The game's database enables the Horizon World event list: copy media/db/gamedb.slt
-      # from your game files into ./data, then uncomment.
+      # from your game files into ./data, then uncomment (or set FORZA_GAME_DB in .env).
       # - --game-db=/data/gamedb.slt
       # Behind a tunnel or reverse proxy: trust it, so player addresses are real.
       # - --trusted-proxy=127.0.0.0/8

@@ -1,7 +1,7 @@
 """Design previews: the game's cxds thumbnails as PNG pictures, standard library only.
 
 A design's preview (previewData of StorefrontLivery.Create and StorefrontLayerGroup.Create,
-forza_designs.py) is the texture the game keeps as the design's thumb.xdc: a paint job's is
+designs.py) is the texture the game keeps as the design's thumb.xdc: a paint job's is
 288x160, a vinyl group's 256x128 (TU4, October 2026). Its layout:
 
 - "cxds", then four big-endian words: version 2, the texture's size, the size of what follows
@@ -29,7 +29,7 @@ import operator
 import struct
 import zlib
 
-import forza_community as community
+from forza_live.content import community
 
 MAX_PACKED = 1 << 20         # bytes of a cxds file (the storefront takes at most 153,600)
 MAX_TEXTURE = 4 << 20        # bytes of the inflated texture
@@ -115,7 +115,7 @@ def decode(data):
 
 def to_png(data):
     """(PNG, width, height) of a cxds file: an 8-bit RGB PNG with IHDR, IDAT and IEND only
-    (forza_community.png). BadPreview for anything else."""
+    (community.png). BadPreview for anything else."""
     width, height, rgb = decode(data)
     stride = width * 3
     rows = [rgb[i:i + stride] for i in range(0, len(rgb), stride)]

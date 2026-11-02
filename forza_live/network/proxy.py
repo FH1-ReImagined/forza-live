@@ -1,7 +1,7 @@
 """PROXY protocol version 2 from a trusted tunnel agent (playit.gg): who a tunnelled player is.
 
 A tunnel agent relays every player's UDP and TCP to the server from its own sockets, so the
-server sees only the agent (forza_limits.TRUSTED_PROXIES) and cannot tell other players where
+server sees only the agent (limits.TRUSTED_PROXIES) and cannot tell other players where
 to punch to. With the tunnel's Proxy Protocol set to proxy-protocol-v2, the agent says whose
 each flow is in the binary header of HAProxy's PROXY protocol (proxy-protocol.txt, 2.2):
 
@@ -20,14 +20,14 @@ The agent passes the player's own bytes on unchanged, so a header can be the pla
 server never guesses (the spec's section 2). Headers are read only when the operator says
 the tunnel sends them (--proxy-protocol-udp, --proxy-protocol-tcp), only from a trusted
 proxy, and only where the agent puts its own: first on a TCP connection (which then must
-start with one), and on UDP first in a new flow (forza_live_server.py, ProxyFlow).
+start with one), and on UDP first in a new flow (server.py, ProxyFlow).
 Standard library only.
 """
 
 import ipaddress
 import struct
 
-import forza_limits as limits
+from forza_live.core import limits
 
 SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
 HEADER_SIZE = 16  # the signature, version and command, family and transport, length

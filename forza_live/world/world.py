@@ -1,7 +1,7 @@
 """Events in the Horizon World (docs/online_vision.md, phase 2).
 
 The Horizon World is Find Game's playlist 3: one endless online free roam per session of
-up to 8 players (forza_live_lsp.py serves its rounds, forza_live_server.py places players).
+up to 8 players (lsp.py serves its rounds, server.py places players).
 This module turns a world session's next round into one of the game's festival events:
 
     world (free roam) --event requested--> the host ends the free roam (client hook)
@@ -11,7 +11,7 @@ This module turns a world session's next round into one of the game's festival e
 How a round's options reach the game (traced in docs/online_vision.md): the session host
 asks Hopper.GetGameOptions for the NEXT round when a round starts, so the lobby after a
 round already shows the next one. For an event the host asks again: the server sends
-WORLD_EVENT to the world's host (forza_live_server.py); its client (world_events.cpp)
+WORLD_EVENT to the world's host (server.py); its client (world_events.cpp)
 re-requests the next round, which we answer with the event, then ends the free roam. The
 event round's own prefetch gets the world back.
 
@@ -33,8 +33,8 @@ import random
 import sqlite3
 import time
 
-import forza_campaign
-import forza_coop_ledger as ledger
+from forza_live.world import campaign as forza_campaign
+from forza_live.world import coop_ledger as ledger
 
 log = logging.getLogger("forza-live")
 
@@ -60,8 +60,8 @@ _rotation = 0
 
 
 def default_game_db():
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "..", "extracted", "game", "media", "db", "gamedb.slt")
+    here = os.path.dirname(os.path.abspath(__file__))  # server/forza_live/world in the game's repo
+    path = os.path.join(here, "..", "..", "..", "extracted", "game", "media", "db", "gamedb.slt")
     return os.path.normpath(path) if os.path.isfile(path) else None
 
 
@@ -187,7 +187,7 @@ class Worlds:
     def __init__(self):
         self.state = {}       # session id (bytes) -> event state
         self.started = {}     # session id -> when its current free roam started
-        self.members = {}     # session id -> {xuid: gamertag} (forza_live_server.world_tick)
+        self.members = {}     # session id -> {xuid: gamertag} (server.world_tick)
         self.dropped = []     # campaign requests the last tick dropped
         self.empty = []       # (sid, campaign event) of campaign rounds that ended at once
         self.rounds = {}      # session id -> (campaign event, when it started, members)
@@ -209,7 +209,7 @@ class Worlds:
 
     def next_round(self, sid, humans, trusted=True):
         """GetGameOptions from the host of world sid: the event's XML, or None (world).
-        trusted: the call carries the host's own friends key (forza_live_lsp.caller_trusted);
+        trusted: the call carries the host's own friends key (lsp.caller_trusted);
         only such calls move a campaign round along (start it in the ledger, close it)."""
         st = self.state.get(sid)
         campaign = st.get("campaign") if st else None
@@ -236,7 +236,7 @@ class Worlds:
             if st.get("campaign") is not None:
                 members = dict(self.members.get(sid, {}))
                 self.rounds[sid] = (st["campaign"], time.monotonic(), members, st.get("by", ""))
-                # the career's side: forza_coop_ledger keeps the round and its results
+                # the career's side: coop_ledger keeps the round and its results
                 ledger.LEDGER.start_round(sid, st["campaign"], st.get("by_xuid", 0),
                                           st.get("by", ""), members)
             del self.state[sid]

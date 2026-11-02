@@ -6,12 +6,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import forza_auth as auth
-import forza_events as ev
-import forza_live_lsp as lsp
-import forza_live_server as srv
-import forza_market as market
-import forza_notifications as notices
+from forza_live.core import auth
+from forza_live.competition import events as ev
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from forza_live.content import market
+from forza_live.social import notifications as notices
 
 AUTH_PART = len(auth.welcome(None, type("P", (), {"xuid": 0, "addr": None})()))
 
@@ -98,7 +98,7 @@ class EventsTest(unittest.TestCase):
         self.assertIsNotNone(peer)
         welcome = next(d[5:] for _, d in self.server.transport.sent if d[4] == srv.WELCOME)
         motd_length = struct.unpack_from(">H", welcome, 12)[0]
-        # the signed requests part ends every WELCOME (forza_auth.py)
+        # the signed requests part ends every WELCOME (auth.py)
         self.assertEqual(len(welcome), 14 + motd_length + 2 + AUTH_PART)
         self.assertFalse(any(d[4] == ev.KIND for _, d in self.server.transport.sent))
         self.server.transport.sent.clear()
@@ -114,7 +114,7 @@ class EventsTest(unittest.TestCase):
         self.assertIsNotNone(peer)
         welcome = next(d[5:] for _, d in self.server.transport.sent if d[4] == srv.WELCOME)
         motd_length = struct.unpack_from(">H", welcome, 12)[0]
-        # the signed requests part ends every WELCOME (forza_auth.py)
+        # the signed requests part ends every WELCOME (auth.py)
         self.assertEqual(len(welcome), 14 + motd_length + 2 + AUTH_PART)
         self.assertFalse(any(d[4] == ev.KIND for _, d in self.server.transport.sent))
         self.server.transport.sent.clear()
@@ -153,7 +153,7 @@ class EventsTest(unittest.TestCase):
 
     def test_outbox_retry_restart_and_car_notification_deduplication(self):
         self.poll(); self.approve()
-        with patch("forza_clubs.game_car", return_value=(2010, 1)):
+        with patch("forza_live.social.clubs.game_car", return_value=(2010, 1)):
             with patch.object(notices, "send", side_effect=OSError("disk unavailable")):
                 self.events.flush()
             self.assertEqual(len(market.MARKET.gifts), 1)
@@ -175,7 +175,7 @@ class EventsTest(unittest.TestCase):
 
     def test_retry_after_gift_save_failure_really_persists_before_ack(self):
         self.poll(); self.approve()
-        with patch("forza_clubs.game_car", return_value=(2010, 1)):
+        with patch("forza_live.social.clubs.game_car", return_value=(2010, 1)):
             with patch.object(market.MARKET, "save", side_effect=OSError("disk full")):
                 self.events.flush()
             self.events.flush()

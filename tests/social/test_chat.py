@@ -1,4 +1,4 @@
-"""Text chat (#92, forza_chat.py): the session, world and direct channels, the length cap,
+"""Text chat (#92, chat.py): the session, world and direct channels, the length cap,
 rate limit, blocks and mutes, the admin's mute and kick, the moderation ring and old games.
 Drives the server's handlers directly (no sockets)."""
 
@@ -7,20 +7,13 @@ import struct
 import tempfile
 import unittest
 
-import forza_chat as ch
-import forza_friends as fr
-import forza_live_lsp as lsp
-import forza_live_server as srv
+from forza_live.social import chat as ch
+from forza_live.social import friends as fr
+from forza_live.title_services import lsp
+from forza_live import server as srv
+from tests.support import FakeTransport
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
-
-
-class FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def sendto(self, data, addr):
-        self.sent.append((addr, data))
 
 
 class ChatTest(unittest.TestCase):
