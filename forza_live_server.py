@@ -31,6 +31,7 @@ import urllib.parse
 import forza_auth as auth
 import forza_challenge as challenge
 import forza_chat as chat
+import forza_club_world as club_world
 import forza_community as community
 import forza_design_feed as design_feed
 import forza_discord_status as discord_status
@@ -807,6 +808,19 @@ class ForzaLive(asyncio.DatagramProtocol):
             return key, record
         return tail[0], record[:SESSION_INFO_SIZE + 4] + tail[1]
 
+    def match_candidates(self, peer, key, ignore_own=False):
+        """The open sessions of playlist `key` a search of `peer` is offered: [(the session's
+        host peer, its record, since)], those with a free public slot. A searcher that hosts a
+        session of its own is offered only older ones, unless ignore_own."""
+        own = None if ignore_own else getattr(peer, "match", None)
+        stale = world_host.taken_over([peer] + self.room_peers(peer), key)
+        found = [(p, p.match[1], p.match[2]) for p in self.room_peers(peer)
+                 if getattr(p, "match", None) and p.match[0] == key
+                 and not (own and own[0] == key and p.match[2] >= own[2])
+                 and p.match[1][:8] not in stale]
+        found += self.standby_sessions(peer, key)
+        return [f for f in found if self.match_slots(f[1])[1] > 0]
+
     def on_match(self, peer, kind, body):
         if kind == MATCH_PUBLISH and body[0] in (2, 3, 4):
             # op 2: standby (search key u32 + the record), op 4: the same from the player
@@ -859,22 +873,20 @@ class ForzaLive(asyncio.DatagramProtocol):
         # (#61: with one datagram, a second public lobby of a game type was never listed).
         # The client answers the game once the last datagram is in.
         key, request = struct.unpack_from(">II", body, 0)
-        own = getattr(peer, "match", None)
-        stale = world_host.taken_over([peer] + self.room_peers(peer), key)
-        found = [(p, p.match[1], p.match[2]) for p in self.room_peers(peer)
-                 if getattr(p, "match", None) and p.match[0] == key
-                 and not (own and own[0] == key and p.match[2] >= own[2])
-                 and p.match[1][:8] not in stale]
-        found += self.standby_sessions(peer, key)
-        found = [f for f in found if self.match_slots(f[1])[1] > 0]
+        found = self.match_candidates(peer, key)
         if key == lsp.COOP_HOPPER:
             found = self.coop_placement(peer, found)
-        found.sort(key=lambda f: (-self.match_slots(f[1])[0], f[2]))
+        # the fullest first, then the oldest; in the Horizon World the worlds with clubmates
+        # of the searcher come before that (forza_club_world.py)
+        club = club_world.preference(self, peer, key)
+        found.sort(key=lambda f: (club.rank(f[1]), -self.match_slots(f[1])[0], f[2]))
         if found:
             filled, free = self.match_slots(found[0][1])
-            log.info("match #%d %r playlist %d: %d open session(s), first %s from #%d %r (%d/%d)",
+            log.info("match #%d %r playlist %d: %d open session(s), first %s from #%d %r (%d/%d)%s",
                      peer.id, peer.name, key, len(found), found[0][1][:8].hex(), found[0][0].id,
-                     found[0][0].name, filled, filled + free)
+                     found[0][0].name, filled, filled + free,
+                     ", %d clubmate(s) in it" % club.mates(found[0][1])
+                     if club.mates(found[0][1]) else "")
         else:
             log.info("match #%d %r playlist %d: no open session, it hosts", peer.id, peer.name, key)
         datagrams, entries, size = [], [], 6
@@ -1035,8 +1047,10 @@ class ForzaLive(asyncio.DatagramProtocol):
 
     def chat_command(self, peer, channel, text):
         """A chat line starting with "/" (forza_chat.Chat.say): True when it was a command
-        (answered with notices, not relayed). /event and /events, in WORLD chat."""
+        (answered with notices, not relayed). /event and /events, in WORLD chat; /club in any."""
         word = text.split()[0].lower()
+        if word == "/club":  # in any channel (forza_club_world.py)
+            return club_world.command(self, peer, text)
         if word not in ("/event", "/events"):
             return False
         arg = text[len(word):].strip()

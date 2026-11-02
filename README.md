@@ -17,6 +17,10 @@ The public server is `forza-reimagined.playit.plus:56677`, the launcher's defaul
 launcher's **This PC** mode runs this server on the player's own machine; it comes with every
 release of the game's launcher (the game's repository has this one as its `server/` submodule).
 
+A car club has its own chat channel (Club: the members who are online, wherever they are), and
+`/club` in any chat channel lists them and where they are. A player in a club is placed in a
+Horizon World with a clubmate when one has room.
+
 In World chat, the world's host can type `/event random` to start a random race in
 Horizon World or Co-op Festival. The server picks once for the whole session from
 that mode's eligible events. Horizon World needs the game database configured;

@@ -212,12 +212,25 @@ friendships and open requests there are. Games up to v0.1.14 still see everyone 
 friend.
 
 Text chat (#92) is relayed, not stored: a message goes to the players online in the
-sender's session, Horizon World, or to one friend, and the server keeps only the last 200
-messages in memory (time, sender, channel, recipients, text) for moderation; they are gone
+sender's session, Horizon World, to one friend, or to the other members of the sender's car
+club who are online (the Club channel, #145: wherever they are, in any room or world, from
+the club in `clubs.json`; both sides need a proven XUID, as for all chat, and a game that
+asks for the club tag, so games before the Club channel neither show it nor get its
+messages), and the server keeps only the last 200 messages in memory (time, sender, channel,
+the club's tag for the Club channel, recipients, text) for moderation; they are gone
 when the server stops. Limits: 200 characters per message, 5 messages per 10 s per player
 (the sender is told to slow down), direct messages only between friends; a player's mutes
 (kept in `friends.json`) and blocks hide the other's messages. Games up to v0.1.14 have no
-chat. Moderation (operator endpoints, same rules as `/gift`):
+chat.
+
+Car clubs in the Horizon World (#145): Find Game > Horizon World searches are answered with
+the open worlds the fullest first; for a player in a club, a world with one of its online
+clubmates in it (the one with the most clubmates first) comes before that. Only worlds with
+room are offered, so a full world of clubmates changes nothing, and a player without a club,
+or without a clubmate in an open world, is placed as before. The chat commands `/club` (in any
+channel: the clubmates online and where they are, by gamertag) and `/club join [gamertag]`
+(puts that clubmate's world first for 10 minutes) are answered only to the player who types
+them. Moderation (operator endpoints, same rules as `/gift`):
 
 - `/admin/chat`: the last messages, and the mutes and bans with their seconds left;
 - `/admin/mute?who=<gamertag or XUID>&minutes=N`: the player's messages are refused (they
