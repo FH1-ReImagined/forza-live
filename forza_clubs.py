@@ -96,15 +96,21 @@ def membership(xuid):
     return (club, m["role"]) if club else (None, 0)
 
 
+def clan_fields(xuid):
+    """The club part of a player's UserData (clanId, clanTag, roleInClan); empty without a club."""
+    club, role = membership(xuid)
+    if not club:
+        return {}
+    return {"clanId": club["id"], "clanTag": club["tag"], "roleInClan": role}
+
+
 def user_data(xuid, gamertag=None):
     """The player's UserData with their club."""
     record = PLAYER(xuid) if PLAYER else {}
-    club, role = membership(xuid)
     u = {"qwXuid": xuid, "wzGamerTag": gamertag or record.get("gamertag", ""),
          "currentCareerLevel": record.get("careerLevel", 0),
          "currentXPTotal": record.get("profile", {}).get("onlineXP", 0)}
-    if club:
-        u.update(clanId=club["id"], clanTag=club["tag"], roleInClan=role)
+    u.update(clan_fields(xuid))
     return u
 
 

@@ -305,13 +305,18 @@ def user_logon2(xuid, body):
             notifications.send(xuid, ntype, params)
         market.gift_credits(xuid, 10000, "Have fun!")
         market.gift_stock_car(xuid, TEST_GIFT_CAR)
+    # The sign-in's userData is the game's own copy of the player: the party lobby's [TAG] and
+    # INVITE CLUB MEMBERS read the club from it, so it carries the club like GetUserData does
+    # (#566: without it the game knew the club only after the car club sign's GetUserData).
+    user_data = {"qwXuid": xuid, "wzGamerTag": login["wzGamerTag"],
+                 "currentCareerLevel": login["currentCareerLevel"],
+                 "currentBadgeId": login["currentBadgeId"],
+                 "currentPlayerTitleId": login["currentPlayerTitleId"],
+                 "currentXPTotal": record.get("profile", {}).get("onlineXP", 0)}
+    user_data.update(clubs.clan_fields(xuid))
     return x.reply(x.UserLogon2_Results, {"responseData": {
         "isProfileValid": True, "permissions": PERMISSIONS,
-        "userData": {"qwXuid": xuid, "wzGamerTag": login["wzGamerTag"],
-                     "currentCareerLevel": login["currentCareerLevel"],
-                     "currentBadgeId": login["currentBadgeId"],
-                     "currentPlayerTitleId": login["currentPlayerTitleId"],
-                     "currentXPTotal": record.get("profile", {}).get("onlineXP", 0)},
+        "userData": user_data,
         # The Message Center's first poll (RetrieveForUser) comes this long after the
         # sign-in; later ones after each answer's nextRetrieveSeconds.
         "notificationNonce": 1,

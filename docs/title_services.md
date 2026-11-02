@@ -134,7 +134,7 @@ Notifications, Transaction}`. What the game calls, in order:
 
 | When | Call | Our answer |
 | --- | --- | --- |
-| Sign-in (about 50 s after boot) | `User.Logon2(loginData)` | `responseData`: profile valid, a permission table allowing every feature (below), `userData` (XUID, gamertag, **currentXPTotal = the player's online XP**), timeouts |
+| Sign-in (about 50 s after boot) | `User.Logon2(loginData)` | `responseData`: profile valid, a permission table allowing every feature (below), `userData` (XUID, gamertag, **currentXPTotal = the player's online XP**, and the player's club: `clanId`, `clanTag`, `roleInClan`, [below](#car-clubs-and-the-club-garage-forza_clubspy)), timeouts |
 | | `OnlineProfile.UpdateAllTables`, `UpdateAll` | success; `UpdateAll`'s `playerRaceHistory` (level, XP, **onlineXP**, online races and wins) and `playerHistory` (credits) are kept per player |
 | | `DLCMetadata.GetStringTableInfo("EN")` | no table (`Id` -1, #79); with the empty answer the game also asked `Xls Content.DownloadContent(0, 0, 0x40000)` x2 and saved a nameless file to `marketplace:\` |
 | Party lobby | `Hopper.GetList(maxCategoryResults 2, maxHopperResults 32)`; Title Update 4: `GetListEx` (each hopper also has `requiredOfferId`, u64) | the playlists (below) |
@@ -648,6 +648,20 @@ RECEIVES REQUESTS, which a leader or co-leader accepts ("The membership request 
 have been accepted/rejected by another Leader or Co-Leader"), or is INVITE ONLY (the
 game then hides REQUEST TO JOIN CLUB). The server used to let a player into an open club
 at once; now it keeps the request and sends CLUB REQUEST to the leaders and co-leaders.
+
+Where the game learns the player's club (#566): its copy of the player's `userData` (`clanId`,
+`clanTag`, `roleInClan`) is filled by `Logon2` at sign-in and again by `Xls User.GetUserData`
+(`GetClanMembers` and `CarClub.GetClanDetails` follow it) whenever the car club sign is entered.
+Multiplayer's party lobby reads that copy and makes no club call of its own: with the club in it
+the lobby lists `[TST] gamertag` with the club shield and offers INVITE CLUB MEMBERS, without
+it a plain gamertag and no such entry. `Logon2` used to leave the club out of `userData`, so
+Multiplayer knew the club only after the car club sign's `GetUserData` had filled the copy in
+that session; `Logon2` now sends the club like `GetUserData` does (`forza_clubs.clan_fields`; both
+answers use the same `UserData` record). Tested with the TU4 game and a local server: a player
+in a club went from the main menu straight to Multiplayer and saw `[TST]` and INVITE CLUB
+MEMBERS with no `GetUserData` call; without the club in `Logon2` the same steps showed neither
+until the car club sign had been entered. A club the player joins or leaves while the game runs
+still reaches the game's copy through `GetUserData`, as before.
 
 Tested with two consoles (DriverA co-leader of HZN, DriverB in no club): A's CAR CLUB sign
 (X at the festival) showed INVITE MEMBER (co-leaders and leaders), which lists the
