@@ -595,9 +595,14 @@ def rival_reply(xuid, body, with_best):
 
 
 def get_best_scores(xuid, body):
+    """The caller's own best on the board (0 when they have none). The game asks this at the
+    start of a Rivals race and only submits a time that beats it (FH1 #569): answering the
+    board's record kept every slower time, and the player, off the board."""
     p, _ = x.decode(x.ScoreboardGetBestScores_Params, body)
-    entries, _ = STORE.ranked(p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"])
-    best = entries[0]["score"] if entries else 0.0
+    STORE.load()
+    mine = STORE.board(p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"]).get(
+        "%016X" % xuid)
+    best = mine["score"] if mine else 0.0
     log.info("title: GetBestScores %016X board %d type %d car %d class %d: %.3f", xuid,
              p["gameScoreboardId"], p["scoreType"], p["carId"], p["carClassId"], best)
     return x.reply(x.ScoreboardGetBestScores_Results, {"bestScore": {"score": best}})

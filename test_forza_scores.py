@@ -164,6 +164,24 @@ class BoardsTest(unittest.TestCase):
         self.assertEqual(self.rows(B_XUID, scores.SPEED_ZONE, 101)[0], [("DriverB", 38.0)])
         self.assertEqual(self.rows(B_XUID, scores.EVENT_TIME, 101)[0], [])
 
+    def best(self, xuid, kind, board):
+        body = x.encode(x.ScoreboardGetBestScores_Params, {
+            "scoreType": kind, "gameScoreboardId": board, "isServerTimeTrial": False,
+            "carId": AVENTADOR, "carClassId": 7, "carDriveTypeId": 1})
+        r = results(self.svc[("Scoreboard", "GetBestScores")](xuid, bytes(body)),
+                    x.ScoreboardGetBestScores_Results)
+        return round(r["bestScore"]["score"], 3)
+
+    def test_best_scores_is_the_callers_own(self):
+        # #569: the game submits a Rivals time only when it beats this answer, so the
+        # board's record here kept everyone slower off the board.
+        self.submit(B_XUID, scores.EVENT_TIME, 73, 66.266, ex=True)
+        self.assertEqual(self.best(A_XUID, scores.EVENT_TIME, 73), 0.0)
+        self.submit(A_XUID, scores.EVENT_TIME, 73, 70.5, ex=True)
+        self.assertEqual(self.best(A_XUID, scores.EVENT_TIME, 73), 70.5)
+        self.assertEqual(self.best(B_XUID, scores.EVENT_TIME, 73), 66.266)
+        self.assertEqual(self.best(C_XUID, scores.EVENT_TIME, 74), 0.0)
+
     def test_event_times_keep_the_fastest(self):
         self.submit(A_XUID, scores.EVENT_TIME, 199, 115.13, ex=True)
         self.assertFalse(self.submit(A_XUID, scores.EVENT_TIME, 199, 120.0, ex=True)["uploadFiles"])
