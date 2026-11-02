@@ -16,20 +16,28 @@ nor get messages.
 
 Channels: SESSION, the players in a session with the sender (the game reports the ids of
 the sessions it hosts or joined, Horizon World sessions excepted); WORLD, the players in the
-sender's Horizon World or Co-op Festival world (what matchmaking knows); DIRECT, one friend.
+sender's Horizon World or Co-op Festival world (what matchmaking knows); DIRECT, one friend;
+CLUB, every other member of the sender's car club (forza_clubs.py) who is online, wherever
+they are (rooms and worlds do not matter, as for DIRECT). A game says it knows the CLUB
+channel by asking for it (CLUB below) and is told the tag of the club it is in (CLUBTAG),
+so older games neither show the channel nor get club messages.
 A line starting with "/" may be a server command instead (Chat.commands: /event and /events
-in a Co-op Festival world, forza_campaign.py); commands are answered with NOTICEs.
+in a Co-op Festival world, forza_campaign.py; /club, forza_club_world.py); commands are
+answered with NOTICEs.
 
 Message CHAT (UDP kind 23), body op u8 then (big endian; text u16 length + UTF-8):
   client -> server
     1 SESSIONS count u8, session ids u64 (at most 4; sent when they change and every 10 s)
     2 SAY      channel u8, friend's XUID u64 (DIRECT; else 0), text
     3 MUTE     xuid u64, on u8
+    4 CLUB     (no more data; sent with SESSIONS every 10 s) asks for CLUBTAG
   server -> client
     16 MESSAGE channel u8, sender XUID u64, sender gamertag (u8 length + UTF-8), text
     17 NOTICE  text
     18 MUTED   count u16, XUIDs u64 (the players this one muted; after every change and on
                request: SESSIONS with count 0xFF asks)
+    19 CLUBTAG tag (u8 length + UTF-8; length 0: no club) of the player's car club, after CLUB
+               when it differs from the last one sent (so also the first time)
 """
 
 import collections
@@ -41,6 +49,7 @@ import unicodedata
 import time
 
 import forza_auth as auth
+import forza_clubs as clubs
 import forza_friends as friends
 import forza_limits as limits
 import forza_durable as durable
@@ -49,14 +58,16 @@ log = logging.getLogger("forza-live")
 
 KIND = 23
 FEATURE = 0x04
-SESSIONS, SAY, MUTE = 1, 2, 3
-R_MESSAGE, R_NOTICE, R_MUTED = 16, 17, 18
-SESSION, WORLD, DIRECT = 1, 2, 3
-CHANNELS = {SESSION: "session", WORLD: "world", DIRECT: "direct"}
+SESSIONS, SAY, MUTE, CLUB_SYNC = 1, 2, 3, 4
+R_MESSAGE, R_NOTICE, R_MUTED, R_CLUBTAG = 16, 17, 18, 19
+SESSION, WORLD, DIRECT, CLUB = 1, 2, 3, 4
+CHANNELS = {SESSION: "session", WORLD: "world", DIRECT: "direct", CLUB: "club"}
 
 MAX_CHARS = 200
 MAX_BYTES = 800
 NO_WORLD = "World chat is for a Horizon World or Co-op Festival world (Find Game): use Session chat here"
+NO_CLUB = "You are not in a car club: join or start one in Multiplayer > Car Clubs"
+NO_CLUBMATE = "No other member of your club is online with club chat"
 RATE = (0.5, 5)  # messages per second and burst, per player
 RING = 200
 MAX_SESSIONS = 4
@@ -217,6 +228,22 @@ class Chat:
             self.buckets = {k: v for k, v in self.buckets.items() if now - v[1] < 60}
         return not ok
 
+    @staticmethod
+    def club_of(xuid):
+        """(club id, tag) of the player's car club, or (0, "")."""
+        club, _ = clubs.membership(xuid)
+        return (club["id"], str(club["tag"])[:8]) if club else (0, "")
+
+    def send_club_tag(self, peer):
+        """CLUBTAG: the tag of the club the player is in (empty: none), when it differs
+        from the last one sent to this connection. The XUID must be proven, as for chat."""
+        tag = self.club_of(peer.xuid)[1] if getattr(peer, "friends_ok", False) else ""
+        if getattr(peer, "club_told", None) == tag:
+            return
+        peer.club_told = tag
+        raw = tag.encode()
+        self.server.send(peer.addr, KIND, bytes([R_CLUBTAG, len(raw)]) + raw)
+
     def chatters(self):
         return [p for p in self.server.peers.values()
                 if p.features & FEATURE and getattr(p, "friends_ok", False)]
@@ -232,6 +259,9 @@ class Chat:
                 return
             ids = [struct.unpack_from(">Q", body, 2 + 8 * i)[0] for i in range(min(count, MAX_SESSIONS))]
             peer.chat_sessions = {i for i in ids if i}
+        elif op == CLUB_SYNC:
+            peer.club_chat = True  # this game knows the CLUB channel
+            self.send_club_tag(peer)
         elif op == MUTE:
             if not getattr(peer, "friends_ok", False):
                 return
@@ -261,6 +291,13 @@ class Chat:
                 return "You can only message your friends"
             to = [p for p in others if p.xuid == target]
             return to or "%s is offline" % self.store.name(target)
+        if channel == CLUB:
+            club_id = self.club_of(peer.xuid)[0]
+            if not club_id:
+                return NO_CLUB
+            to = [p for p in others if getattr(p, "club_chat", False)
+                  and self.club_of(p.xuid)[0] == club_id]
+            return to or NO_CLUBMATE
         if channel == WORLD:
             mine = self.server.world_of_peer(peer.id)
             if mine is None:  # a custom game, another playlist, single player (#395)
@@ -307,8 +344,11 @@ class Chat:
         msg = struct.pack(">BBQB", R_MESSAGE, channel, peer.xuid, len(name)) + name + text16(text)
         for p in delivered:
             self.server.send(p.addr, KIND, msg)
-        self.ring.append({"time": int(time.time()), "from": peer.name,
-                          "xuid": "%016X" % peer.xuid, "channel": CHANNELS.get(channel),
-                          "to": [p.name for p in to], "text": text})
+        entry = {"time": int(time.time()), "from": peer.name,
+                 "xuid": "%016X" % peer.xuid, "channel": CHANNELS.get(channel),
+                 "to": [p.name for p in to], "text": text}
+        if channel == CLUB:
+            entry["club"] = self.club_of(peer.xuid)[1]
+        self.ring.append(entry)
         log.debug("chat #%d %r %s -> %d", peer.id, peer.name, CHANNELS.get(channel),
                   len(delivered))
