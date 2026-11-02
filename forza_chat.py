@@ -31,6 +31,13 @@ Message CHAT (UDP kind 23), body op u8 then (big endian; text u16 length + UTF-8
     2 SAY      channel u8, friend's XUID u64 (DIRECT; else 0), text
     3 MUTE     xuid u64, on u8
     4 CLUB     (no more data; sent with SESSIONS every 10 s) asks for CLUBTAG
+    5 CONTENT  text (u16 length + UTF-8): what this game has that changes which cars exist,
+               "dlc=729,732;mods=Car pack,Traffic unlocker" (offers of the installed DLC
+               packages, names of the loaded mods that change cars or the database; sent at
+               sign-in and every 30 s). The server compares it with the other players of each
+               of the sender's sessions and tells both sides what they do not share
+               (check_content): a car one game lacks is a plain placeholder in the other (#567,
+               the first step of mod sync, #152). Kept in memory only, not in any file.
   server -> client
     16 MESSAGE channel u8, sender XUID u64, sender gamertag (u8 length + UTF-8), text
     17 NOTICE  text
@@ -58,7 +65,7 @@ log = logging.getLogger("forza-live")
 
 KIND = 23
 FEATURE = 0x04
-SESSIONS, SAY, MUTE, CLUB_SYNC = 1, 2, 3, 4
+SESSIONS, SAY, MUTE, CLUB_SYNC, CONTENT = 1, 2, 3, 4, 5
 R_MESSAGE, R_NOTICE, R_MUTED, R_CLUBTAG = 16, 17, 18, 19
 SESSION, WORLD, DIRECT, CLUB = 1, 2, 3, 4
 CHANNELS = {SESSION: "session", WORLD: "world", DIRECT: "direct", CLUB: "club"}
@@ -72,6 +79,10 @@ RATE = (0.5, 5)  # messages per second and burst, per player
 RING = 200
 MAX_SESSIONS = 4
 MAX_MUTED = 200
+MAX_CONTENT_BYTES = 700     # the game's manifest is at most this long (kernel/content_manifest.h)
+MAX_CONTENT_ITEMS = 120
+SHOWN_ITEMS = 3             # content items named in one notice
+CONTENT_CHANGE_SECONDS = 20  # at most one change of a player's content in this time
 FILE = "moderation.json"
 
 
@@ -88,6 +99,48 @@ def clean(text):
     text = "".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c
                    for c in text if unicodedata.category(c) not in ("Mn", "Me"))
     return " ".join(text.split())[:MAX_CHARS]
+
+
+def parse_content(text):
+    """The game's content manifest, "dlc=729,732;mods=A,B": (frozenset of DLC offers, frozenset of
+    mod names), or None when it is not one."""
+    dlc, mods = set(), set()
+    seen = set()
+    for part in text.split(";"):
+        key, sep, value = part.partition("=")
+        if not sep or key not in ("dlc", "mods") or key in seen:
+            return None
+        seen.add(key)
+        items = [v for v in value.split(",") if v]
+        if len(items) > MAX_CONTENT_ITEMS:
+            return None
+        if key == "dlc":
+            for v in items:
+                if not v.isdigit() or len(v) > 9:
+                    return None
+                dlc.add(int(v))
+        else:
+            mods = {clean(v)[:32] for v in items if clean(v)}
+    if seen != {"dlc", "mods"}:
+        return None
+    return frozenset(dlc), frozenset(mods)
+
+
+def content_names(items):
+    """Content items as players read them: DLC offers as "DLC 3060", mods by name; the first
+    SHOWN_ITEMS, then how many more."""
+    names = sorted("DLC %d" % i for i in items if isinstance(i, int)) + \
+        sorted(i for i in items if isinstance(i, str))
+    text = ", ".join(names[:SHOWN_ITEMS])
+    if len(names) > SHOWN_ITEMS:
+        text += " and %d more" % (len(names) - SHOWN_ITEMS)
+    return text
+
+
+def tagged(content):
+    """The manifest as one set: offers as ints, mods as strings."""
+    dlc, mods = content
+    return set(dlc) | set(mods)
 
 
 class Chat:
@@ -259,9 +312,26 @@ class Chat:
                 return
             ids = [struct.unpack_from(">Q", body, 2 + 8 * i)[0] for i in range(min(count, MAX_SESSIONS))]
             peer.chat_sessions = {i for i in ids if i}
+            self.check_content(peer)
         elif op == CLUB_SYNC:
             peer.club_chat = True  # this game knows the CLUB channel
             self.send_club_tag(peer)
+        elif op == CONTENT:
+            (size,) = struct.unpack_from(">H", body, 1)
+            raw = body[3:3 + size]
+            if size > MAX_CONTENT_BYTES or len(raw) != size:
+                return
+            content = parse_content(raw.decode("utf-8", "replace"))
+            if content is None:
+                return
+            if content != getattr(peer, "content", None):
+                now = time.monotonic()
+                if getattr(peer, "content", None) is not None and \
+                        now - getattr(peer, "content_at", 0) < CONTENT_CHANGE_SECONDS:
+                    return  # a game does not change its content while it runs
+                peer.content = content
+                peer.content_at = now
+                self.check_content(peer)
         elif op == MUTE:
             if not getattr(peer, "friends_ok", False):
                 return
@@ -282,6 +352,44 @@ class Chat:
             if size > MAX_BYTES or len(raw) != size:
                 return
             self.say(peer, channel, target, clean(raw.decode("utf-8", "replace")))
+
+    def session_mates(self, peer):
+        """The other players of the sender's sessions (a Horizon World excepted: it is a room
+        of up to 8 that comes and goes) that sent their content."""
+        mine = set(getattr(peer, "chat_sessions", ()))
+        world = self.server.world_of_peer(peer.id)
+        if world is not None:
+            mine.discard(struct.unpack(">Q", world)[0])
+        if not mine:
+            return []
+        return [p for p in self.chatters()
+                if p.xuid != peer.xuid and p.room == peer.room and getattr(p, "content", None)
+                and mine & set(getattr(p, "chat_sessions", ()))]
+
+    def check_content(self, peer):
+        """Tells the players of the sender's sessions what they do not share, once each:
+        a car one game lacks (a car pack, an unlocker, a mod of the database) shows as a plain
+        placeholder in the game that lacks it (#567). The player lacking something hears who
+        has it, the player having it hears who lacks it."""
+        mine = getattr(peer, "content", None)
+        if mine is None or not peer.features & FEATURE:
+            return
+        for me, other in [(peer, p) for p in self.session_mates(peer)]:
+            # the pair is told once for this combination of content
+            for a, b in ((me, other), (other, me)):
+                missing = tagged(b.content) - tagged(a.content)   # b has it, a has not
+                told = a.__dict__.setdefault("content_told", {})
+                if not missing or told.get(b.xuid) == frozenset(map(str, missing)):
+                    continue
+                told[b.xuid] = frozenset(map(str, missing))
+                bname = limits.clean_gamertag(b.name, b.xuid)
+                if a.features & FEATURE:
+                    self.notice(a, "%s has %s that you do not: their car may look like a plain "
+                                   "placeholder to you" % (bname, content_names(missing)))
+                if b.features & FEATURE:
+                    aname = limits.clean_gamertag(a.name, a.xuid)
+                    self.notice(b, "%s does not have %s: your car may look like a plain "
+                                   "placeholder to them" % (aname, content_names(missing)))
 
     def recipients(self, peer, channel, target):
         """The players a message goes to, or a reason it goes nowhere."""
