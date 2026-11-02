@@ -23,7 +23,9 @@ set for those that carry something to collect):
     0x0507 club: new member    0x0508 club: promotion             0x8501 club: shared car
 
 DATA_DIR/notifications.json keeps them per recipient until the game clears them
-(Notifications.Clear) or they expire.
+(Notifications.Clear) or they expire. A broadcast (broadcast(), the operator's /broadcast) is
+stored once and shown to every player until it expires, players who sign in later included;
+each player's read and cleared broadcasts are kept apart (broadcastState).
 """
 
 import json
@@ -196,10 +198,41 @@ def send(recipient, ntype, params, keep_days=KEEP_DAYS, idempotency_key=None):
     return nid
 
 
+def broadcast(ntype, params, keep_days=KEEP_DAYS):
+    """Queues a notification for every player (stored once); returns its id."""
+    if ntype not in TYPES:
+        raise ValueError("unknown notification type %#x" % ntype)
+    x.encode(TYPES[ntype][1], params)  # fails now rather than in a reply
+    now = time.time()
+    with STORE.lock:
+        d = STORE.load()
+        live = [b for b in d.get("broadcasts", []) if b["expires"] > now]
+        nid = d["nextId"]
+        d["nextId"] += 1
+        live.append({"id": nid, "type": ntype, "params": params, "sent": now,
+                     "expires": now + keep_days * 86400})
+        d["broadcasts"] = live
+        ids = {b["id"] for b in live}
+        state = d.setdefault("broadcastState", {})
+        for who in list(state):  # forget expired broadcasts
+            seen = state[who]
+            for k in ("read", "cleared"):
+                seen[k] = [i for i in seen.get(k, []) if i in ids]
+            if not seen["read"] and not seen["cleared"]:
+                del state[who]
+        STORE.save()
+    log.info("title: broadcast %d: %s %s", nid, TYPES[ntype][0], params)
+    return nid
+
+
 def pending(recipient):
     now = time.time()
-    return [n for n in STORE.load()["byRecipient"].get(key(recipient), [])
-            if n["expires"] > now]
+    d = STORE.load()
+    mine = [n for n in d["byRecipient"].get(key(recipient), []) if n["expires"] > now]
+    seen = d.get("broadcastState", {}).get(key(recipient), {})
+    cleared, read = set(seen.get("cleared", [])), set(seen.get("read", []))
+    return mine + [dict(b, read=b["id"] in read) for b in d.get("broadcasts", [])
+                   if b["expires"] > now and b["id"] not in cleared]
 
 
 def retrieve(xuid, body):
@@ -227,7 +260,8 @@ def retrieve(xuid, body):
 def update(xuid, body, clear):
     p, _ = x.decode(x.NotificationsId_Params, body)
     with STORE.lock:
-        mine = STORE.load()["byRecipient"].get(key(xuid), [])
+        d = STORE.load()
+        mine = d["byRecipient"].get(key(xuid), [])
         for n in mine:
             if n["id"] == p["notificationId"]:
                 if clear:
@@ -236,6 +270,13 @@ def update(xuid, body, clear):
                     n["read"] = True
                 STORE.save()
                 break
+        else:
+            if any(b["id"] == p["notificationId"] for b in d.get("broadcasts", [])):
+                seen = d.setdefault("broadcastState", {}).setdefault(key(xuid), {})
+                ids = seen.setdefault("cleared" if clear else "read", [])
+                if p["notificationId"] not in ids:
+                    ids.append(p["notificationId"])
+                    STORE.save()
     log.info("title: notification %d %s by %016X", p["notificationId"],
              "cleared" if clear else "read", xuid)
     return x.reply()
