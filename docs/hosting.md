@@ -297,10 +297,13 @@ tunnel publishing the HTTP port. To try the page against a local server:
 
 ### Which results count (FH1 #517)
 
-The boards (the game's and this JSON) take results only from players signed in to this server:
-a title service call that carries its player's own key (`forza_live_lsp.caller_trusted`). A
-result from any other caller (a game before the friends key, or an XUID nobody signed in with
-here) is kept **unranked**: off the boards, for review, the player's best one per board. So is a
+The boards (the game's and this JSON, the rollups and the Rivals) take results only from players
+signed in to this server: a title service call that carries its player's own key
+(`forza_live_lsp.caller_trusted`: a signature, or until `--raw-key-cutoff` the friends key of a
+game before signed requests). A result from any other caller (a game before the friends key, or
+an XUID nobody signed in with here) is kept **unranked**: off the boards, for review, the
+player's best one per board. A caller that is refused, because its XUID has a key and the call
+does not carry it, leaves nothing at all. So is a
 Rivals time whose ghost fails the checks (`forza_ghost.py`: sizes, chunks, the version, one
 car and the row's, the event's track when the server has the game's database, a lap time and
 records that match the score; the game gets a failure and carries on, and the player's previous
@@ -311,8 +314,21 @@ Each new row carries the server's id (`--server-id NAME` or `FORZA_SERVER_ID`; w
 is made at the first start and kept in `server_id.txt`) and the build the game names on its calls
 (`X-Forza-Build: 0.2.0/tu4`, the launcher's version or `git-<commit>`, and the title update;
 empty for games before it), and whether the caller was verified. Rows from before the tags stay
-as they were. The 1000 Club counts medals from signed-in players only, and keeps the same tags
-on each player's row.
+as they were: they keep showing, and a rank-again or a new best of their player replaces them.
+The 1000 Club counts medals from signed-in players only, and keeps the same tags on each
+player's row.
+
+What the game is told about its own best (`GetBestScores`, the personal best of
+`GetRivalAndPersonalBest`: it submits a time only when it beats this, FH1 #569) follows from
+that. A signed-in player is told its ranked best, so a time that ranks is always submitted, also
+after earlier unranked ones. An unverified caller is told the better of its ranked row and its
+unranked one, to itself alone, so the game does not send its slower times again. Nothing
+unranked is ever in a board, a rival, a rollup, the public JSON or the answer to another player,
+and an unverified caller's `NotifyRival` tells nobody.
+
+For the public server: start it with `--server-id main` (or `FORZA_SERVER_ID=main`), before the
+first run with this code. The id is the name on rows written from then on. Nothing else needs a
+migration: the existing rows have no tags, show as before and are found with `build=none`.
 
 `/admin/scores` (operator only, like `/gift`) finds and moves rows by source:
 

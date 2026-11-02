@@ -19,9 +19,11 @@ results only from players signed in to this server: a call that carries its play
 the build the game names (X-Forza-Build). A result kept off the boards is "unranked", as osu!
 does: kept for review (STORE.unranked, the player's best one per board) but never shown. That
 is a result from an unverified caller, one whose ghost fails the checks (forza_ghost.py; the
-player's previous row stays), and rows an operator unranks. /admin/scores (admin()) lists,
-unranks, ranks again or deletes rows by server, build or player. Rows from before the tags
-stay as they are.
+player's previous row stays), and rows an operator unranks. An unverified
+caller is still told its own unranked best (own_best), to itself alone, so the game does not
+send its slower times again; a signed-in caller is told its ranked best only. /admin/scores
+(admin()) lists, unranks, ranks again or deletes rows by server, build or player. Rows from
+before the tags stay as they are.
 
 Everything is kept in DATA_DIR/scoreboards.json (the best score of each player on each
 scoreboard, the unranked ones, the 1000 Club medals), DATA_DIR/ghosts/<id>.bin and
@@ -352,6 +354,33 @@ def unrank(key, entry, reason, ghost=None):
     return True
 
 
+def own_best(xuid, kind, sbid, stt, trusted=None):
+    """The caller's own best on a board, 0.0 when there is none: what GetBestScores and the
+    personal best of GetRivalAndPersonalBest answer, and what the game compares a new time with
+    before it submits one (FH1 #569). It is the answer for this caller as the server will treat
+    its next submission:
+      - a signed-in caller's results go on the board, so its ranked row is its best. A result of
+        its own kept unranked (from before it signed in here, or a refused ghost) is not: it
+        would keep the game from submitting a time that ranks;
+      - an unverified caller's results are kept unranked (submit), so its best is the better of
+        its ranked row (from before the tags, or from when it was signed in) and its unranked
+        one: a slower time is not submitted again. Its unranked best is shown to it alone,
+        never in a board, a rival, a rollup or the public JSON."""
+    if trusted is None:
+        trusted = source()[0]
+    key = "%016X" % xuid
+    bigger = kind in BIGGER_IS_BETTER
+    best = 0.0
+    sources = [STORE.board(kind, sbid, stt)]
+    if not trusted:
+        sources.append(STORE.unranked.get(board_key(kind, sbid, stt), {}))
+    for rows in sources:
+        e = rows.get(key)
+        if e and (best == 0.0 or better(e["score"], best, bigger)):
+            best = e["score"]
+    return best
+
+
 def submit(xuid, gamertag, kind, data, extra=None):
     """Keeps a submission if it is the player's best; returns the reply (scoreId, and
     uploadFiles when we want its ghost). A submission from an unverified caller is kept
@@ -572,7 +601,8 @@ def challenge_completed(gamertag_of):
             (str(car) in cars or len(cars) < CLUB_MAX_CARS)
         if new:
             cars[str(car)] = done + [thumb]
-            entry.update(carId=car, submitted=int(time.time()), server=server_id(), build=build)
+            entry.update(carId=car, submitted=int(time.time()), server=server_id(), build=build,
+                         verified=True)  # only signed-in players' medals count
             STORE.save()
         log.info("title: 1000 Club %016X '%s': challenge %08X in car %d%s, %d medals", xuid,
                  entry["gamertag"], thumb, car, "" if new else " (already counted)",
@@ -781,7 +811,6 @@ def rival_reply(xuid, body, with_best):
         rival = next((e for e in entries if int(e["xuid"], 16) == p["rivalXuid"]), None)
     else:
         rival = pick_rival(entries, xuid, bigger)
-    mine = next((e for e in entries if e["xuid"] == "%016X" % xuid), None)
     log.info("title: rival for %016X on board %d (asked %016X): %s", xuid, p["gameScoreboardId"],
              p["rivalXuid"], "%s %.3f ghost %d" % (rival["gamertag"], rival["score"],
                                                   rival["ghostFileId"]) if rival else "none")
@@ -791,20 +820,19 @@ def rival_reply(xuid, body, with_best):
         result = {"rival": {"scoreData": row(rival, entries.index(rival) + 1),
                             "bounty": RIVAL_BOUNTY}}
     if with_best:
-        result["personalBest"] = {"score": mine["score"] if mine else 0.0}
+        result["personalBest"] = {"score": own_best(xuid, EVENT_TIME, p["gameScoreboardId"],
+                                                    p["isServerTimeTrial"])}
         return x.reply(x.ScoreboardGetRivalAndPersonalBest_Results, result)
     return x.reply(x.ScoreboardGetRival_Results, result)
 
 
 def get_best_scores(xuid, body):
-    """The caller's own best on the board (0 when they have none). The game asks this at the
-    start of a Rivals race and only submits a time that beats it (FH1 #569): answering the
-    board's record kept every slower time, and the player, off the board."""
+    """The caller's own best on the board (0 when they have none; own_best has what counts for
+    an unverified caller). The game asks this at the start of a Rivals race and only submits a
+    time that beats it (FH1 #569): answering the board's record kept every slower time, and the
+    player, off the board."""
     p, _ = x.decode(x.ScoreboardGetBestScores_Params, body)
-    STORE.load()
-    mine = STORE.board(p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"]).get(
-        "%016X" % xuid)
-    best = mine["score"] if mine else 0.0
+    best = own_best(xuid, p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"])
     log.info("title: GetBestScores %016X board %d type %d car %d class %d: %.3f", xuid,
              p["gameScoreboardId"], p["scoreType"], p["carId"], p["carClassId"], best)
     return x.reply(x.ScoreboardGetBestScores_Results, {"bestScore": {"score": best}})
@@ -823,6 +851,9 @@ def notify_rival(xuid, body):
     board = STORE.board(p["type"], p["gameScoreboardId"], p["isServerTimeTrial"])
     mine = board.get("%016X" % xuid)
     if not mine or not p["rivalXuid"] or p["rivalXuid"] == xuid:
+        return x.reply()
+    if not source()[0]:  # its time is unranked: the row here is an older one, not what it beat
+        log.info("title: unverified caller %016X: rival %016X not told", xuid, p["rivalXuid"])
         return x.reply()
     me = user_data(mine)
     trial = next((t for t in TIME_TRIALS if t[0] == p["gameScoreboardId"]), None) \

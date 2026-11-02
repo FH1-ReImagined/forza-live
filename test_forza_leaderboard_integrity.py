@@ -9,8 +9,10 @@ import json
 import os
 import struct
 import tempfile
+import time
 import unittest
 
+import forza_auth as auth
 import forza_leaderboards as lb
 import forza_limits as limits
 import forza_live_lsp as lsp
@@ -18,6 +20,7 @@ import forza_live_server as srv
 import forza_scores as scores
 import forza_xtsw as x
 import forza_xtsw_all as A
+import test_forza_auth as ta
 import test_forza_ghost as tg
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
@@ -54,6 +57,8 @@ class Base(unittest.TestCase):
         limits._cache[0] = limits._added[0] = 0
         self.addCleanup(setattr, scores, "RACE_TRACKS", scores.RACE_TRACKS)
         scores.RACE_TRACKS = {199: {156}}   # GoPro Millennia Masters: Clear Springs Circuit
+        self.addCleanup(setattr, scores, "EVENTS", scores.EVENTS)
+        scores.EVENTS = {}                  # no game database: every board is in a rollup
 
     def call(self, fn, xuid, params_type, params, trusted=True, build="0.2.0/tu4"):
         token = scores.set_source(trusted, build)
@@ -132,9 +137,17 @@ class TagsTest(Base):
         scores.configure(self.dir.name, "main-1")
         self.submit(A_XUID, 107.228)
         self.assertEqual(self.rows(), [("DriverB", 99.0, -1), ("DriverA", 107.228, -1)])
+        self.assertEqual(self.public(), [("event-199", "DriverB", 99.0), ("event-199", "DriverA", 107.228)])
+        self.assertEqual([e["xuid"] for e in scores.rollup_entries(3, -1)][:1], [old["xuid"]])
         self.assertNotIn("server", scores.STORE.boards[BOARD][old["xuid"]])
+        # the old row is its player's best for the game, signed in or not, and a better time ranks
+        for trusted in (True, False):
+            self.assertEqual(scores.own_best(B_XUID, 3, 199, False, trusted), 99.0)
         _, listed = self.admin("GET", "/admin/scores", build="none")
         self.assertEqual([r["xuid"] for r in listed["rows"]], [old["xuid"]])
+        self.submit(B_XUID, 98.5)
+        self.assertEqual(self.rows()[0], ("DriverB", 98.5, -1))
+        self.assertEqual(scores.STORE.boards[BOARD][old["xuid"]]["server"], "main-1")
 
 
 class SignedInOnlyTest(Base):
@@ -163,8 +176,8 @@ class SignedInOnlyTest(Base):
         self.assertEqual(scores.club_entries(), [])
         self.call(done, A_XUID, A.ForzaChallengeChallengeCompleted_Params, params)
         entry = scores.STORE.club["%016X" % A_XUID]
-        self.assertEqual((scores.club_medals(entry), entry["server"], entry["build"]),
-                         (1, "main-1", "0.2.0/tu4"))
+        self.assertEqual((scores.club_medals(entry), entry["server"], entry["build"], entry["verified"]),
+                         (1, "main-1", "0.2.0/tu4", True))
 
 
 class GhostTest(Base):
@@ -291,6 +304,176 @@ class AdminTest(Base):
         _, done = self.admin("POST", "/admin/scores/rank", player="%016X" % A_XUID)
         self.assertEqual(done["changed"], 0)  # the 107.228 under review is not better
         self.assertEqual(self.rows(), [("DriverB", 93.294, -1), ("DriverA", 100.0, -1)])
+
+
+class OwnBestTest(Base):
+    """Unranked rows and GetBestScores' own best (FH1 #569): the game submits a time only when it
+    beats the answer, so the answer is what the server will do with the caller's next result."""
+
+    def best(self, xuid, board=199, kind=scores.EVENT_TIME, **source):
+        reply = self.call(self.svc[("Scoreboard", "GetBestScores")], xuid,
+                          x.ScoreboardGetBestScores_Params,
+                          {"scoreType": kind, "gameScoreboardId": board, "isServerTimeTrial": False,
+                           "carId": AVENTADOR, "carClassId": 7, "carDriveTypeId": 1}, **source)
+        return round(x.decode(x.ScoreboardGetBestScores_Results, reply, 12)[0]["bestScore"]["score"], 3)
+
+    def rival(self, xuid, board=199, rival=0, with_best=True, **source):
+        fn = self.svc[("Scoreboard", "GetRivalAndPersonalBest" if with_best else "GetRival")]
+        reply = self.call(fn, xuid, x.ScoreboardGetRival_Params,
+                          {"gameScoreboardId": board, "isServerTimeTrial": False, "rivalXuid": rival},
+                          **source)
+        r = x.decode(x.ScoreboardGetRivalAndPersonalBest_Results if with_best
+                     else x.ScoreboardGetRival_Results, reply, 12)[0]
+        return (r["rival"]["scoreData"]["user"]["wzGamerTag"] if r["rival"]["scoreData"]["position"]
+                else None), round(r["personalBest"]["score"], 3) if with_best else None
+
+    def test_an_unverified_caller_is_answered_its_own_unranked_best(self):
+        self.submit(B_XUID, 120.0)
+        self.assertEqual(self.best(A_XUID, trusted=False), 0.0)
+        self.submit(A_XUID, 90.0, trusted=False)
+        # the game now submits only a better time; the server keeps only that one in any case
+        self.assertEqual(self.best(A_XUID, trusted=False), 90.0)
+        self.submit(A_XUID, 95.0, trusted=False)
+        self.assertEqual(self.best(A_XUID, trusted=False), 90.0)
+        self.submit(A_XUID, 80.0, trusted=False)
+        self.assertEqual(self.best(A_XUID, trusted=False), 80.0)
+        # nobody else is told: not the other unverified callers, not the signed-in ones, not the
+        # board, a rival or the rollup
+        self.assertEqual(self.best(C_XUID, trusted=False), 0.0)
+        self.assertEqual(self.best(C_XUID), 0.0)
+        self.assertEqual(self.best(B_XUID, trusted=False), 120.0)   # its own ranked row
+        self.assertEqual(self.rows(C_XUID), [("DriverB", 120.0, -1)])
+        self.assertEqual(self.rival(C_XUID), ("DriverB", 0.0))
+        self.assertEqual(self.rival(C_XUID, rival=A_XUID), (None, 0.0))
+        self.assertEqual([e["xuid"] for e in scores.rollup_entries(3, -1)], ["%016X" % B_XUID])
+
+    def test_a_signed_in_caller_is_answered_its_ranked_best_only(self):
+        # A result it sent before it signed in here is unranked; it must not keep the game from
+        # submitting the time that ranks now.
+        self.submit(A_XUID, 90.0, trusted=False)
+        self.assertEqual(self.best(A_XUID), 0.0)
+        self.assertEqual(self.rival(A_XUID), (None, 0.0))
+        self.assertTrue(self.submit(A_XUID, 100.0)["uploadFiles"])
+        self.assertEqual(self.best(A_XUID), 100.0)
+        self.assertEqual(self.rival(A_XUID, with_best=True), (None, 100.0))
+        self.assertEqual(self.rows(), [("DriverA", 100.0, -1)])
+        self.assertEqual(self.unranked(), {"%016X" % A_XUID: (90.0, "unverified")})
+        # the same player unverified again: its better result, wherever it is kept
+        self.assertEqual(self.best(A_XUID, trusted=False), 90.0)
+        self.submit(A_XUID, 110.0, trusted=False)
+        self.assertEqual(self.best(A_XUID, trusted=False), 90.0)
+        self.assertEqual(self.best(A_XUID), 100.0)
+
+    def test_an_unverified_caller_with_a_ranked_row_is_not_asked_for_slower_times(self):
+        self.submit(A_XUID, 100.0)
+        self.assertEqual(self.best(A_XUID, trusted=False), 100.0)
+        self.submit(A_XUID, 105.0, trusted=False)   # the game would not send it
+        self.assertEqual(self.unranked(), {"%016X" % A_XUID: (105.0, "unverified")})
+        self.assertEqual(self.best(A_XUID, trusted=False), 100.0)
+        self.submit(A_XUID, 95.0, trusted=False)
+        self.assertEqual(self.best(A_XUID, trusted=False), 95.0)
+        self.assertEqual(self.rows(), [("DriverA", 100.0, -1)])
+
+    def test_speeds_are_better_when_bigger(self):
+        self.submit(A_XUID, 40.0, board=230, kind=scores.SPEED_TRAP)
+        self.submit(A_XUID, 45.0, board=230, kind=scores.SPEED_TRAP, trusted=False)
+        self.assertEqual(self.best(A_XUID, 230, scores.SPEED_TRAP, trusted=False), 45.0)
+        self.assertEqual(self.best(A_XUID, 230, scores.SPEED_TRAP), 40.0)
+        self.submit(B_XUID, 30.0, board=230, kind=scores.SPEED_TRAP, trusted=False)
+        self.submit(B_XUID, 20.0, board=230, kind=scores.SPEED_TRAP, trusted=False)
+        self.assertEqual(self.best(B_XUID, 230, scores.SPEED_TRAP, trusted=False), 30.0)
+        self.assertEqual(self.best(B_XUID, 230, scores.SPEED_TRAP), 0.0)
+
+    def test_a_refused_ghost_leaves_the_previous_best_as_the_answer(self):
+        reply = self.submit(A_XUID, 115.13)
+        self.upload(A_XUID, reply["scoreId"], tg.ghost(tg.replay_init(lap=115.13),
+                                                      tg.replay_data(lap=115.13)))
+        reply = self.submit(A_XUID, 60.0)
+        self.assertEqual(self.best(A_XUID), 60.0)   # until its ghost is checked
+        with self.assertLogs("forza-live", "WARNING"):
+            self.upload(A_XUID, reply["scoreId"], tg.ghost(tg.replay_init(lap=115.13),
+                                                          tg.replay_data(lap=115.13)))
+        self.assertEqual(self.best(A_XUID), 115.13)
+        self.assertEqual(self.rival(A_XUID), (None, 115.13))
+        self.assertEqual(self.unranked()["%016X" % A_XUID][0], 60.0)
+
+    def test_an_unverified_caller_does_not_tell_a_rival(self):
+        import forza_notifications as notifications
+        notifications.configure(self.dir.name)
+        self.submit(B_XUID, 120.0)
+        self.submit(A_XUID, 125.0)   # a ranked row from before
+        notify = self.svc[("Scoreboard", "NotifyRival")]
+        params = {"gameScoreboardId": 199, "isServerTimeTrial": False, "rivalXuid": B_XUID,
+                  "type": scores.EVENT_TIME, "myScoreId": bytes(16)}
+        self.call(notify, A_XUID, x.ScoreboardNotifyRival_Params, params, trusted=False)
+        self.assertEqual(notifications.pending(B_XUID), [])
+        self.call(notify, A_XUID, x.ScoreboardNotifyRival_Params, params)
+        self.assertEqual(len(notifications.pending(B_XUID)), 1)
+
+
+class SignedScoresTest(ta.Base):
+    """The whole path with signed requests (FH1 #515): a game that signs, a game before it (the
+    friends key itself, until --raw-key-cutoff) and a caller nobody signed in with."""
+
+    def setUp(self):
+        super().setUp()
+        scores.configure(self.tmp.name, "main-1")
+        self.addCleanup(scores.configure, self.tmp.name, "")
+
+    def score(self, xuid, score, build="0.2.1/tu4", method="SubmitScoreEx", **kw):
+        def named(headers, body):
+            if build is not None:
+                headers["x-forza-build"] = build
+            return body
+        return self.call("Scoreboard", method, x.ScoreboardSubmitScoreEx_Params,
+                         {"type": 3, "data": {"base": score_data(199, score), "numCarsPassed": 0}},
+                         xuid=xuid, tamper=named, **kw)
+
+    def best(self, xuid, **kw):
+        reply = self.call("Scoreboard", "GetBestScores", x.ScoreboardGetBestScores_Params,
+                          {"scoreType": 3, "gameScoreboardId": 199, "isServerTimeTrial": False,
+                           "carId": AVENTADOR, "carClassId": 7, "carDriveTypeId": 1},
+                          xuid=xuid, **kw)
+        return round(x.decode(x.ScoreboardGetBestScores_Results, reply, 12)[0]["bestScore"]["score"], 3)
+
+    def test_a_signing_game_is_verified_and_ranks(self):
+        self.sign_in()
+        self.assertEqual(self.status(self.score(ta.XUID, 107.228)), (0, 0))
+        row = scores.STORE.boards[BOARD]["%016X" % ta.XUID]
+        self.assertEqual((row["server"], row["build"], row["verified"]), ("main-1", "0.2.1/tu4", True))
+        self.assertEqual(self.best(ta.XUID), 107.228)
+        self.assertEqual(scores.STORE.unranked, {})
+
+    def test_a_game_before_signing_ranks_until_the_cutoff(self):
+        self.hello(ta.KEY)
+        self.assertEqual(self.status(self.score(ta.XUID, 110.0, seed=None, raw=ta.KEY.hex(),
+                                                build=None)), (0, 0))
+        row = scores.STORE.boards[BOARD]["%016X" % ta.XUID]
+        self.assertEqual((row["build"], row["verified"]), ("", True))   # no X-Forza-Build yet
+        auth.RAW_KEY_CUTOFF = int(time.time()) - 1
+        with self.assertLogs("forza-live", "WARNING"):
+            self.assertEqual(self.status(self.score(ta.XUID, 100.0, seed=None, raw=ta.KEY.hex())),
+                             (2, 5))
+        self.assertEqual(scores.STORE.boards[BOARD]["%016X" % ta.XUID]["score"], 110.0)
+
+    def test_a_caller_nobody_signed_in_with_stays_unranked(self):
+        self.sign_in()
+        self.score(ta.XUID, 107.228)
+        # an XUID with no key on record: the call is accepted, its result kept off the boards
+        self.assertEqual(self.status(self.score(ta.OTHER, 90.0, seed=None)), (0, 0))
+        row = scores.STORE.unranked[BOARD]["%016X" % ta.OTHER]
+        self.assertEqual((row["unranked"], row["verified"], row["build"]), ("unverified", False, "0.2.1/tu4"))
+        self.assertEqual(list(scores.STORE.boards[BOARD]), ["%016X" % ta.XUID])
+        # it is answered its own best only; the signed-in player sees the board as before
+        self.assertEqual(self.best(ta.OTHER, seed=None), 90.0)
+        self.assertEqual(self.best(ta.THIRD, seed=None), 0.0)
+        self.assertEqual(self.best(ta.XUID), 107.228)
+        # someone else's signature, or none for an XUID with a key: refused, nothing kept
+        with self.assertLogs("forza-live", "WARNING"):
+            self.assertEqual(self.status(self.score(ta.XUID, 50.0, seed=None)), (2, 5))
+            self.assertEqual(self.status(self.score(ta.XUID, 50.0, seed=ta.SEED_B)), (2, 5))
+        self.assertEqual(round(scores.STORE.boards[BOARD]["%016X" % ta.XUID]["score"], 3), 107.228)
+        self.assertEqual(list(scores.STORE.unranked[BOARD]), ["%016X" % ta.OTHER])
 
 
 class CallerTest(unittest.TestCase):
