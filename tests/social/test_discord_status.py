@@ -80,6 +80,17 @@ class DiscordStatusTest(unittest.TestCase):
         self.assertIn("offline", ds.render(0, 0, online=False, now=100))
         self.assertIn("<t:100:R>", ds.render(0, 0, now=100))
 
+    def test_render_named(self):
+        self.assertIn("public server**", ds.render(0, 0, now=100))
+        self.assertIn("set by default in the launcher", ds.render(0, 0, now=100))
+        with mock.patch.object(ds, "SERVER_NAME", "US East"), \
+                mock.patch.object(ds, "PUBLIC_ADDRESS", "us.example.org:1819"):
+            text = ds.render(2, 1, now=100)
+            self.assertIn("ReImagined — US East**", text)
+            self.assertIn("`us.example.org:1819` (on the launcher's Servers page)", text)
+            self.assertNotIn("public server", text)
+            self.assertIn("US East offline", ds.render(0, 0, online=False, now=100))
+
     def test_due_on_change_and_heartbeat(self):
         ds._state.update(key=(2, 1, ()), sent=1000.0)
         self.assertFalse(ds.due((2, 1, ()), now=1100))
