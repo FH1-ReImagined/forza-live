@@ -13,6 +13,16 @@ them than the main server. It holds no database and no admin token, and serves n
 - A player binds a slot with a ticket the main server signed for this relay (RELAY_BIND; the
   relay answers RELAY_BOUND with the session, its peer id and the seconds the ticket has left).
   The slot is the player's address within the ticket's session.
+- An address is proven before the relay sends it anything but a challenge (as TURN's permission
+  checks): a bind from an address the slot does not have yet is answered with RELAY_CHALLENGE, a
+  cookie (16 bytes) only that address receives, and the game binds again with the ticket and the
+  cookie from that address. Without this, a ticket holder could forge its bind's source address
+  and aim its session's traffic at someone else. The cookie is an HMAC of the address, the slot
+  and the time (PROOF_WINDOW s windows) with a key of this process, so forged binds cost the relay
+  no state, and the challenge is smaller than the bind (no amplification). A proof lasts
+  PROOF_LIFE s; binds from the proven address in its last PROOF_RENEW s are challenged again,
+  so a playing game proves its address every minute or so, and the relay forwards nothing to a
+  slot whose proof ran out.
 - A slot's RELAY datagrams (the main server's own RELAY body: destination peer id, ports,
   payload) go, as FORWARD, only to another slot of the same session, within the ticket's rate
   (bytes a second, bursts of 4 s), and never to a private, loopback, link-local, multicast or
@@ -20,10 +30,16 @@ them than the main server. It holds no database and no admin token, and serves n
   address of that kind cannot bind either, unless --relay-allow-private (a test on one LAN).
 - A slot not used (bound or sent from) for SLOT_IDLE s, or whose ticket expired, is dropped.
 - RELAY_PING is answered with RELAY_PONG and the same bytes (at most 32), so games can measure
-  their ping to the relay.
+  their ping to the relay, and the main server checks that the relay answers at the address it
+  lists (relay_broker.py's probes).
+- The link (version 2) also carries what the relay can take: its slots and the bandwidth its
+  operator offers (--relay-bandwidth, Mbit/s; 0 when not given).
 """
 
 import asyncio
+import collections
+import hashlib
+import hmac
 import ipaddress
 import logging
 import os
@@ -45,15 +61,21 @@ RELAY_BIND = 28    # game -> relay: a ticket
 RELAY_BOUND = 29   # relay -> game: session u64, peer id u32, seconds left u32
 RELAY_PING = 30    # game -> relay: up to 32 bytes
 RELAY_PONG = 31    # relay -> game: the same bytes
+RELAY_CHALLENGE = 32  # relay -> game: a cookie to bind again with, from the same address
 ERROR_NOT_BOUND = 1  # a RELAY from an address with no slot: bind again
 ERROR_REFUSED = 6    # main server -> relay: this relay is not (any more) listed
 ERROR_TICKET = 7     # relay -> game: the ticket was refused (the message says why)
 
-LINK_VERSION = 1
+LINK_VERSION = 2   # 1: without the capacity (max slots, bandwidth)
 LINK_INTERVAL = 10.0  # seconds between RELAY_LINKs while linked
 LINK_RETRY = 5.0      # while not linked
 LINK_TIMEOUT = 30.0   # without a RELAY_LINKED: the link is down
 SLOT_IDLE = 60.0
+COOKIE_SIZE = 16
+PROOF_WINDOW = 30.0  # a cookie is good in its window and the next
+PROOF_LIFE = 120.0   # an address's proof
+PROOF_RENEW = 60.0   # binds in a proof's last minute are challenged (the game proves it again)
+PROOF_TAG = b"FORZA-RELAY-PROOF-V1\n"
 MAX_SLOTS = 4096
 MAX_PAYLOAD = 1500
 MAX_PING = 32
@@ -88,25 +110,39 @@ def take(buckets, key, limit, now, cost=1.0):
     return ok
 
 
-def link_body(relay_id, secret, wall, nonce, slots, sessions, nbytes):
+LINK_FIELDS = {1: ">Q16sIIQ", 2: ">Q16sIIQII"}
+
+Link = collections.namedtuple("Link", "relay_id wall nonce slots sessions bytes max_slots "
+                                      "bandwidth signed mac")
+
+
+def link_body(relay_id, secret, wall, nonce, slots, sessions, nbytes, max_slots=MAX_SLOTS,
+              bandwidth=0, version=LINK_VERSION):
+    """A RELAY_LINK's body; bandwidth in kB/s (0: not given)."""
     rid = relay_id.encode()
-    body = (struct.pack(">BB", LINK_VERSION, len(rid)) + rid +
-            struct.pack(">Q16sIIQ", int(wall), nonce, slots, sessions, nbytes))
+    fields = (int(wall), nonce, slots, sessions, nbytes)
+    if version >= 2:
+        fields += (max_slots, bandwidth)
+    body = (struct.pack(">BB", version, len(rid)) + rid +
+            struct.pack(LINK_FIELDS[version], *fields))
     return body + relays.mac(secret, relays.LINK_TAG, body)
 
 
 def parse_link(body):
-    """(relay id, wall, nonce, slots, sessions, bytes, signed part, mac) of a RELAY_LINK, or
+    """The Link of a RELAY_LINK body (version 1 has no max slots and bandwidth: 0), or
     ValueError."""
-    if len(body) < 2 or body[0] != LINK_VERSION:
+    if len(body) < 2 or body[0] not in LINK_FIELDS:
         raise ValueError("link version")
+    fields = LINK_FIELDS[body[0]]
     n = body[1]
-    end = 2 + n + struct.calcsize(">Q16sIIQ")
+    end = 2 + n + struct.calcsize(fields)
     if len(body) != end + relays.MAC_SIZE:
         raise ValueError("link size")
     relay_id = body[2:2 + n].decode("ascii")
-    wall, nonce, slots, sessions, nbytes = struct.unpack_from(">Q16sIIQ", body, 2 + n)
-    return relay_id, wall, nonce, slots, sessions, nbytes, body[:end], body[end:]
+    values = struct.unpack_from(fields, body, 2 + n)
+    if len(values) == 5:
+        values += (0, 0)
+    return Link(relay_id, *values, body[:end], body[end:])
 
 
 def linked_body(secret, nonce, wall):
@@ -116,7 +152,7 @@ def linked_body(secret, nonce, wall):
 
 class Slot:
     __slots__ = ("session", "peer_id", "xuid", "addr", "expiry", "rate", "budget", "budget_time",
-                 "used", "bytes")
+                 "used", "bytes", "proven_until")
 
     def __init__(self, ticket, addr, now):
         self.session, self.peer_id, self.xuid = ticket.session, ticket.peer_id, ticket.xuid
@@ -124,12 +160,15 @@ class Slot:
         self.budget, self.budget_time = 4.0 * ticket.rate, now
         self.used = now
         self.bytes = 0
+        self.proven_until = now + PROOF_LIFE  # made only from a proven bind
 
 
 class RelayNode(asyncio.DatagramProtocol):
     def __init__(self, relay_id, secret, main_addr, allow_private=False, clock=time.monotonic,
-                 wall=time.time, max_slots=MAX_SLOTS):
+                 wall=time.time, max_slots=MAX_SLOTS, bandwidth=0):
         self.relay_id, self.secret = relay_id, secret
+        self.bandwidth = bandwidth  # kB/s the operator offers, 0: not given
+        self.cookie_key = os.urandom(32)  # this process's: cookies do not outlive it
         self.main_addr = main_addr  # (ip, port), resolved
         self.allow_private = allow_private
         self.clock, self.wall = clock, wall
@@ -145,7 +184,7 @@ class RelayNode(asyncio.DatagramProtocol):
         self.next_link = 0.0
         self.counters = {"forwarded_packets": 0, "forwarded_bytes": 0, "refused_session": 0,
                          "refused_private": 0, "refused_tickets": 0, "over_rate": 0,
-                         "expired_slots": 0}
+                         "expired_slots": 0, "challenges": 0, "unproven": 0}
 
     # --- the socket ---
 
@@ -169,7 +208,7 @@ class RelayNode(asyncio.DatagramProtocol):
         now = self.clock()
         kind, body = data[4], data[5:]
         try:
-            if addr == self.main_addr:
+            if addr == self.main_addr and kind != RELAY_PING:  # its probes are pings too
                 self.on_main(kind, body)
                 return
             if not take(self.buckets, addr[0], PACKETS_PER_IP, now):
@@ -193,7 +232,8 @@ class RelayNode(asyncio.DatagramProtocol):
         sessions = len({s.session for s in self.slots.values()})
         self.send(self.main_addr, RELAY_LINK,
                   link_body(self.relay_id, self.secret, self.wall(), nonce, len(self.slots),
-                            sessions, self.counters["forwarded_bytes"]))
+                            sessions, self.counters["forwarded_bytes"], self.max_slots,
+                            self.bandwidth))
 
     def on_main(self, kind, body):
         if kind == RELAY_LINKED and len(body) == 24 + relays.MAC_SIZE:
@@ -232,17 +272,27 @@ class RelayNode(asyncio.DatagramProtocol):
             self.counters["refused_private"] += 1
             self.error(addr, ERROR_TICKET, "address refused", now)
             return
+        cookie = body[relays.TICKET_SIZE:]
         try:
-            ticket = relays.check_ticket(self.secret, self.relay_id, body, self.wall())
+            ticket = relays.check_ticket(self.secret, self.relay_id, body[:relays.TICKET_SIZE],
+                                         self.wall())
         except ValueError as e:
             self.counters["refused_tickets"] += 1
             self.error(addr, ERROR_TICKET, str(e), now)
             return
         key = (ticket.session, ticket.peer_id)
+        slot = self.slots.get(key)
+        proven = self.cookie_ok(cookie, addr, key, now)
+        if not proven and not (slot is not None and slot.addr == addr and
+                               now < slot.proven_until - PROOF_RENEW):
+            # not this slot's proven address (or its proof is due): only that address may
+            # answer this
+            self.counters["challenges"] += 1
+            self.send(addr, RELAY_CHALLENGE, self.cookie(addr, key, int(now // PROOF_WINDOW)))
+            return
         old = self.by_addr.get(addr)
         if old is not None and (old.session, old.peer_id) != key:
             self.remove(old)  # one address, one slot: the player moved to another session
-        slot = self.slots.get(key)
         if slot is None:
             if len(self.slots) >= self.max_slots:
                 self.error(addr, ERROR_TICKET, "relay full", now)
@@ -254,9 +304,25 @@ class RelayNode(asyncio.DatagramProtocol):
             if ticket.expiry >= slot.expiry:
                 slot.expiry, slot.rate, slot.xuid = ticket.expiry, ticket.rate, ticket.xuid
             slot.addr, slot.used = addr, now
+            if proven:
+                slot.proven_until = now + PROOF_LIFE
         self.by_addr[addr] = slot
         left = max(0, int(slot.expiry - self.wall()))
         self.send(addr, RELAY_BOUND, struct.pack(">QII", slot.session, slot.peer_id, left))
+
+    def cookie(self, addr, key, window):
+        ip, port = addr[0], addr[1]
+        data = struct.pack(">QQIH", window, key[0], key[1], port) + ip.encode()
+        return hmac.new(self.cookie_key, PROOF_TAG + data, hashlib.sha256).digest()[:COOKIE_SIZE]
+
+    def cookie_ok(self, cookie, addr, key, now):
+        """Whether `cookie` is one this relay sent `addr` for this slot in this window or the
+        last one."""
+        if len(cookie) != COOKIE_SIZE:
+            return False
+        window = int(now // PROOF_WINDOW)
+        return any(hmac.compare_digest(cookie, self.cookie(addr, key, w))
+                   for w in (window, window - 1))
 
     def remove(self, slot):
         self.slots.pop((slot.session, slot.peer_id), None)
@@ -289,6 +355,9 @@ class RelayNode(asyncio.DatagramProtocol):
             return
         if self.refused(dst.addr[0]):
             self.counters["refused_private"] += 1
+            return
+        if now >= dst.proven_until:
+            self.counters["unproven"] += 1  # its game stopped proving its address
             return
         if not self.spend(src, len(body), now):
             self.counters["over_rate"] += 1
@@ -351,7 +420,8 @@ async def run(args):
     loop = asyncio.get_running_loop()
     main_addr = await loop.run_in_executor(None, resolve, args.relay_of)
     transport, node = await loop.create_datagram_endpoint(
-        lambda: RelayNode(args.relay_id, secret, main_addr, args.relay_allow_private),
+        lambda: RelayNode(args.relay_id, secret, main_addr, args.relay_allow_private,
+                          bandwidth=int(max(0.0, args.relay_bandwidth or 0.0) * 125)),
         local_addr=(args.host, args.port))
     if args.relay_allow_private:
         log.warning("relay %s: --relay-allow-private: private addresses are relayed (a LAN "

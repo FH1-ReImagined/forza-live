@@ -5,6 +5,7 @@ end-to-end run with a real main server and a real relay is tests/network/test_re
 
 import io
 import json
+import logging
 import os
 import struct
 import tempfile
@@ -36,6 +37,16 @@ class Clock:
 
 def datagrams(transport, addr, kind):
     return [d[5:] for a, d in transport.sent if a == addr and d[4] == kind]
+
+
+def bind_at(node, transport, addr, ticket, prove=True):
+    """A game's bind: the ticket, and when the relay challenges the address, the ticket again
+    with the cookie (prove=False: a forged source address, which never sees the challenge)."""
+    before = len(datagrams(transport, addr, rn.RELAY_CHALLENGE))
+    node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + ticket, addr)
+    challenges = datagrams(transport, addr, rn.RELAY_CHALLENGE)
+    if prove and len(challenges) > before:
+        node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + ticket + challenges[-1], addr)
 
 
 class Tickets(unittest.TestCase):
@@ -83,8 +94,8 @@ class NodeBase(unittest.TestCase):
         return relays.make_ticket(secret, relay, session, 0x0009000000000000 + peer_id, peer_id,
                                   self.clock.unix + life, rate)
 
-    def bind(self, addr, ticket):
-        self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + ticket, addr)
+    def bind(self, addr, ticket, prove=True):
+        bind_at(self.node, self.transport, addr, ticket, prove)
 
     def relay(self, src, dst_id, payload=b"x" * 100):
         self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY]) +
@@ -220,6 +231,98 @@ class Node(NodeBase):
         self.assertEqual(datagrams(self.transport, BOB, rn.RELAY_PONG), [])
 
 
+VICTIM = ("198.51.100.77", 5353)  # an address someone forges binds from
+
+
+class BindProof(NodeBase):
+    """A slot's address is proven (the game echoes a cookie only that address got) before the
+    relay sends it anything but the challenge."""
+
+    def challenges(self, addr):
+        return datagrams(self.transport, addr, rn.RELAY_CHALLENGE)
+
+    def test_forged_bind_is_refused(self):
+        self.bind(ALICE, self.ticket(0xAA, 1))  # the ticket holder, bound for real
+        # its second ticket's bind, with the victim's address forged as the source
+        self.bind(VICTIM, self.ticket(0xAA, 2), prove=False)
+        self.assertNotIn((0xAA, 2), self.node.slots)
+        self.assertEqual(datagrams(self.transport, VICTIM, rn.RELAY_BOUND), [])
+        for _ in range(20):
+            self.relay(ALICE, 2, b"y" * 1000)
+        self.assertEqual(self.forwards(VICTIM), [])
+        # the victim got one challenge per bind, smaller than the bind
+        (challenge,) = [d for a, d in self.transport.sent if a == VICTIM]
+        self.assertEqual(challenge[4], rn.RELAY_CHALLENGE)
+        self.assertLess(len(challenge), 5 + relays.TICKET_SIZE)
+        self.assertEqual(self.node.counters["challenges"], 2)  # Alice's and the victim's
+
+    def test_a_forged_bind_does_not_move_a_proven_slot(self):
+        self.bind(ALICE, self.ticket(0xAA, 1))
+        self.bind(BOB, self.ticket(0xAA, 2))
+        self.bind(VICTIM, self.ticket(0xAA, 2), prove=False)  # Bob's ticket, forged source
+        self.assertEqual(self.node.slots[(0xAA, 2)].addr, BOB)
+        self.relay(ALICE, 2)
+        self.assertEqual((len(self.forwards(BOB)), self.forwards(VICTIM)), (1, []))
+
+    def test_a_cookie_proves_only_its_own_address_and_slot(self):
+        ticket = self.ticket(0xAA, 2)
+        self.bind(ALICE, ticket, prove=False)
+        (cookie,) = self.challenges(ALICE)  # Alice's cookie, presented from another address
+        self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + ticket + cookie, VICTIM)
+        self.assertEqual(self.node.slots, {})
+        self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + self.ticket(0xAA, 3) +
+                                    cookie, ALICE)  # for another slot
+        self.assertEqual(self.node.slots, {})
+        self.clock.advance(2 * rn.PROOF_WINDOW)  # and too late
+        self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + ticket + cookie, ALICE)
+        self.assertEqual(self.node.slots, {})
+        self.assertEqual(datagrams(self.transport, ALICE, rn.RELAY_BOUND), [])
+
+    def test_real_bind_is_proven(self):
+        ticket = self.ticket(0xAA, 1)
+        self.bind(ALICE, ticket)
+        self.assertEqual(len(self.challenges(ALICE)), 1)
+        self.assertEqual(len(datagrams(self.transport, ALICE, rn.RELAY_BOUND)), 1)
+        self.assertEqual(self.node.slots[(0xAA, 1)].addr, ALICE)
+        # binds that keep the slot need no cookie while the proof is fresh
+        self.clock.advance(rn.PROOF_LIFE - rn.PROOF_RENEW - 1)
+        self.bind(ALICE, ticket, prove=False)
+        self.assertEqual(len(datagrams(self.transport, ALICE, rn.RELAY_BOUND)), 2)
+        self.assertEqual(len(self.challenges(ALICE)), 1)
+        # in its last minute the proof is asked again, and a game answering it keeps the slot
+        self.clock.advance(2)
+        self.bind(ALICE, ticket)
+        self.assertEqual(len(self.challenges(ALICE)), 2)
+        self.assertEqual(len(datagrams(self.transport, ALICE, rn.RELAY_BOUND)), 3)
+        self.assertGreater(self.node.slots[(0xAA, 1)].proven_until,
+                           self.clock.mono + rn.PROOF_LIFE - 1)
+        # NAT rebinding: the new address proves itself too
+        moved = ("203.0.113.10", 40999)
+        self.bind(moved, ticket)
+        self.assertEqual(self.node.slots[(0xAA, 1)].addr, moved)
+
+    def test_a_slot_that_stops_proving_gets_nothing(self):
+        self.bind(ALICE, self.ticket(0xAA, 1))
+        self.bind(BOB, self.ticket(0xAA, 2))
+        for _ in range(int(rn.PROOF_LIFE / 10) + 1):  # Bob keeps his slot without the cookie
+            self.clock.advance(10)
+            self.bind(BOB, self.ticket(0xAA, 2), prove=False)
+            self.bind(ALICE, self.ticket(0xAA, 1))
+        self.relay(ALICE, 2)
+        self.assertEqual(self.forwards(BOB), [])
+        self.assertEqual(self.node.counters["unproven"], 1)
+        self.relay(BOB, 1)  # Alice proves hers: she still gets his
+        self.assertEqual(len(self.forwards(ALICE)), 1)
+
+    def test_old_link_version_still_parses(self):
+        body = rn.link_body("eu-1", SECRET, 5, b"n" * 16, 3, 2, 99, version=1)
+        got = rn.parse_link(body)
+        self.assertEqual((got.relay_id, got.slots, got.sessions, got.bytes, got.max_slots,
+                          got.bandwidth), ("eu-1", 3, 2, 99, 0, 0))
+        got = rn.parse_link(rn.link_body("eu-1", SECRET, 5, b"n" * 16, 3, 2, 99, 100, 1250))
+        self.assertEqual((got.max_slots, got.bandwidth), (100, 1250))
+
+
 def peer(n, addr, features=rb.FEATURE_RELAYS):
     p = srv.Peer(n, addr, n, 0x0009000000000000 + n, "Driver%d" % n, "#TU4", (0, 0))
     p.features = features
@@ -253,6 +356,10 @@ class Linked(unittest.TestCase):
         self.relay_tx = FakeTransport()
         self.node.connection_made(self.relay_tx)
         self.main_up = True
+        self.relay_answers = True  # its port answers the main server's probes
+        self.probes_sent = []
+        self.broker.random = lambda: 0.0  # relays on probation take every pair they may
+        self.addCleanup(relays.set_listed, None)
 
     def carry(self):
         """Delivers what the relay sent the main server, and the main server's answers."""
@@ -261,13 +368,16 @@ class Linked(unittest.TestCase):
                 self.server.datagram_received(data, RELAY_ADDR)
         self.relay_tx.sent = [(a, d) for a, d in self.relay_tx.sent if a != MAIN]
         for addr, data in self.main_tx.sent:
-            if addr == RELAY_ADDR:
+            if addr == RELAY_ADDR and data[4] == rn.RELAY_PING:
+                self.probes_sent.append(data[5:])
+            if addr == RELAY_ADDR and (self.relay_answers or data[4] != rn.RELAY_PING):
                 self.node.datagram_received(data, MAIN)
         self.main_tx.sent = [(a, d) for a, d in self.main_tx.sent if a != RELAY_ADDR]
 
     def link(self):
         self.node.tick()
         self.carry()
+        self.carry()  # the echo of a probe the link started
 
     def players(self, *peers):
         for p in peers:
@@ -354,7 +464,7 @@ class Link(Linked):
         self.link()
         old_ticket = relays.make_ticket(self.node.secret, "eu-1", 0xAA, 1, 1,
                                         self.clock.unix + 600, 50000)
-        self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + old_ticket, ALICE)
+        bind_at(self.node, self.relay_tx, ALICE, old_ticket)
         self.assertEqual(len(self.node.slots), 1)
         with redirect_stdout(io.StringIO()):
             self.assertEqual(relays.main(["--data-dir", self.dir, "remove", "eu-1"]), 0)
@@ -418,8 +528,8 @@ class Offers(Linked):
     def test_end_to_end_through_the_relay(self):
         self.relay_through_main(self.a, self.b, 9)
         ta, tb = self.offers(ALICE)[0][2], self.offers(BOB)[0][2]
-        self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + ta, ALICE)
-        self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY_BIND]) + tb, BOB)
+        bind_at(self.node, self.relay_tx, ALICE, ta)
+        bind_at(self.node, self.relay_tx, BOB, tb)
         self.node.datagram_received(rn.MAGIC + bytes([rn.RELAY]) + struct.pack(">IHH", 2, 1, 1) +
                                     b"race", ALICE)
         (fwd,) = datagrams(self.relay_tx, BOB, rn.FORWARD)
@@ -481,6 +591,12 @@ class Offers(Linked):
         self.link()
         for _, data in tx.sent:
             self.server.datagram_received(data, ("192.0.2.60", 21300))
+        tx.sent.clear()
+        for addr, data in self.main_tx.sent:  # its probe, and its echo
+            if addr == ("192.0.2.60", 21300):
+                us.datagram_received(data, MAIN)
+        for _, data in tx.sent:
+            self.server.datagram_received(data, ("192.0.2.60", 21300))
         self.assertEqual(self.broker.up_relays(), ["eu-1", "us-1"])
         version = self.broker.version
 
@@ -494,6 +610,148 @@ class Offers(Linked):
         self.assertEqual(self.broker.choose(self.a, self.b), "us-1")
         pings(self.b, 200, rb.NO_ANSWER)  # Bob cannot reach us-1 at all
         self.assertEqual(self.broker.choose(self.a, self.b), "eu-1")
+
+
+class Probes(Linked):
+    """The main server probes its relays: a probe failing again and again drops a relay out,
+    passing brings it back, and a new relay starts on probation."""
+
+    def setUp(self):
+        super().setUp()
+        quiet = logging.NullHandler()  # the probes' warnings
+        logging.getLogger("forza-live").addHandler(quiet)
+        self.addCleanup(logging.getLogger("forza-live").removeHandler, quiet)
+        relays.configure(self.dir)
+        self.addCleanup(relays.configure, "forza_live_data")
+        with open(os.path.join(self.dir, server_list.KEY_FILE), "w") as f:
+            f.write(bytes([7] * 32).hex() + "\n")
+
+    def run_for(self, seconds, step=5):
+        for _ in range(int(seconds / step)):
+            self.clock.advance(step)
+            self.node.tick()
+            self.carry()
+            self.broker.tick()
+            self.carry()
+            self.carry()
+
+    def published(self):
+        doc = json.loads(relays.handle("GET")[2])
+        return [r["id"] for r in relays.check_document(doc, bytes.fromhex(doc["key"]))]
+
+    def state(self):
+        (r,) = self.server.status()["relays"]
+        return r
+
+    def test_a_new_relay_is_listed_once_its_probe_passes(self):
+        self.assertEqual(self.published(), [])  # before its link: not probed, not published
+        self.link()
+        r = self.state()
+        self.assertEqual((r["up"], r["linked"], r["listed"], r["probation"], r["probe_fails"]),
+                         (True, True, True, True, 0))
+        self.assertIsNotNone(r["probe_ms"])
+        self.assertEqual(self.published(), ["eu-1"])
+
+    def test_a_linked_relay_that_does_not_echo_is_not_listed(self):
+        self.relay_answers = False  # its link works, its listed port does not
+        self.link()
+        (nonce,) = self.probes_sent
+        # the echo must come from the address the players get
+        self.server.datagram_received(rn.MAGIC + bytes([rn.RELAY_PONG]) + nonce, CAROL)
+        self.run_for(30)
+        r = self.state()
+        self.assertEqual((r["linked"], r["listed"], r["up"]), (True, False, False))
+        self.assertGreaterEqual(r["probe_fails"], 1)
+        self.assertEqual(self.published(), [])
+
+    def test_probe_failures_delist_and_recovery(self):
+        self.link()
+        a, b = peer(1, ALICE), peer(2, BOB)
+        self.players(a, b)
+        self.relay_through_main(a, b, 9)
+        self.assertEqual(self.offers(ALICE)[-1][0:2], RELAY_ADDR)
+        self.relay_answers = False
+        self.run_for(rb.PROBE_EVERY + 2 * rb.PROBE_RETRY - 10)  # two probes failed
+        self.assertTrue(self.state()["listed"])
+        self.assertEqual(self.state()["probe_fails"], 2)
+        self.run_for(rb.PROBE_RETRY)  # the third
+        r = self.state()
+        self.assertEqual((r["listed"], r["up"], r["linked"], r["probe_fails"]),
+                         (False, False, True, 3))
+        self.assertEqual(self.published(), [])
+        self.assertEqual(self.offers(ALICE)[-1], ("0.0.0.0", 0, b"", []))  # back to the main
+        with open(os.path.join(self.dir, rb.HEALTH_FILE)) as f:
+            self.assertFalse(json.load(f)["relays"]["eu-1"]["listed"])
+        # it answers again: listed after RETURN_PASSES passes, on probation again
+        self.relay_answers = True
+        self.run_for(rb.PROBE_RETRY)
+        self.assertFalse(self.state()["listed"])
+        self.run_for(rb.PROBE_RETRY)
+        r = self.state()
+        self.assertEqual((r["listed"], r["up"], r["probation"]), (True, True, True))
+        self.assertEqual(self.published(), ["eu-1"])
+
+    def test_a_link_down_fails_the_probes(self):
+        self.link()
+        self.main_up = False
+        self.run_for(rb.PROBE_EVERY + 2 * rb.PROBE_RETRY + 10)
+        self.assertFalse(self.state()["listed"])
+        self.main_up = True
+        self.run_for(2 * rb.PROBE_RETRY + 10)
+        self.assertTrue(self.state()["listed"])
+
+    def test_probation(self):
+        self.link()
+        pairs = [(peer(10 + 2 * i, ("203.0.113.%d" % (100 + 2 * i), 1)),
+                  peer(11 + 2 * i, ("203.0.113.%d" % (101 + 2 * i), 1))) for i in range(8)]
+        for a, b in pairs:
+            self.players(a, b)
+        self.broker.random = lambda: 0.5  # most pairs: not on a relay on probation
+        self.assertIsNone(self.broker.choose(*pairs[0]))
+        self.broker.random = lambda: 0.05  # its share
+        self.assertEqual(self.broker.choose(*pairs[0]), "eu-1")
+        for a, b in pairs[:rb.PROBATION_SESSIONS]:
+            self.broker.assign(a, b)
+        self.assertEqual(self.state()["sessions"], rb.PROBATION_SESSIONS)
+        self.assertIsNone(self.broker.choose(*pairs[-1]))  # at most PROBATION_SESSIONS
+        self.assertEqual(self.state()["sessions_relayed"], rb.PROBATION_SESSIONS)
+        # after its probation every pair may get it
+        self.run_for(rb.PROBATION_TIME)
+        self.broker.random = lambda: 0.99
+        self.assertFalse(self.state()["probation"])
+        self.assertEqual(self.broker.choose(*pairs[-1]), "eu-1")
+
+    def test_a_full_relay_gets_no_new_pairs(self):
+        self.node.bandwidth = 100  # kB/s: two players at the tests' 50000 B/s cap
+        self.clock.advance(rn.LINK_INTERVAL)
+        self.link()
+        self.assertEqual(self.state()["capacity"], 2)
+        a, b, c, d = (peer(n, ("203.0.113.%d" % n, 1)) for n in (1, 2, 3, 4))
+        self.players(a, b, c, d)
+        self.broker.assign(a, b)
+        self.assertIsNone(self.broker.choose(c, d))
+
+    def test_health_survives_a_restart(self):
+        self.link()
+        self.run_for(rb.PROBATION_TIME + 5)
+        self.assertFalse(self.state()["probation"])
+        fresh = rb.RelayBroker(self.server, clock=lambda: self.clock.mono,
+                               wall=lambda: self.clock.unix)
+        fresh.configure(self.dir)
+        self.assertTrue(fresh.listed("eu-1"))
+        self.assertFalse(fresh.on_probation("eu-1"))
+        self.assertEqual(self.published(), ["eu-1"])
+
+    def test_status_for_the_discord_message(self):
+        from forza_live.social import discord_status as ds
+        self.link()
+        states = ds.relay_states(self.server.status())
+        self.assertEqual(states, [("Europe", True, 0, 0)])
+        text = ds.render(2, 0, now=100, relays=states)
+        self.assertIn("**Relays**: 🟢 Europe: 0 sessions (0 relayed)", text)
+        self.assertIn("🔴 Europe: down", ds.render(2, 0, now=100,
+                                                   relays=[("Europe", False, 0, 3)]))
+        self.assertNotIn("192.0.2.50", text)
 
 
 class SignedList(unittest.TestCase):

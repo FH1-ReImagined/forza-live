@@ -46,6 +46,7 @@ class Game:
         self.probes = []
         self.got = []  # (from, sender id, payload) of FORWARDs
         self.bound = False
+        self.challenges = 0
 
     def hello(self, main):
         name = b"Driver%d" % self.n
@@ -67,6 +68,9 @@ class Game:
                 self.got.append((addr, struct.unpack_from(">I", body)[0], body[20:]))
             elif kind == rn.RELAY_BOUND:
                 self.bound = True
+            elif kind == rn.RELAY_CHALLENGE and self.offer:  # prove the address: bind again
+                self.challenges += 1
+                self.sock.sendto(MAGIC + bytes([rn.RELAY_BIND]) + self.offer[1] + body, addr)
             elif kind == rn.RELAY_INFO and body[0] == rb.OP_PROBE:
                 self.probes.append(body)
             elif kind == rn.RELAY_INFO and body[0] == rb.OP_OFFER:
@@ -119,7 +123,8 @@ class RelayProcesses(unittest.TestCase):
 
     def start_main(self):
         self.main = self.spawn(["--host", "127.0.0.1", "--port", str(self.main_port), "--http-port",
-                                str(self.http), "--data-dir", self.data, "--relay-after", "1"])
+                                str(self.http), "--data-dir", self.data, "--relay-after", "1",
+                                "--relay-probation", "0"])
 
     def status(self):
         try:
@@ -161,6 +166,8 @@ class RelayProcesses(unittest.TestCase):
         for g in self.games:
             g.sock.sendto(MAGIC + bytes([rn.RELAY_BIND]) + g.offer[1], relay)
         self.assertTrue(self.wait(lambda: a.bound and b.bound, 5))
+        self.assertEqual((a.challenges, b.challenges), (1, 1))  # each proved its address
+        self.assertEqual(self.status()["relays"][0]["listed"], True)  # its probe passed
         a.got.clear()
         b.got.clear()
         self.assertTrue(self.wait(lambda: any(src == relay for src, _, _ in b.got) and

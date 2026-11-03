@@ -266,8 +266,38 @@ Nothing changes until you list a relay. Then:
   `--rate-limit`). The relay forwards only with a valid ticket, only between players of the same
   session, within the cap, and never to private, loopback, link-local or multicast addresses.
   Slots not used for 60 seconds expire.
-- A relay is up while its link was heard in the last 30 seconds. When it goes down, its players
-  go back to the main server's relay.
+- The relay sends a player nothing until the player proved its address: it answers a bind from
+  a new address with a challenge (a cookie only that address receives), and binds the slot when
+  the game sends the cookie back from there, as TURN servers check permissions. So a ticket
+  holder cannot forge its bind's source address and aim the session's traffic at someone else.
+  The proof is asked again every minute or so while the player plays.
+- A relay is up while its link was heard in the last 30 seconds and it passes the main server's
+  probes. When it goes down, its players go back to the main server's relay.
+
+The main server's own relay has no such proof: older games cannot answer a challenge, and
+someone forging a HELLO would simply pose as an older game. What limits it is the per-player rate
+cap (`--rate-limit`), at most 16 players per address, and a room in common. The volunteer relays
+are used only by games that answer the challenge.
+
+### Probes and probation
+
+Every 3 minutes (every minute while a relay fails or is not listed) the main server probes each
+relay: its link must be up, and it must echo a ping of a fresh nonce sent to the address the
+players get (the one in `relay_list.json`, so a port that is not open fails even with the link
+up). The status page's `relays` block shows each relay's `linked`, `listed`, `up`, `probe_ms`,
+`probe_fails`, `probation`, `sessions`, `sessions_relayed`, `players` and `capacity`; the Discord
+status message shows each relay's region, up or down, and the sessions it relays.
+
+- A new relay is used and published in `/relays.json` once its first probe passes.
+- A relay that fails 3 probes in a row drops out of `/relays.json` and gets no players (its
+  sessions go back to the main server's relay); it comes back after it passes 2 in a row. This
+  is kept in `relay_health.json` in the data folder across restarts.
+- For its first hour in the list (`--relay-probation`, in minutes; 0 for none) a relay is on
+  probation: it gets only a tenth of the pairs it would be picked for, and at most 4 sessions at
+  once.
+- The relay reports what it can take: its slots, and the upload its operator offers
+  (`--relay-bandwidth`, Mbit/s). The main server sends it no more players than that carries at
+  the per-player rate cap.
 
 ### Adding a relay
 
@@ -310,7 +340,9 @@ forza-relay --restart unless-stopped --network host -v /path/to/secret:/secret:r
 
 - Open (or forward) its UDP port; it needs no TCP port and opens nothing on the main server.
 - It needs no data folder and writes nothing. Its log names its link and, every 5 minutes, its
-  counters (slots, sessions, forwarded bytes, refused tickets).
+  counters (slots, sessions, forwarded bytes, refused tickets, challenges).
+- `--relay-bandwidth MBIT` tells the main server how much upload the relay may use (say `50`
+  for 50 Mbit/s); without it, only its slots limit it.
 - Its clock must be right within 2 minutes (tickets and links carry the time).
 
 ## Signed requests

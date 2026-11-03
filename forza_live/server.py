@@ -328,6 +328,9 @@ class ForzaLive(asyncio.DatagramProtocol):
             if kind == relay_node.RELAY_LINK:  # a volunteer relay's link (relay_broker.py)
                 self.relays.on_link(body, addr)
                 return
+            if kind == relay_node.RELAY_PONG:  # a relay answers this server's probe
+                self.relays.on_pong(body, addr)
+                return
             peer = self.by_addr.get(addr)
             if peer is None:
                 # Unknown sender (e.g. the server restarted): ask it to register again
@@ -1640,6 +1643,9 @@ async def main():
     parser.add_argument("--relay-after", type=float, default=relay_broker.OFFER_AFTER,
                         help="seconds two players relay through this server before they are "
                              "given a volunteer relay, when one is listed (default 8)")
+    parser.add_argument("--relay-probation", type=float, default=relay_broker.PROBATION_TIME / 60, metavar="MIN",
+                        help="minutes a newly listed volunteer relay is on probation (a small "
+                             "share of the pairs; default %(default)g, 0: none)")
     relay = parser.add_argument_group(
         "volunteer relay", "run as a relay of a main server instead (--relay-only): no database, "
                            "no title services, game traffic only")
@@ -1649,6 +1655,9 @@ async def main():
     relay.add_argument("--relay-id", metavar="ID", help="this relay's id in the main server's list")
     relay.add_argument("--relay-secret-file", metavar="FILE",
                        help="the secret the main server's operator made for this relay")
+    relay.add_argument("--relay-bandwidth", type=float, default=0.0, metavar="MBIT",
+                       help="the upload this relay offers, in Mbit/s: the main server gives it "
+                            "no more players than that carries (default: no limit but its slots)")
     relay.add_argument("--relay-allow-private", action="store_true",
                        help="also relay to private and loopback addresses (a test on one LAN)")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -1695,6 +1704,7 @@ async def main():
     server.chat.path = os.path.join(args.data_dir, chat.FILE)
     server.chat.load()
     server.relays.offer_after = args.relay_after
+    server.relays.probation_time = max(0.0, args.relay_probation) * 60
     server.relays.configure(args.data_dir)
     log.info("Forza Live listening on UDP %s:%d (epoch %04X)", args.host, args.port, server.epoch)
     if args.http_port:
