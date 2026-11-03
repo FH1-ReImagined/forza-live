@@ -57,6 +57,7 @@ from forza_live.content import design_feed
 from forza_live.content import designs
 from forza_live.social import friends
 from forza_live.core import limits
+from forza_live.core import server_list
 from forza_live.competition import leaderboards
 from forza_live.content import market
 from forza_live.social import notifications
@@ -223,6 +224,7 @@ def configure(args):
     design_feed.configure()
     shader_lists.configure(DATA_DIR)
     leaderboards.configure(DATA_DIR)
+    server_list.configure(DATA_DIR, scores.server_id)
 
 
 def dump(method, path, headers, body):
@@ -860,6 +862,8 @@ def handle(server, method, path, headers, body, peer):
         answer = coop_ledger.handle(server, method, path, headers, body, shader_lists.authenticate)
         if answer is not None:
             return answer
+    if url.path == "/servers.json":  # the signed list of servers (server_list.py, FH1 #587)
+        return server_list.handle(method)
     if url.path.startswith("/leaderboards"):  # public leaderboards as JSON (leaderboards.py)
         answer = leaderboards.handle(method, path)
         if answer is not None:

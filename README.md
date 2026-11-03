@@ -25,7 +25,7 @@ player's own machine, and **My own server** connects to one you host.
 |------|------|
 | `forza_live_server.py` | the entry point: `python3 forza_live_server.py --help` lists every option |
 | `forza_live/server.py` | the server: the UDP port, the HTTP port, the command line |
-| `forza_live/core/` | signed requests (`auth`, `ed25519`), abuse limits (`limits`), saves that survive a power cut (`durable`) |
+| `forza_live/core/` | signed requests (`auth`, `ed25519`), the signed list of servers (`server_list`), abuse limits (`limits`), saves that survive a power cut (`durable`) |
 | `forza_live/network/` | the title services' wire format (`xtsw`) and all its records (`xtsw_all`), the PROXY protocol behind a tunnel (`proxy`) |
 | `forza_live/title_services/` | Turn 10's title services on the HTTP port (`lsp`) and the playlists' round presets (`playground_rounds.xml`) |
 | `forza_live/social/` | friends, chat, car clubs, Message Center notifications, the Discord status message |
@@ -35,7 +35,7 @@ player's own machine, and **My own server** connects to one you host.
 | `tests/` | the unit tests, one folder per `forza_live/` folder (`tests/server/` for `server.py`); shared helpers in `tests/support.py` |
 | `docs/hosting.md` | the step-by-step guide to running a server |
 | `docs/configuration.md` | every option and environment variable, Docker, tunnels, limits |
-| `docs/operating.md` | running a public server: operator endpoints, moderation, score admin, backups |
+| `docs/operating.md` | running a public server: operator endpoints, moderation, score admin, the server list, backups |
 | `docs/website-data.md` | what the server publishes for a website |
 | `docs/title_services.md` | the title services as the game calls them (the protocol) |
 | `docs/server_events.md` | organizer-approved community events |
