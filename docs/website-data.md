@@ -194,3 +194,9 @@ itself is the `list` field, JSON as text: `{"issued", "expires", "servers": [...
 with `name`, `address`, `region`, `contact`, `verified`, and `id` when known; the server that
 publishes it is first, with `"main": true`. A website can show it as it is; the signature is
 for the launcher.
+
+`GET /relays.json` is the signed list of [volunteer relays](operating.md#volunteer-relays), in
+the same envelope and signed with the same key (format `forza-live-relays-1`, the signature over
+`FORZA-RELAYS-V1\n` and the list text): `{"issued", "expires", "relays": [...]}`, each relay with
+`id`, `name`, `address` and `region`. The status page's `relays` block says which are up and how
+many sessions and players each relays (no addresses).

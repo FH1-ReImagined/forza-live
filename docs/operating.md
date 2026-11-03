@@ -246,6 +246,73 @@ launchers accept lists signed with it only after a launcher release ships its pu
 To take a server off the list, remove its entry. A launcher that still has a server saved keeps
 it, and shows it as down while it does not answer.
 
+## Volunteer relays
+
+Players far from the main server lag when they cannot connect directly and their traffic goes
+through it. A volunteer relay is this same program, run with `--relay-only` on a machine in
+another region: it links out to the main server, holds no database and no admin token, and only
+forwards game traffic between players the main server sends to it. Players, friends and
+leaderboards stay on the main server.
+
+Nothing changes until you list a relay. Then:
+
+- Direct connections still come first. Two players get a relay only when they have relayed
+  through the main server for `--relay-after` seconds (8 by default, longer than a game's hole
+  punching), and only when both games support relays; older games keep the main server's relay.
+- The main server picks the relay with the lowest worse ping of the two (the games ping every
+  relay that is up when they sign in), and keeps the players of one session on one relay.
+- Each player gets a ticket the main server signs with that relay's secret: its session, its
+  XUID and id, the relay, an expiry (10 minutes, renewed while it plays) and a rate cap (the
+  `--rate-limit`). The relay forwards only with a valid ticket, only between players of the same
+  session, within the cap, and never to private, loopback, link-local or multicast addresses.
+  Slots not used for 60 seconds expire.
+- A relay is up while its link was heard in the last 30 seconds. When it goes down, its players
+  go back to the main server's relay.
+
+### Adding a relay
+
+Check the volunteer first (an operator agreement: a relay sees the players' IP addresses). Then,
+in the data folder of the main server:
+
+    python3 -m forza_live.core.relays --data-dir /path/to/data add eu-1 \
+        --address your.host:21200 --name "Example relay" --region Europe --contact owner@example.org
+
+or, in Docker, `docker exec forza-live python3 -m forza_live.core.relays --data-dir /data add ...`.
+
+- The id (`eu-1`) is 1 to 32 of `a-z`, `0-9` and `-`.
+- `--address` is where players reach the relay: `host:port`, its UDP port.
+- The command writes the entry to `relay_list.json` and a new secret to
+  `relay_secrets/eu-1.txt` (readable by the owner only). Send that file to the relay's operator
+  privately; it is their `--relay-secret-file`.
+
+The server reads the list again within a few seconds. `python3 -m forza_live.core.relays --data-dir
+/path/to/data list` shows the listed relays; the status page's `relays` block shows which are up.
+`GET /relays.json` publishes the list, signed with the [server list](#listing-community-servers)'s
+key.
+
+To revoke a relay, remove it:
+
+    python3 -m forza_live.core.relays --data-dir /path/to/data remove eu-1
+
+Its secret file is deleted, its link is refused from then on, and the relay drops every slot it
+holds. Running `add` again for a listed id gives it a new secret and revokes the old one.
+
+### Running a relay
+
+The relay's operator runs, with the secret file from the main server's operator:
+
+    python3 forza_live_server.py --relay-only --port 21200 \
+        --relay-of your.host:21200 --relay-id eu-1 --relay-secret-file /path/to/eu-1.txt
+
+or with Docker (the image's UDP port 21200; a relay opens no HTTP port): `docker run -d --name
+forza-relay --restart unless-stopped --network host -v /path/to/secret:/secret:ro forza-live
+--relay-only --relay-of your.host:21200 --relay-id eu-1 --relay-secret-file /secret/eu-1.txt`.
+
+- Open (or forward) its UDP port; it needs no TCP port and opens nothing on the main server.
+- It needs no data folder and writes nothing. Its log names its link and, every 5 minutes, its
+  counters (slots, sessions, forwarded bytes, refused tickets).
+- Its clock must be right within 2 minutes (tickets and links carry the time).
+
 ## Signed requests
 
 Players prove their XUID with a key pair, and the operator can let a new installation in or set a cutoff for old games; the options are in [configuration](configuration.md#signed-requests). Watch the `auth` block of the status page and the `auth: raw friends keys ... since start` log line before setting `--raw-key-cutoff`.

@@ -39,6 +39,8 @@ from forza_live.competition import events
 from forza_live.core import limits
 from forza_live.title_services import lsp
 from forza_live.network import proxy
+from forza_live.network import relay_broker
+from forza_live.network import relay_node
 from forza_live.competition import scores
 from forza_live.competition import stats
 from forza_live.world import campaign
@@ -73,6 +75,10 @@ FEATURE_CHAT = chat.FEATURE
 # lobby's host, the description that game gives it (#391, standby_view). Older games send
 # the key and description they found the lobby with.
 FEATURE_LOBBY = 0x10
+# FEATURE_RELAYS: the game pings the volunteer relays and takes offers to use one for the
+# players it cannot reach directly (RELAY_INFO, network/relay_broker.py, FH1 #516).
+FEATURE_RELAYS = relay_broker.FEATURE_RELAYS
+RELAY_INFO = relay_node.RELAY_INFO  # 27
 CHAT = chat.KIND  # 23
 WORLD_EVENT = 18  # server -> a Horizon World's host: end the free roam for an event
 CHALLENGE = challenge.KIND  # 19: head-to-head challenges in the world (challenge.py)
@@ -275,6 +281,8 @@ class ForzaLive(asyncio.DatagramProtocol):
         lsp.client_features = self.features_of
         self.challenges = challenge.Challenges(self.challenge_send, self.world_of_peer,
                                                lambda pid: getattr(self.peers.get(pid), "name", None))
+        # Volunteer relays (FH1 #516): off until the operator lists one (core/relays.py)
+        self.relays = relay_broker.RelayBroker(self, rate=lambda: RATE_LIMIT)
 
     @staticmethod
     def limit_key(addr):
@@ -291,6 +299,10 @@ class ForzaLive(asyncio.DatagramProtocol):
     def error(self, addr, code, message):
         text = message.encode()
         self.send(addr, ERROR, struct.pack(">BH", code, len(text)) + text)
+
+    def take_error(self, addr):
+        """Whether an error reply to addr is within ERRORS_PER_IP (its source may be forged)."""
+        return take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP)
 
     def datagram_received(self, data, addr):
         if self.proxy_udp and limits.is_trusted_proxy(addr[0]):
@@ -312,6 +324,9 @@ class ForzaLive(asyncio.DatagramProtocol):
         try:
             if kind == HELLO:
                 self.on_hello(body, addr)
+                return
+            if kind == relay_node.RELAY_LINK:  # a volunteer relay's link (relay_broker.py)
+                self.relays.on_link(body, addr)
                 return
             peer = self.by_addr.get(addr)
             if peer is None:
@@ -349,6 +364,8 @@ class ForzaLive(asyncio.DatagramProtocol):
                 self.chat.on_message(peer, body)
             elif kind == events.KIND:
                 self.events.on_message(peer, body)
+            elif kind == RELAY_INFO and body:
+                self.relays.on_info(peer, body)
         except Exception as e:  # a malformed datagram must never end the server
             log.debug("bad packet from %s: %r", addr, e)
 
@@ -583,6 +600,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         welcome += auth.welcome(self.friends.store, peer)  # last: signed requests (auth.py)
         self.send(addr, WELCOME, welcome)
         self.events.hello(peer)
+        self.relays.hello(peer)
 
     def forward_header(self, src):
         """Who a forwarded datagram is from, with the addresses other players punch to. A
@@ -630,6 +648,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         src.relayed_bytes += len(body) - 8
         self.relayed_packets += 1
         self.send(dst.addr, FORWARD, self.forward_header(src) + body[4:])
+        self.relays.note_relayed(src, dst)  # a pair that cannot connect directly (FH1 #516)
 
     def on_presence(self, peer, body):
         """State u32, XSESSION_INFO, status (u8 length + UTF-8), then optional bytes the
@@ -1294,6 +1313,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                 del self.gone[next(iter(self.gone))]  # the oldest
         self.challenges.drop(peer.id)
         self.peers.pop(peer.id, None)
+        self.relays.drop(peer)
         self.restored.discard(peer.id)
         self.state_dirty = True
         if self.by_addr.get(peer.addr) is peer:
@@ -1317,6 +1337,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         for sid in [sid for sid in self.lobby_tails if sid not in listed]:
             del self.lobby_tails[sid]
         self.expire_proxy_flows(now)
+        self.relays.tick()
         for buckets in (self.packet_buckets, self.hello_buckets, self.error_buckets):
             if len(buckets) > 5000:  # forgotten addresses (forged sources)
                 for ip in [ip for ip, (_, last) in buckets.items() if now - last > 60]:
@@ -1371,7 +1392,8 @@ class ForzaLive(asyncio.DatagramProtocol):
                 "relayed_packets": self.relayed_packets,
                 "dropped_packets": self.dropped_packets, "rooms": rooms, "worlds": worlds,
                 **self.challenges.status(), **self.friends.status(), **auth.status(),
-                "chat": {"with_chat": len(self.chat.chatters()), "kept": len(self.chat.ring)}}
+                "chat": {"with_chat": len(self.chat.chatters()), "kept": len(self.chat.ring)},
+                **(self.relays.status() if self.relays.entries else {})}
 
 
 # How long a kept-alive connection may sit idle between requests. The game opens one
@@ -1615,6 +1637,20 @@ async def main():
                         help="log and drop every game invite (#90; env FORZA_INVITES=0). "
                              "Without it invites are delivered only between games that ask "
                              "before joining (FEATURE_INVITE_PICK), at most 4 per inviter in 30 s")
+    parser.add_argument("--relay-after", type=float, default=relay_broker.OFFER_AFTER,
+                        help="seconds two players relay through this server before they are "
+                             "given a volunteer relay, when one is listed (default 8)")
+    relay = parser.add_argument_group(
+        "volunteer relay", "run as a relay of a main server instead (--relay-only): no database, "
+                           "no title services, game traffic only")
+    relay.add_argument("--relay-only", action="store_true",
+                       help="be a volunteer relay of the main server --relay-of")
+    relay.add_argument("--relay-of", metavar="HOST:PORT", help="the main server's UDP address")
+    relay.add_argument("--relay-id", metavar="ID", help="this relay's id in the main server's list")
+    relay.add_argument("--relay-secret-file", metavar="FILE",
+                       help="the secret the main server's operator made for this relay")
+    relay.add_argument("--relay-allow-private", action="store_true",
+                       help="also relay to private and loopback addresses (a test on one LAN)")
     parser.add_argument("-v", "--verbose", action="store_true")
     lsp.add_arguments(parser)
     world.add_arguments(parser)
@@ -1623,6 +1659,9 @@ async def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s")
+    if args.relay_only:  # nothing below: no data folder, no HTTP port (relay_node.py)
+        await relay_node.run(args)
+        return
     limits.configure_proxies(os.environ.get("FORZA_TRUSTED_PROXIES", ""), *args.trusted_proxy)
     if limits.TRUSTED_PROXIES:
         log.info("trusted proxies: %s", ", ".join(map(str, limits.TRUSTED_PROXIES)))
@@ -1655,6 +1694,8 @@ async def main():
     server.events = events.Events(server, os.path.join(args.data_dir, "events.sqlite3"), args.event_unlocks)
     server.chat.path = os.path.join(args.data_dir, chat.FILE)
     server.chat.load()
+    server.relays.offer_after = args.relay_after
+    server.relays.configure(args.data_dir)
     log.info("Forza Live listening on UDP %s:%d (epoch %04X)", args.host, args.port, server.epoch)
     if args.http_port:
         server.http_port = args.http_port
