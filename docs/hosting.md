@@ -133,6 +133,14 @@ publishes are in the pages listed under [Going further](#going-further).
 - **The game says "The Horizon server is currently unavailable"** (no playlists, no
   leaderboards): TCP 21201 is not reachable from outside, or, behind a tunnel,
   `FORZA_PROXY_HTTP_PORT` is not set to the TCP tunnel's public port.
+- **On Windows or macOS with Docker Desktop**, players from other PCs show up in the log as
+  `127.0.0.1` and their games say the Horizon server is unavailable. Docker Desktop runs
+  containers in a hidden Linux VM, and `network_mode: host` puts the server on that VM's
+  network, not the PC's. Run the server without Docker instead: install Python 3 (3.12 or
+  newer, with "Add python.exe to PATH" ticked), then in this folder run
+  `py forza_live_server.py --host 0.0.0.0 --http-port 21201 --data-dir data`, and allow
+  Python on private networks when Windows Firewall asks. Settings from `.env` go on the
+  command line there (`py forza_live_server.py --help` lists them).
 - **Players sign in but cannot see or join each other**: UDP 21200 is not forwarded (check
   with `tools/server_probe.py` from outside). Players behind a tunnel go through the
   server's relay, which works but adds a little latency.
