@@ -34,6 +34,7 @@ COMMUNITY_POLL = 120     # seconds between checks of the listed community server
 COMMUNITY_TIMEOUT = 4
 MAX_COMMUNITY = 12       # servers checked and shown
 MAX_STATUS = 4 << 20     # bytes of a community server's /status read
+MAX_COMMUNITY_LOBBIES = 4  # lobby lines under each community server
 
 _state = {"key": None, "sent": 0.0, "polled": None, "community": []}
 
@@ -195,8 +196,9 @@ def fetch_status(address, timeout=COMMUNITY_TIMEOUT):
 
 
 def community_states(data_dir, now=None, fetch=fetch_status):
-    """[(name, address, up, players, worlds)] of the community servers in the server list (not
-    this one), checked at most every COMMUNITY_POLL seconds: in between, the last answers."""
+    """[(name, address, up, players, worlds, lobbies)] of the community servers in the server
+    list (not this one), checked at most every COMMUNITY_POLL seconds: in between, the last
+    answers. lobbies is lobbies() of its status as sorted ((name, ((players, slots), ...)), ...)."""
     now = now if now is not None else time.time()
     if _state["polled"] is not None and now - _state["polled"] < COMMUNITY_POLL:
         return _state["community"]
@@ -212,12 +214,15 @@ def community_states(data_dir, now=None, fetch=fetch_status):
             answers = list(pool.map(lambda e: fetch(e["address"]), entries))
         for entry, status in zip(entries, answers):
             players = worlds = 0
+            found = ()
             if status is not None:
                 try:
-                    players, worlds = summary(status)[:2]
+                    players, worlds, by_name = summary(status)
+                    found = tuple(sorted((k, tuple(v)) for k, v in by_name.items()))
                 except (AttributeError, KeyError, TypeError, ValueError):
                     pass  # another server's status must never stop this message
-            states.append((entry["name"], entry["address"], status is not None, players, worlds))
+            states.append((entry["name"], entry["address"], status is not None, players, worlds,
+                           found))
     _state["community"] = states
     return states
 
@@ -225,13 +230,17 @@ def community_states(data_dir, now=None, fetch=fetch_status):
 def render_community(states):
     lines = ["**Community servers** (their own friends lists and leaderboards; pick one on the "
              "launcher's Servers page):"]
-    for name, address, up, players, worlds in states:
+    for name, address, up, players, worlds, found in states:
         if not up:
             lines.append(f"• 🔴 **{name}**: offline — `{address}`")
             continue
         who = "1 player" if players == 1 else f"{players} players"
         open_worlds = "1 Horizon World" if worlds == 1 else f"{worlds} Horizon Worlds"
         lines.append(f"• 🟢 **{name}**: {who} · {open_worlds} — `{address}`")
+        lobby_lines = render_lobbies({k: list(v) for k, v in found})
+        lines += ["  ↳ " + line[2:] for line in lobby_lines[:MAX_COMMUNITY_LOBBIES]]
+        if len(lobby_lines) > MAX_COMMUNITY_LOBBIES:
+            lines.append(f"  ↳ +{len(lobby_lines) - MAX_COMMUNITY_LOBBIES} more kinds of lobby")
     return lines
 
 
