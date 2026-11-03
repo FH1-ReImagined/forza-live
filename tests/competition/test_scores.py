@@ -176,11 +176,13 @@ class BoardsTest(unittest.TestCase):
         # #569: the game submits a Rivals time only when it beats this answer, so the
         # board's record here kept everyone slower off the board.
         self.submit(B_XUID, scores.EVENT_TIME, 73, 66.266, ex=True)
-        self.assertEqual(self.best(A_XUID, scores.EVENT_TIME, 73), 0.0)
+        # FH1 #591: no time of its own is the game's FLT_MAX: with 0 it never submitted one
+        self.assertEqual(self.best(A_XUID, scores.EVENT_TIME, 73), scores.FLT_MAX)
         self.submit(A_XUID, scores.EVENT_TIME, 73, 70.5, ex=True)
         self.assertEqual(self.best(A_XUID, scores.EVENT_TIME, 73), 70.5)
         self.assertEqual(self.best(B_XUID, scores.EVENT_TIME, 73), 66.266)
-        self.assertEqual(self.best(C_XUID, scores.EVENT_TIME, 74), 0.0)
+        self.assertEqual(self.best(C_XUID, scores.EVENT_TIME, 74), scores.FLT_MAX)
+        self.assertEqual(self.best(C_XUID, scores.SPEED_TRAP, 230), 0.0)   # a speed: bigger wins
 
     def test_event_times_keep_the_fastest(self):
         self.submit(A_XUID, scores.EVENT_TIME, 199, 115.13, ex=True)

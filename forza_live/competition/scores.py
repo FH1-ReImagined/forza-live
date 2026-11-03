@@ -21,7 +21,8 @@ does: kept for review (STORE.unranked, the player's best one per board) but neve
 is a result from an unverified caller, one whose ghost fails the checks (ghost.py; the
 player's previous row stays), and rows an operator unranks. An unverified
 caller is still told its own unranked best (own_best), to itself alone, so the game does not
-send its slower times again; a signed-in caller is told its ranked best only. /admin/scores
+send its slower times again, and races it in Rivals when nobody else is on the board; a
+signed-in caller is told its ranked best only. /admin/scores
 (admin()) lists, unranks, ranks again or deletes rows by server, build or player. Rows from
 before the tags stay as they are.
 
@@ -51,6 +52,7 @@ log = logging.getLogger("forza-live")
 DATA_DIR = "forza_live_data"
 GHOST_MAX = ghostfile.GHOST_MAX  # the game's download buffer (DownloadFile maxSize)
 RIVAL_BOUNTY = 1000          # credits for beating a rival, shown as BOUNTY BONUS
+FLT_MAX = 3.4028234663852886e38  # the game's "no time yet" (no_best)
 
 # Score types: SubmitScore's `type`, GetRows' `type`, GetBestScores' scoreType, NotifyRival's
 # `type`. A board is a (type, gameScoreboardId, isServerTimeTrial): the ids overlap, e.g. the
@@ -354,31 +356,46 @@ def unrank(key, entry, reason, ghost=None):
     return True
 
 
-def own_best(xuid, kind, sbid, stt, trusted=None):
-    """The caller's own best on a board, 0.0 when there is none: what GetBestScores and the
-    personal best of GetRivalAndPersonalBest answer, and what the game compares a new time with
-    before it submits one (FH1 #569). It is the answer for this caller as the server will treat
+def own_entry(xuid, kind, sbid, stt, trusted=None):
+    """The caller's own best row on a board (None when it has none), as the server will treat
     its next submission:
       - a signed-in caller's results go on the board, so its ranked row is its best. A result of
         its own kept unranked (from before it signed in here, or a refused ghost) is not: it
         would keep the game from submitting a time that ranks;
       - an unverified caller's results are kept unranked (submit), so its best is the better of
         its ranked row (from before the tags, or from when it was signed in) and its unranked
-        one: a slower time is not submitted again. Its unranked best is shown to it alone,
-        never in a board, a rival, a rollup or the public JSON."""
+        one: a slower time is not submitted again. Its unranked best is shown to it alone (its
+        best, its own Rivals target), never in a board, another player's rival, a rollup or the
+        public JSON."""
     if trusted is None:
         trusted = source()[0]
     key = "%016X" % xuid
     bigger = kind in BIGGER_IS_BETTER
-    best = 0.0
-    sources = [STORE.board(kind, sbid, stt)]
+    rows = [STORE.board(kind, sbid, stt).get(key)]
     if not trusted:
-        sources.append(STORE.unranked.get(board_key(kind, sbid, stt), {}))
-    for rows in sources:
-        e = rows.get(key)
-        if e and (best == 0.0 or better(e["score"], best, bigger)):
-            best = e["score"]
+        rows.append(STORE.unranked.get(board_key(kind, sbid, stt), {}).get(key))
+    best = None
+    for e in rows:
+        if e and (best is None or better(e["score"], best["score"], bigger)):
+            best = e
     return best
+
+
+def no_best(kind):
+    """What the game takes as "no best yet" on a board: 0 for a speed, FLT_MAX for a time. The
+    game keeps FLT_MAX as a time's best until GetBestScores answers, keeps the smaller of the
+    two, and submits a lap only when it is below that (base 0x828967AC, 0x82897A70):
+    answering 0 for a player without a time kept every lap of theirs, and every first time on
+    a board, from being submitted (FH1 #591)."""
+    return 0.0 if kind in BIGGER_IS_BETTER else FLT_MAX
+
+
+def own_best(xuid, kind, sbid, stt, trusted=None):
+    """The caller's own best score on a board (own_entry), or no_best(kind) when it has none:
+    what GetBestScores and the personal best of GetRivalAndPersonalBest answer, and what the
+    game compares a new time with before it submits one (FH1 #569)."""
+    e = own_entry(xuid, kind, sbid, stt, trusted)
+    return e["score"] if e else no_best(kind)
 
 
 def submit(xuid, gamertag, kind, data, extra=None):
@@ -789,52 +806,68 @@ def get_rollup_rows(xuid, body):
                    {"rows": rows, "userRow": user_row, "available": len(entries)})
 
 
-def pick_rival(entries, xuid, bigger):
-    """The rival for a player: the score just better than theirs; without a score of
-    their own, the slowest other player (an easy first rival)."""
-    key = "%016X" % xuid
-    others = [e for e in entries if e["xuid"] != key]
+def pick_rival(entries, mine, bigger):
+    """The rival for a player whose own best is `mine` (an entry or None): the score just better
+    than theirs; without a score of their own, the slowest other player (an easy first rival);
+    when theirs is the best on the board, the next one down. None when nobody else is on it."""
+    others = [e for e in entries if mine is None or e["xuid"] != mine["xuid"]]
     if not others:
         return None
-    mine = next((e for e in entries if e["xuid"] == key), None)
     if mine is None:
         return others[-1]
     ahead = [e for e in others if better(e["score"], mine["score"], bigger)]
     return ahead[-1] if ahead else others[0]
 
 
-def rival_reply(xuid, body, with_best):
+def rival_reply(xuid, body, with_best, gamertag_of=None):
+    """GetRival / GetRivalAndPersonalBest. The game needs a rival to start a Rivals event: with
+    the rival's XUID 0 (no row) X RIVALS ends in "There was an error communicating with the Turn
+    10 server" and nothing can be raced or recorded (FH1 #591). So the answer is always a row:
+      - another player's ranked score (the one asked for, else pick_rival);
+      - with nobody else on the board, the caller's own best (own_entry: for an unverified caller
+        possibly its unranked row, told to itself alone; never to anyone else), as Turn 10's
+        service answered the player at the top: the player races its own time and ghost;
+      - on a board with no score at all (nobody has finished the event yet), a row of the caller
+        with score 0, which the game takes as "no rival" (its bounty is 0): the event is raced
+        for a first time, which becomes the board's first row."""
     p, _ = x.decode(x.ScoreboardGetRival_Params, body)
+    sbid, stt = p["gameScoreboardId"], p["isServerTimeTrial"]
     # Rivals race events and the server's time trials: their boards are times.
-    entries, bigger = STORE.ranked(EVENT_TIME, p["gameScoreboardId"], p["isServerTimeTrial"])
-    if p["rivalXuid"]:
+    entries, bigger = STORE.ranked(EVENT_TIME, sbid, stt)
+    mine = own_entry(xuid, EVENT_TIME, sbid, stt)
+    rival = None
+    if p["rivalXuid"] and p["rivalXuid"] != xuid:
         rival = next((e for e in entries if int(e["xuid"], 16) == p["rivalXuid"]), None)
+    if rival is None:   # not asked for one, or the one asked for is not on the board (any more)
+        rival = pick_rival(entries, mine, bigger) or mine
+    if rival is not None:
+        position = entries.index(rival) + 1 if rival in entries else 0
+        what = "%s %.3f ghost %d%s" % (rival["gamertag"], rival["score"], rival["ghostFileId"],
+                                      " (own best)" if rival is mine else "")
+        result = {"rival": {"scoreData": row(rival, position), "bounty": RIVAL_BOUNTY}}
     else:
-        rival = pick_rival(entries, xuid, bigger)
-    log.info("title: rival for %016X on board %d (asked %016X): %s", xuid, p["gameScoreboardId"],
-             p["rivalXuid"], "%s %.3f ghost %d" % (rival["gamertag"], rival["score"],
-                                                  rival["ghostFileId"]) if rival else "none")
-    if rival is None:
-        result = {"rival": {"scoreData": NO_ROW, "bounty": 0}}
-    else:
-        result = {"rival": {"scoreData": row(rival, entries.index(rival) + 1),
-                            "bounty": RIVAL_BOUNTY}}
+        tag = limits.clean_gamertag(gamertag_of(xuid) if gamertag_of else "", xuid)
+        user = user_data({"xuid": "%016X" % xuid, "gamertag": tag})
+        what = "none (an empty board: no target)"
+        result = {"rival": {"scoreData": dict(NO_ROW, user=user), "bounty": 0}}
+    log.info("title: rival for %016X on board %d (asked %016X): %s", xuid, sbid, p["rivalXuid"],
+             what)
     if with_best:
-        result["personalBest"] = {"score": own_best(xuid, EVENT_TIME, p["gameScoreboardId"],
-                                                    p["isServerTimeTrial"])}
+        result["personalBest"] = {"score": own_best(xuid, EVENT_TIME, sbid, stt)}
         return x.reply(x.ScoreboardGetRivalAndPersonalBest_Results, result)
     return x.reply(x.ScoreboardGetRival_Results, result)
 
 
 def get_best_scores(xuid, body):
-    """The caller's own best on the board (0 when they have none; own_best has what counts for
-    an unverified caller). The game asks this at the start of a Rivals race and only submits a
+    """The caller's own best on the board (no_best when they have none; own_entry has what counts
+    for an unverified caller). The game asks this at the start of a Rivals race and only submits a
     time that beats it (FH1 #569): answering the board's record kept every slower time, and the
     player, off the board."""
     p, _ = x.decode(x.ScoreboardGetBestScores_Params, body)
     best = own_best(xuid, p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"])
-    log.info("title: GetBestScores %016X board %d type %d car %d class %d: %.3f", xuid,
-             p["gameScoreboardId"], p["scoreType"], p["carId"], p["carClassId"], best)
+    log.info("title: GetBestScores %016X board %d type %d car %d class %d: %s", xuid,
+             p["gameScoreboardId"], p["scoreType"], p["carId"], p["carClassId"],
+             "none" if best == no_best(p["scoreType"]) else "%.3f" % best)
     return x.reply(x.ScoreboardGetBestScores_Results, {"bestScore": {"score": best}})
 
 
@@ -1107,8 +1140,9 @@ def services(gamertag_of):
         ("Scoreboard", "DownloadFile"): download_file,
         ("Scoreboard", "GetRows"): get_rows,
         ("Scoreboard", "GetRollupRows"): get_rollup_rows,
-        ("Scoreboard", "GetRival"): lambda xuid, body: rival_reply(xuid, body, False),
-        ("Scoreboard", "GetRivalAndPersonalBest"): lambda xuid, body: rival_reply(xuid, body, True),
+        ("Scoreboard", "GetRival"): lambda xuid, body: rival_reply(xuid, body, False, gamertag_of),
+        ("Scoreboard", "GetRivalAndPersonalBest"):
+            lambda xuid, body: rival_reply(xuid, body, True, gamertag_of),
         ("Scoreboard", "GetBestScores"): get_best_scores,
         ("Scoreboard", "NotifyRival"): notify_rival,
         ("Scoreboard", "GetTimeTrials"): get_time_trials,

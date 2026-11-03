@@ -490,7 +490,7 @@ callers:
 | `SubmitScore(type, data)` / `SubmitScoreEx(type 3, {data, numCarsPassed})` | `82AB9570` / `82AB95E0` | the scoreboard manager `0x82897xxx` (race end), `0x828DF464` |
 | `UploadFile(scoreId, data)` | `82AB9650` | `0x82897918`, after a submission answered `uploadFiles` |
 | `DownloadFile(id, maxSize 256000)` | `82AB90D0` | `0x82897A1C` (a rival's ghost, by `ghostFileId`) |
-| `GetBestScores(scoreType, board, isServerTimeTrial, car, class, drive type)` | `82AB9140` | `0x828976FC`; seen at the start of a Rivals race; the answer is the caller's own best (a time is submitted only when it beats it): the ranked row, and for an unverified caller the better of that and its unranked one (hosting.md, "Which results count") |
+| `GetBestScores(scoreType, board, isServerTimeTrial, car, class, drive type)` | `82AB9140` | `0x828976FC`; seen at the start of a Rivals race; the answer is the caller's own best (a time is submitted only when it beats it): the ranked row, and for an unverified caller the better of that and its unranked one (hosting.md, "Which results count"); with none, FLT_MAX for a time (0 for a speed), below |
 | `GetRivalAndPersonalBest(board, isServerTimeTrial, rivalXuid)` | `82AB9228` | `sub_8290CD58` ("RivalData: Rival Net Task"): X RIVALS on an event's ticket |
 | `GetRival(board, isServerTimeTrial, rivalXuid)` | `82AB91B8` | `sub_827D09F0` |
 | `GetRows(type, view, board, isServerTimeTrial, isClubBoard, startAt, maxResults)` | `82AB9330` | the leaderboard screen's fetch `sub_82826E88` (50 rows from `startAt`), `0x828C7F1C` (view 5, 200 rows) |
@@ -514,13 +514,16 @@ callers that are not signed in here, and times whose ghost fails, are kept unran
 0 the top from `startAt`, 1 around the caller, others (friends are everyone here) like 0;
 `isClubBoard` keeps the caller's car club's members; `userRow` is the caller's row
 (position 0 when they have none). Rollups rank players by the event boards they lead. The
-rival is the one asked for, or (rival 0) the score just better than the caller's (without
-a score of their own, the slowest other player); the bounty is 1000 (the game showed 5,000
-Cr).
+rival is the one asked for, or (rival 0, or one not on the board) the score just better than
+the caller's (without a score of their own, the slowest other player); the bounty is 1000 (the
+game showed 5,000 Cr). With nobody else on the board the rival is the caller's own best (as
+Turn 10 answered the player at the top), and on a board with no time at all it is a row of the
+caller with score 0 (FH1 #591, below).
 
 Seen in the game (single player, a copy of a career save, event "GoPro Millennia
 Masters", board 199): X RIVALS on the event's ticket calls `GetRivalAndPersonalBest(199)`.
-With no rival the game says "There was an error communicating with the Turn 10 server";
+With no rival (a row with XUID 0) the game says "There was an error communicating with the
+Turn 10 server" and the event cannot be raced in Rivals;
 with a rival (another player's submitted score, 235 s) it shows YOUR RIVAL, the rival's
 gamertag, TARGET 03:55.000 and BOUNTY 5,000 Cr; A goes to car select, the Rivals race
 starts (`GetBestScores(3, 199, car, class)` first) with the target on the HUD. Retiring
@@ -536,6 +539,33 @@ compressed data), kept as ghost 2; then `WriteRaceStatsEx` (place 8 of 8) and
 `GetRivalAndPersonalBest(199)` for the results screen's offer "NEW RIVAL vs <rival>,
 TARGET, BOUNTY 5,000Cr: Do you want to race your Rival? NO THANKS / BRING IT". The rival
 of a Rivals race is the one fetched when it started (RESTART keeps it).
+
+**Empty boards and a player's own time (FH1 #591).** The server used to answer XUID 0 for a
+board without another player's time: on many events Rivals showed the error above, and no
+time could be set there. What the game does with the answer (base addresses): the Rival Net
+Task's success (`0x82909FC8`) copies the rival row to the Rivals state (`*0x832DF00C` +
+0x7F0, its XUID at +0x7F8) and the personal best to +0x8B8, and zeroes the bounty of a rival
+whose score is 0. The rival screens count a rival as loaded when its XUID is not 0
+(`0x8277AE20`) and show "no rival" when its score is 0 (`0x8277A8E8`, `SHOW_NO_RIVAL`);
+a personal best below FLT_MAX is shown as the gap to the target. So an empty board answers a
+row of the caller with score 0: seen in the game, YOUR RIVAL (the player), TARGET ---, BOUNTY
+0 Cr; START RIVALS; after a lap FINISH says "You have beaten your rival and will collect the
+bounty", FINISHED YOU WON. A board with only the caller's time answers its own row (TARGET =
+its best, its ghost, BOUNTY 1,000 Cr): "You beat <player>!", a better time, its ghost; the
+game sends `NotifyRival` with its own XUID, which tells nobody.
+
+The game submits a lap only when it beats its best on the board: the scoreboard manager sets
+the best (+0xC) to FLT_MAX at the start of a race, `GetBestScores` writes its answer (+8) over
+it when smaller (`0x828967AC`), and `0x82897A70` sends `SubmitScoreEx` only for a lap below it.
+FLT_MAX is the game's "no time yet"; the server answered 0 for a caller without a time (FH1
+#569), so no first time on a board was ever submitted (seen on the public server: career races
+and Rivals finished after `GetBestScores ...: 0.000`, and no `SubmitScoreEx`). It now answers
+FLT_MAX there (0 stays the answer for a speed, where bigger wins). Tested in the game (TU4, a
+local server, board 199): an empty board, a Rivals lap of 2:18.108 submitted with its ghost as
+the board's first row; Rivals again against that time and ghost, 2:01.558; a second game got
+2:01.558 as its rival, raced its ghost ("TARGET 02:01.558") and its slower 2:17.948 ("You have
+not beaten your rival but your best lap time will be recorded") was submitted, second on the
+board.
 
 **The ghost round trip and a won Rivals race** (one console, the uploaded ghost given to
 another player's score, 200 s): X RIVALS on the ticket showed "YOUR RIVAL ... TARGET
