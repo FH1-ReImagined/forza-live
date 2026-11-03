@@ -272,6 +272,10 @@ server is offline. The message id is kept in the data folder (`discord_status.js
 restart edits the same message. `FORZA_PUBLIC_ADDRESS` sets the address it shows. With
 Docker, keep the URL in an env file: `--env-file /path/discord.env`.
 
+The community servers in the [server list](operating.md#listing-community-servers) get a line
+each in the same message: up or offline, players and open Horizon Worlds, from their own
+`/status` (checked every 2 minutes), and their address.
+
 A community server can post its own message, for example in the project Discord's status channel
 with a webhook its staff gives you: set `FORZA_DISCORD_STATUS_NAME` to its name (`US East`, at
 most 48 characters) and `FORZA_PUBLIC_ADDRESS` to the address players type. The message then
