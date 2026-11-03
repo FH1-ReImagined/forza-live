@@ -98,8 +98,9 @@ class DiscordStatusTest(unittest.TestCase):
             states = ds.community_states(d, now=1000, fetch=fetch)
             self.assertEqual(sorted(asked), ["[2001:db8::1]", "odd.example.org",
                                              "us.example.org:1819"])
-            self.assertEqual(states[0], ("US East", "us.example.org:1819", True, 2, 1))
-            self.assertEqual(states[1], ("Down", "[2001:db8::1]", False, 0, 0))
+            self.assertEqual(states[0], ("US East", "us.example.org:1819", True, 2, 1,
+                                         (("Horizon World", ((2, 8),)),)))
+            self.assertEqual(states[1], ("Down", "[2001:db8::1]", False, 0, 0, ()))
             self.assertEqual(states[2][2], True)
             # between polls the last answers are used, without asking again
             self.assertEqual(ds.community_states(d, now=1000 + ds.COMMUNITY_POLL - 1,
@@ -110,6 +111,7 @@ class DiscordStatusTest(unittest.TestCase):
             self.assertIn("• 🟢 **US East**: 2 players · 1 Horizon World — `us.example.org:1819`",
                           text)
             self.assertIn("• 🔴 **Down**: offline — `[2001:db8::1]`", text)
+            self.assertIn("  ↳ **Horizon World**: 2 players — 2/8", text)
         self.assertNotIn("Community servers", ds.render(0, 0, now=100))
         self.assertEqual(ds.status_url("us.example.org:1819"), "http://us.example.org:1820/status")
         self.assertEqual(ds.status_url("main.example.org"), "http://main.example.org:21201/status")
