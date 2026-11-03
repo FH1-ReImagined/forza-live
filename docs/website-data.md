@@ -76,9 +76,12 @@ What the game is told about its own best (`GetBestScores`, the personal best of
 `GetRivalAndPersonalBest`: it submits a time only when it beats this, FH1 #569) follows from
 that. A signed-in player is told its ranked best, so a time that ranks is always submitted, also
 after earlier unranked ones. An unverified caller is told the better of its ranked row and its
-unranked one, to itself alone, so the game does not send its slower times again. Nothing
-unranked is ever in a board, a rival, a rollup, the public JSON or the answer to another player,
-and an unverified caller's `NotifyRival` tells nobody.
+unranked one, to itself alone, so the game does not send its slower times again; with no other
+time on the board, that best is also its own Rivals target. Nothing unranked is ever in a board,
+another player's rival, a rollup, the public JSON or the answer to another player, and an
+unverified caller's `NotifyRival` tells nobody. A player without a time is told the game's "no
+time yet" (FLT_MAX for a time, 0 for a speed): the game submits a time only when it beats the
+answer (FH1 #591).
 
 To tag and move rows by source, see the [score admin](operating.md#score-admin).
 
