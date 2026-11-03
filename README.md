@@ -42,6 +42,7 @@ player's own machine, and **My own server** connects to one you host.
 | `tools/server_probe.py` | checks a server from outside (status page, UDP HELLO -> WELCOME) |
 | `tools/xtsw_decode.py` | decodes the requests a server saved with `--dump-requests` |
 | `tools/event_admin.py` | manages community events on a server |
+| `accounts/` | the website accounts service for forza.dyotson.dev/api/ (Django, django-allauth, django-ninja): its own dependencies, image and tests ([`accounts/README.md`](accounts/README.md)) |
 | `screening/` | the screening worker for community photos and designs (its own Docker image, [`screening/README.md`](screening/README.md)) |
 | `Dockerfile`, `compose.yaml`, `.env.example` | the server's image and how to run it |
 
@@ -59,9 +60,10 @@ Run the tests:
 server's code with the game repository's `tools/` (`pipeline_list.py`, `fxobj_shaders.py`,
 `xdc_decode.py`): they run when this repository is the game's `server/` submodule, or with
 `FORZA_REPO_TOOLS=/path/to/ForzaHorizon1-ReImagined/tools`, and are skipped otherwise. The
-screening worker has its own tests (`python3 -m unittest discover -s screening -p 'test_screen_*.py'`,
+website accounts service has its own (`cd accounts && python manage.py test members`, with its
+`requirements.txt`), and so does the screening worker (`python3 -m unittest discover -s screening -p 'test_screen_*.py'`,
 with numpy and Pillow). CI (`.github/workflows/tests.yml`) runs them all on every push and pull
-request, on Linux and Windows, and builds the Docker image; `server-probe.yml` checks the public
+request, on Linux and Windows, and builds the Docker images; `server-probe.yml` checks the public
 server from outside every 6 hours.
 
 Developer docs: [title services](docs/title_services.md) (the protocol as the game calls it) and

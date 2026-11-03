@@ -1,0 +1,4 @@
+data/
+static/
+**/__pycache__/
+*.sqlite3

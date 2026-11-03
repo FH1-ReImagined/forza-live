@@ -5,3 +5,6 @@ __pycache__/
 .game-repo/
 .env
 data/
+# The accounts service's data and collected static files (accounts/README.md)
+accounts/data/
+accounts/static/

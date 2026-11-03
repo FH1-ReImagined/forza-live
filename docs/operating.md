@@ -349,6 +349,14 @@ forza-relay --restart unless-stopped --network host -v /path/to/secret:/secret:r
 
 Players prove their XUID with a key pair, and the operator can let a new installation in or set a cutoff for old games; the options are in [configuration](configuration.md#signed-requests). Watch the `auth` block of the status page and the `auth: raw friends keys ... since start` log line before setting `--raw-key-cutoff`.
 
+## Website accounts
+
+The project website's accounts (sign-in with Discord, GitHub or an emailed code) are a separate
+service in [`accounts/`](../accounts/README.md), with its own image, database and settings. It
+runs behind the website's nginx at `/api/` and never on the game server's ports or tunnel. Its
+README lists every setting, what to register with Discord, GitHub and the mail relay, an nginx
+example, the daily upkeep and backups.
+
 ## Backups and rollback
 
 Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it.
