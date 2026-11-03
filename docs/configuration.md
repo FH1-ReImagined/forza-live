@@ -16,7 +16,10 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--proxy-http-port PORT` | `FORZA_PROXY_HTTP_PORT` | the TCP port the tunnel publishes |
 | `--proxy-protocol-udp` | `FORZA_PROXY_PROTOCOL_UDP=1` | read [PROXY v2](#proxy-protocol-v2-hole-punching-through-the-tunnel) headers on UDP |
 | `--proxy-protocol-tcp` | `FORZA_PROXY_PROTOCOL_TCP=1` | read PROXY v2 headers on TCP |
-| `--rate-limit` | | the relay budget per player (256 KB/s) |
+| `--rate-limit` | | the relay budget per player (256 KB/s), also the cap in a volunteer relay's tickets |
+| `--relay-after SECONDS` | | how long two players relay through this server before they get a [volunteer relay](operating.md#volunteer-relays) (default 8) |
+| `--relay-only` | | run as a [volunteer relay](operating.md#running-a-relay) of a main server, with `--relay-of HOST:PORT`, `--relay-id ID` and `--relay-secret-file FILE` |
+| `--relay-allow-private` | | a relay also forwards to private and loopback addresses (a test on one LAN only) |
 | | `FORZA_DISK_CAP_MB` | cap of ghosts, cars and market blobs (default 4096) |
 | | `FORZA_MAX_PLAYERS` | cap of player records (default 20000) |
 | `--no-invites` | `FORZA_INVITES=0` | drop every game invite |

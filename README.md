@@ -25,8 +25,8 @@ player's own machine, and **My own server** connects to one you host.
 |------|------|
 | `forza_live_server.py` | the entry point: `python3 forza_live_server.py --help` lists every option |
 | `forza_live/server.py` | the server: the UDP port, the HTTP port, the command line |
-| `forza_live/core/` | signed requests (`auth`, `ed25519`), the signed list of servers (`server_list`), abuse limits (`limits`), saves that survive a power cut (`durable`) |
-| `forza_live/network/` | the title services' wire format (`xtsw`) and all its records (`xtsw_all`), the PROXY protocol behind a tunnel (`proxy`) |
+| `forza_live/core/` | signed requests (`auth`, `ed25519`), the signed list of servers (`server_list`), the volunteer relays' list, secrets and tickets (`relays`), abuse limits (`limits`), saves that survive a power cut (`durable`) |
+| `forza_live/network/` | the title services' wire format (`xtsw`) and all its records (`xtsw_all`), the PROXY protocol behind a tunnel (`proxy`), a volunteer relay (`relay_node`, `--relay-only`) and the main server's side of the relays (`relay_broker`) |
 | `forza_live/title_services/` | Turn 10's title services on the HTTP port (`lsp`) and the playlists' round presets (`playground_rounds.xml`) |
 | `forza_live/social/` | friends, chat, car clubs, Message Center notifications, the Discord status message |
 | `forza_live/competition/` | scores and leaderboards, Rivals ghosts, community events, head-to-head challenges, Xbox LIVE stats |
