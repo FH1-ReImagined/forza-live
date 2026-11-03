@@ -337,8 +337,9 @@ class RelayBroker:
             health.fails, health.passes = 0, health.passes + 1
             if not health.listed and health.passes >= (RETURN_PASSES if health.dropped else 1):
                 health.listed, health.dropped, health.since = True, False, self.wall()
-                log.info("relays: %s passes its probes (%d ms): listed, on probation for %d "
-                         "min", rid, health.probe_ms, self.probation_time // 60)
+                log.info("relays: %s passes its probes (%d ms): listed%s", rid, health.probe_ms,
+                         ", on probation for %d min" % (self.probation_time // 60)
+                         if self.probation_time > 0 else "")
                 changed = True
         else:
             health.passes, health.fails = 0, health.fails + 1
