@@ -3,7 +3,9 @@ public site comes from environment variables, and every secret can come from a f
 (NAME_FILE=/run/secrets/...); README.md lists them all.
 
 Sign-in is django-allauth in headless mode (its JSON API for the static website), with Discord,
-GitHub and an emailed code. Our own endpoints (me, logout-all, account delete) are django-ninja.
+GitHub and an emailed code. Our own endpoints (me, logout-all, account delete, the game link) are
+django-ninja. Linking an account to the game's key checks the launcher's signed requests with the
+game server's own code (forza_live.core.auth), imported from the repository (or the image's copy).
 """
 
 import atexit
@@ -17,6 +19,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# The game server's package (forza_live/), for its signed-request checks: beside manage.py in the
+# image, one folder up in the repository.
+if not (BASE_DIR / "forza_live").is_dir() and (BASE_DIR.parent / "forza_live").is_dir():
+    sys.path.insert(1, str(BASE_DIR.parent))
 
 
 def env(name, default=""):
@@ -204,6 +210,7 @@ ACCOUNT_SESSION_REMEMBER = True
 ACCOUNT_LOGOUT_ON_GET = False
 
 EMAIL_DAILY = int(env("FORZA_ACCOUNTS_EMAIL_DAILY", "200"))
+LINKS_DAILY = int(env("FORZA_ACCOUNTS_LINKS_DAILY", "200"))
 # The design's limits (community-accounts design, section 5) as allauth rate limits, which
 # members.views and members.adapters consume. Rates are amount/period/per: "ip" is the visitor's
 # address (X-Real-IP from the trusted nginx), "key" the email address's HMAC, or "all".
@@ -213,6 +220,13 @@ ACCOUNT_RATE_LIMITS = {
     "request_login_code": "5/h/ip,3/h/key,5/d/key",  # code mails: per IP and per address
     "code_failed": "20/h/ip",                        # wrong codes, per IP (5 tries per code besides)
     "login_code_mail_all": "%d/d/key" % EMAIL_DAILY,  # code mails in all, then email sign-in pauses
+    # The game link (members.links). "key" is the XUID, the account, or "all".
+    "game_call": "600/h/key",          # signed launcher calls per XUID (polling included)
+    "link_start": "5/h/key",           # link requests per XUID
+    "link_try": "10/10m/key",          # claims, and peeks that found nothing, per account
+    "link_code_failed": "100/m/key",   # codes that found nothing, in all: then codes stop 10 minutes
+    "link_change": "1/d/key",          # a new link, per XUID and per account
+    "new_link": "%d/d/key" % LINKS_DAILY,  # new links in all
     # allauth's password and signup forms are not routed (no passwords); closed all the same.
     "login": "20/h/ip",
     "signup": "5/d/ip",
@@ -258,6 +272,14 @@ DEFAULT_FROM_EMAIL = env("FORZA_SMTP_FROM", "signin@" + SITE_HOST)
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 EMAIL_SIGNIN_ENABLED = bool(EMAIL_HOST) or TESTING
 
+# ---- The game link (members.links) ----
+
+# The game server's data folder, mounted read-only: friends.json (the keys), players/ (gamertags
+# and signed sign-ins) and banned_xuids.json. Without it, linking is off.
+GAME_DATA = Path(env("FORZA_GAME_DATA")) if env("FORZA_GAME_DATA") else None
+LINK_MINUTES = 10        # a link request lasts this long
+LINK_CODES_OFF_MINUTES = 10  # codes stop this long after too many wrong ones (link_code_failed)
+
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = False
@@ -278,5 +300,8 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "plain"}},
     "root": {"handlers": ["console"], "level": "INFO"},
     # Request lines carry codes and states in their query strings: never log them.
-    "loggers": {"django.request": {"level": "ERROR"}, "django.server": {"level": "ERROR"}},
+    "loggers": {"django.request": {"level": "ERROR"}, "django.server": {"level": "ERROR"},
+                # The game server's modules (members.game): their notes on each reload of
+                # friends.json and on each refused signature are the game server's to log.
+                "forza-live": {"level": "WARNING"}, "forza_live": {"level": "WARNING"}},
 }

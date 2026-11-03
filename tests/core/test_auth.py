@@ -302,6 +302,42 @@ class SignedCallTest(Base):
         self.assertEqual(self.status(self.race_stats(4, xuid=stranger, seed=bytes(32))), (0, 0))
         self.assertEqual(self.last_race(stranger)["verified"], False)
 
+    def logon(self, **kw):
+        login = {"qwXuid": kw.get("xuid", XUID), "wzGamerTag": "DriverA", "currentCareerLevel": 1,
+                 "currentBadgeId": 0, "currentPlayerTitleId": 0}
+        return self.call("User", "Logon2", x.UserLogon2_Params, {"loginData": login}, **kw)
+
+    def player(self, xuid=XUID):
+        path = os.path.join(self.tmp.name, "players", "%016X.json" % xuid)
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
+            return json.load(f)
+
+    def test_signed_sign_ins_count_their_days(self):
+        """The website accounts service links a website account only to a key that signed in
+        here (firstSigned), and counts the days it did (signedDays)."""
+        day = 1800000000 // 86400 * 86400
+        with mock.patch("time.time", return_value=day + 100):
+            self.assertEqual(self.status(self.logon(when=day + 100)), (0, 0))
+        with mock.patch("time.time", return_value=day + 5000):
+            self.assertEqual(self.status(self.logon(when=day + 5000)), (0, 0))  # the same day
+        with mock.patch("time.time", return_value=day + 86400 + 10):
+            self.assertEqual(self.status(self.logon(when=day + 86400 + 10)), (0, 0))
+        p = self.player()
+        self.assertEqual((p["firstSigned"], p["signedDays"], p["lastSignedDay"], p["logons"]),
+                         (day + 100, 2, day // 86400 + 1, 3))
+
+    def test_unsigned_and_forged_sign_ins_count_no_days(self):
+        stranger = 0x0009000000000099
+        self.assertEqual(self.status(self.logon(xuid=stranger, seed=None)), (0, 0))  # unbound
+        self.assertEqual(self.status(self.logon(xuid=stranger, seed=bytes([9] * 32))), (0, 0))
+        self.assertEqual(self.player(stranger)["logons"], 2)
+        self.assertNotIn("firstSigned", self.player(stranger))
+        self.assertEqual(self.status(self.logon(seed=bytes([9] * 32))), (2, 5))  # forged
+        self.assertEqual(self.status(self.logon(seed=None)), (2, 5))             # unsigned
+        self.assertEqual(self.player(), {})
+
     def test_the_reply_tells_the_server_time(self):
         head = srv.response(200, b"x").split(b"\r\n\r\n")[0].decode()
         stamp = [line for line in head.split("\r\n") if line.startswith("X-Forza-Time: ")]

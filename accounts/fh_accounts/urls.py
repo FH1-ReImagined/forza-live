@@ -5,6 +5,7 @@ from allauth.headless.constants import Client
 from django.contrib import admin
 from django.urls import include, path
 
+from members import links  # noqa: F401  (the game link's routes, on members.api.api)
 from members import views
 from members.api import api
 

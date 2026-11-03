@@ -1,16 +1,19 @@
-# The website accounts service (README.md): its own image, apart from the game server's.
-#   docker build -t forza-accounts accounts/
+# The website accounts service (README.md): its own image, apart from the game server's. Built
+# from the repository's root, because it checks the launcher's signed requests with the game
+# server's own code (forza_live/, copied in, read-only use):
+#   docker build -t forza-accounts -f accounts/Dockerfile .
 # The base is pinned by digest (python:3.12-slim, multi-arch index); the dependencies by version
 # and hash (requirements.txt, pip --require-hashes). It runs as a user without privileges.
 FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DJANGO_SETTINGS_MODULE=fh_accounts.settings FORZA_ACCOUNTS_DATA=/data
 WORKDIR /app
-COPY requirements.txt ./
+COPY accounts/requirements.txt ./
 RUN pip install --no-cache-dir --root-user-action=ignore --require-hashes -r requirements.txt
-COPY manage.py docker-entrypoint.sh ./
-COPY fh_accounts ./fh_accounts
-COPY members ./members
+COPY accounts/manage.py accounts/docker-entrypoint.sh ./
+COPY accounts/fh_accounts ./fh_accounts
+COPY accounts/members ./members
+COPY forza_live ./forza_live
 # The admin's static files (no secret is needed to collect them; this key exists only here).
 RUN DJANGO_SECRET_KEY=collectstatic-only python manage.py collectstatic --noinput -v 0 \
     && useradd --uid 10001 --no-create-home --home-dir /nonexistent accounts \

@@ -9,3 +9,7 @@ __pycache__
 screening
 tests
 **/__pycache__
+accounts/data
+accounts/static
+accounts/.venv
+accounts/**/*.sqlite3

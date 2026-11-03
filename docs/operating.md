@@ -355,7 +355,9 @@ The project website's accounts (sign-in with Discord, GitHub or an emailed code)
 service in [`accounts/`](../accounts/README.md), with its own image, database and settings. It
 runs behind the website's nginx at `/api/` and never on the game server's ports or tunnel. Its
 README lists every setting, what to register with Discord, GitHub and the mail relay, an nginx
-example, the daily upkeep and backups.
+example, the daily upkeep and backups. To link accounts to players' games, it reads this server's
+data folder (`friends.json`, `players/`, `banned_xuids.json`) through a read-only mount, and
+never writes to it.
 
 ## Backups and rollback
 

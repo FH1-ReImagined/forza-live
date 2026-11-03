@@ -296,14 +296,29 @@ TEST_GIFT_CAR = 1103  # Data_Car: 2010 Nissan 370Z
 PERMISSIONS = [{"MethodId": i, "Tier": 0, "IsEnabled": True, "Access": 0} for i in range(256)]
 
 
+def signed_logon(record, now):
+    """A sign-in signed by the player's own key: firstSigned (its time), signedDays (the UTC days
+    with one) and lastSignedDay. The website accounts service (accounts/, website #4) reads them
+    to link a website account only to a key that has signed in here. An unsigned or forged
+    sign-in adds nothing, so nobody can age an XUID before its key is bound."""
+    day = now // 86400
+    record.setdefault("firstSigned", now)
+    if record.get("lastSignedDay") != day:
+        record["signedDays"] = record.get("signedDays", 0) + 1
+        record["lastSignedDay"] = day
+
+
 def user_logon2(xuid, body):
     params, _ = x.decode(x.UserLogon2_Params, body)
     login = params["loginData"]
     xuid = login["qwXuid"] or xuid
     login["wzGamerTag"] = limits.clean_gamertag(login["wzGamerTag"], xuid)
     record = load_player(xuid)
-    record.update(gamertag=login["wzGamerTag"], lastLogon=int(time.time()),
+    now = int(time.time())
+    record.update(gamertag=login["wzGamerTag"], lastLogon=now,
                   careerLevel=login["currentCareerLevel"], logons=record.get("logons", 0) + 1)
+    if caller_signed():
+        signed_logon(record, now)
     save_player(xuid, record)
     log.info("title: Logon2 %016X '%s' level %d", xuid, login["wzGamerTag"],
              login["currentCareerLevel"])
