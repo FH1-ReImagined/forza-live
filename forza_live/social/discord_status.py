@@ -22,6 +22,9 @@ log = logging.getLogger("forza-live")
 
 WEBHOOK = os.environ.get("FORZA_DISCORD_STATUS_WEBHOOK", "").strip()
 PUBLIC_ADDRESS = os.environ.get("FORZA_PUBLIC_ADDRESS", "forza-reimagined.playit.plus:56677")
+# What the message calls this server: a community server sets its own ("US East"); unset, it is
+# the public server, the one the launcher uses by default.
+SERVER_NAME = os.environ.get("FORZA_DISCORD_STATUS_NAME", "").strip()[:48]
 HEARTBEAT = 600  # seconds between edits when nothing changed
 HIDDEN_ROOMS = {"probe"}
 
@@ -131,11 +134,12 @@ def render_relays(states):
 def render(players, worlds, online=True, now=None, found=None, relays=None):
     now = int(now if now is not None else time.time())
     if not online:
-        return (f"🔴 **Forza Horizon 1: ReImagined — public server offline**\n"
+        return (f"🔴 **Forza Horizon 1: ReImagined — {SERVER_NAME or 'public server'} offline**\n"
                 f"Back soon. Address: `{PUBLIC_ADDRESS}` · since <t:{now}:R>")
     who = "1 player online" if players == 1 else f"{players} players online"
     open_worlds = "1 Horizon World open" if worlds == 1 else f"{worlds} Horizon Worlds open"
-    lines = [f"🟢 **Forza Horizon 1: ReImagined — public server**", f"**{who}** · {open_worlds}"]
+    lines = [f"🟢 **Forza Horizon 1: ReImagined — {SERVER_NAME or 'public server'}**",
+             f"**{who}** · {open_worlds}"]
     if found:
         in_lobbies = sum(p for sessions in found.values() for p, _ in sessions)
         lines.append("**Online lobbies** (players/slots, join through Find Game or "
@@ -148,8 +152,8 @@ def render(players, worlds, online=True, now=None, found=None, relays=None):
         lines.append("No online lobbies open right now: start one from Find Game!")
     if relays:
         lines.append(render_relays(relays))
-    lines.append(f"Address: `{PUBLIC_ADDRESS}` (set by default in the launcher) · "
-                 f"updated <t:{now}:R>")
+    where = "on the launcher's Servers page" if SERVER_NAME else "set by default in the launcher"
+    lines.append(f"Address: `{PUBLIC_ADDRESS}` ({where}) · updated <t:{now}:R>")
     return "\n".join(lines)
 
 

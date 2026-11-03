@@ -31,6 +31,7 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | | `FORZA_COMMUNITY_MAX_WIDTH` | width of a published big shot (default 1920) |
 | | `FORZA_DISCORD_STATUS_WEBHOOK` | a Discord webhook for the [players-online message](#players-online-in-discord) |
 | | `FORZA_PUBLIC_ADDRESS` | the address that message shows |
+| | `FORZA_DISCORD_STATUS_NAME` | what that message calls this server (default: the public server) |
 
 Forza Live is a standard-library Python server: UDP rendezvous/relay plus the HTTP title
 services (Turn 10's services, kept-alive connections) and a JSON status page. The server is the
@@ -270,4 +271,9 @@ of players or open Horizon Worlds changes (and every 10 minutes); on shutdown it
 server is offline. The message id is kept in the data folder (`discord_status.json`), so a
 restart edits the same message. `FORZA_PUBLIC_ADDRESS` sets the address it shows. With
 Docker, keep the URL in an env file: `--env-file /path/discord.env`.
+
+A community server can post its own message, for example in the project Discord's status channel
+with a webhook its staff gives you: set `FORZA_DISCORD_STATUS_NAME` to its name (`US East`, at
+most 48 characters) and `FORZA_PUBLIC_ADDRESS` to the address players type. The message then
+reads "Forza Horizon 1: ReImagined — US East" and points players to the launcher's Servers page.
 
