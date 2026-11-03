@@ -57,6 +57,21 @@ jobs:
           python -m pip install numpy==2.5.3 pillow==12.3.0
           python -m unittest discover -s screening -p 'test_screen_*.py' -v
 
+  # The website accounts service (accounts/): its own pinned dependencies, installed by hash.
+  accounts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Accounts tests
+        working-directory: accounts
+        run: |
+          python -m pip install --require-hashes -r requirements.txt
+          FORZA_ACCOUNTS_TESTING=1 python manage.py makemigrations --check --dry-run
+          python manage.py test members -v 2
+
   # The launcher runs this server on players' Windows PCs ("This PC" online): saves must work there
   # too (Windows' fsync needs a writable handle, which the Linux jobs cannot catch).
   windows:
@@ -84,3 +99,14 @@ jobs:
           docker logs forza-live
           python3 -c "import json; json.load(open('status.json'))"
           docker rm -f forza-live
+      - run: docker build -t forza-accounts accounts/
+      - name: The accounts image starts and answers on /api/health
+        run: |
+          docker run -d --name forza-accounts -p 127.0.0.1:8080:8080 -e DJANGO_SECRET_KEY="$(openssl rand -hex 32)" forza-accounts
+          for i in $(seq 30); do
+            curl -fsS http://127.0.0.1:8080/api/health > health.json && break
+            sleep 1
+          done
+          docker logs forza-accounts
+          python3 -c "import json; assert json.load(open('health.json')) == {'ok': True}"
+          docker rm -f forza-accounts

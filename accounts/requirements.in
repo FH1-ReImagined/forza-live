@@ -1,0 +1,8 @@
+# The accounts service's dependencies, pinned. requirements.txt is made from this file with
+#   pip-compile --generate-hashes --allow-unsafe -o requirements.txt requirements.in
+# and installed with pip install --require-hashes -r requirements.txt.
+Django==5.2.19
+django-allauth[socialaccount]==65.21.1
+django-ninja==1.7.3
+gunicorn==26.2.0
+whitenoise==6.12.0
