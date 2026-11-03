@@ -77,10 +77,11 @@ publishes are in the pages listed under [Going further](#going-further).
    1. Run the playit agent on the same PC and create two tunnels to the PC's LAN address: one
       UDP to port 21200 and one TCP to port 21201. Note the public address and port of each.
    2. Tell the server about the tunnel in `.env`: the agent's address (the PC's own LAN
-      address when the tunnels point at it, plus `127.0.0.1` if they point at 127.0.0.1), and
-      the public port of the TCP tunnel:
+      address when the tunnels point at it, plus `127.0.0.0/8` if they point at 127.0.0.1:
+      the playit agent forwards from changing addresses in 127.x.x.x, not only 127.0.0.1),
+      and the public port of the TCP tunnel:
 
-          FORZA_TRUSTED_PROXIES=192.168.1.10,127.0.0.1
+          FORZA_TRUSTED_PROXIES=192.168.1.10,127.0.0.0/8
           FORZA_PROXY_HTTP_PORT=<the TCP tunnel's public port>
 
    3. Restart with `docker compose up -d`. Players then use the UDP tunnel's public address.
@@ -141,6 +142,12 @@ publishes are in the pages listed under [Going further](#going-further).
   `py forza_live_server.py --host 0.0.0.0 --http-port 21201 --data-dir data`, and allow
   Python on private networks when Windows Firewall asks. Settings from `.env` go on the
   command line there (`py forza_live_server.py --help` lists them).
+- **Behind a tunnel, the game still says the Horizon server is unavailable**, and the
+  game's `forza.log` shows `title server ... (HTTP port 21201)` instead of your TCP tunnel's
+  port: the server didn't count the player as coming through the tunnel. Check that
+  `FORZA_TRUSTED_PROXIES` covers the agent's addresses (`127.0.0.0/8` for an agent on the same
+  PC) and that `FORZA_PROXY_HTTP_PORT` is set. The status page's `via_proxy` counts players
+  who came through it.
 - **Players sign in but cannot see or join each other**: UDP 21200 is not forwarded (check
   with `tools/server_probe.py` from outside). Players behind a tunnel go through the
   server's relay, which works but adds a little latency.
