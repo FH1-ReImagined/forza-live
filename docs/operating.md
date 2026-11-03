@@ -1,6 +1,6 @@
 # Operating a public Forza Live server
 
-Day-to-day running of a server other people play on: the operator endpoints, chat, photo and design moderation, the score admin, and backups. Options are in [configuration](configuration.md); the first setup is in the [hosting guide](hosting.md).
+Day-to-day running of a server other people play on: the operator endpoints, chat, photo and design moderation, the score admin, the list of community servers, and backups. Options are in [configuration](configuration.md); the first setup is in the [hosting guide](hosting.md).
 
 ## Operator endpoints
 
@@ -199,6 +199,52 @@ row's reason), and `state` (`ranked`, `unranked` or `all`, the default). A chang
 filter besides `state`, and a browser's cross-origin request (an `Origin` header) is refused.
 To take a bad build off the boards:
 `curl -X POST -H "X-Admin-Token: <token>" "http://host:21201/admin/scores/unrank?build=0.2.1/tu4"`.
+
+## Listing community servers
+
+The launcher's Servers page lists the servers players can pick. It takes the list only from the
+main server, as `GET /servers.json`, and only when the list is signed with the key whose public
+half the launcher ships. Owners do not add themselves: they apply (address, region, contact and
+rules), you check the server, and you add it to `server_list.json` in the data folder:
+
+```json
+{
+  "self": {"name": "Forza Live", "address": "your.host:21200", "region": "Europe",
+           "contact": "operator@example.org"},
+  "servers": [
+    {"name": "Example community", "address": "192.0.2.10:21200", "region": "North America",
+     "contact": "owner@example.org", "verified": true, "id": "example-1"}
+  ]
+}
+```
+
+- `self` is your own server. It is listed first and marked verified, with this server's id
+  (`--server-id`, [score admin](#score-admin)).
+- `address` is what a player would type in the launcher: `host[:port]`, where the port is the UDP
+  port and the HTTP port is the next one (21200 and 21201 by default). The launcher pings
+  `http://host:<port + 1>/status` for each entry, so check that it answers before you list it.
+- `name` (at most 48 characters) is required. `region` (32) and `contact` (120) are optional.
+  `verified` is `false` unless you set it, and `id` is the server id that server tags its
+  leaderboard rows with.
+- Community servers keep their own leaderboards. Only rows with the main server's id are the
+  official ones ([which results count](website-data.md#which-results-count)).
+
+The file is read again when it changes, and the list is signed again then and once a day. A
+signed list expires after 14 days, so an old copy cannot be served in place of the current one for
+long. An entry with a mistake is left out and named in the log. To check the file and print the
+public key without starting the server, run:
+
+    python3 -m forza_live.core.server_list --data-dir /path/to/data
+
+or, in Docker, `docker exec forza-live python3 -m forza_live.core.server_list --data-dir /data`.
+
+The signing key is `server_list_key.txt` in the data folder. It is made at the first request for
+the list (the log names its public key) or by the command above. Keep it with your backups, and
+keep it private: anyone who has it can sign a list the launcher accepts. If you make a new key,
+launchers accept lists signed with it only after a launcher release ships its public key.
+
+To take a server off the list, remove its entry. A launcher that still has a server saved keeps
+it, and shows it as down while it does not answer.
 
 ## Signed requests
 

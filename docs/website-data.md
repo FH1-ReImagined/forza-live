@@ -1,6 +1,6 @@
 # Forza Live data for a website
 
-What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the map, community photos and designs, and shader lists. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
+What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the map, community photos and designs, shader lists, and the list of servers. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
 
 ## Leaderboards
 
@@ -185,3 +185,12 @@ the worker screens designs as well as photos.
   [the leaderboards](#leaderboards)); otherwise `car` is null.
 
 Moderating designs: [operating](operating.md#community-designs).
+
+## Servers
+
+`GET /servers.json` is the signed list of servers the launcher's Servers page shows, when the
+operator keeps one ([listing community servers](operating.md#listing-community-servers)). The list
+itself is the `list` field, JSON as text: `{"issued", "expires", "servers": [...]}`, each server
+with `name`, `address`, `region`, `contact`, `verified`, and `id` when known; the server that
+publishes it is first, with `"main": true`. A website can show it as it is; the signature is
+for the launcher.
