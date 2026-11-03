@@ -77,7 +77,8 @@ class DiscordStatusTest(unittest.TestCase):
     def test_render(self):
         self.assertIn("**1 player online** · 1 Horizon World open", ds.render(1, 1, now=100))
         self.assertIn("**4 players online** · 0 Horizon Worlds open", ds.render(4, 0, now=100))
-        self.assertIn("offline", ds.render(0, 0, online=False, now=100))
+        self.assertIn("🔴 **Forza Horizon 1: ReImagined** — IP: `forza-reimagined.playit.plus:56677`\n"
+                      "Offline. Back soon · since <t:100:R>", ds.render(0, 0, online=False, now=100))
         self.assertIn("<t:100:R>", ds.render(0, 0, now=100))
 
     def test_community_servers(self):
@@ -107,26 +108,39 @@ class DiscordStatusTest(unittest.TestCase):
                                                  fetch=fetch), states)
             self.assertEqual(len(asked), 3)
             text = ds.render(0, 0, now=100, community=states)
-            self.assertIn("**Community servers**", text)
-            self.assertIn("• 🟢 **US East**: 2 players · 1 Horizon World — `us.example.org:1819`",
-                          text)
-            self.assertIn("• 🔴 **Down**: offline — `[2001:db8::1]`", text)
-            self.assertIn("  ↳ **Horizon World**: 2 players — 2/8", text)
-        self.assertNotIn("Community servers", ds.render(0, 0, now=100))
+            # every server gets the same block, this one first
+            self.assertTrue(text.startswith("🟢 **Forza Horizon 1: ReImagined** — IP: `"))
+            self.assertIn("\n\n🟢 **Forza Horizon 1: ReImagined — US East** — IP: "
+                          "`us.example.org:1819`\n**2 players online** · 1 Horizon World open\n"
+                          "**Online lobbies** (players/slots, join through Find Game or Find "
+                          "Custom Game):\n• **Horizon World**: 2 players — 2/8\n", text)
+            self.assertIn("\n\n🔴 **Forza Horizon 1: ReImagined — Down** — IP: `[2001:db8::1]`\n"
+                          "Offline. Back soon\n", text)
+            self.assertIn("community servers with their own friends lists", text)
+            # Discord takes 2000 characters: whole lines are dropped, the footer stays
+            many = [(f"Server {i}", f"s{i}.example.org", True, 9, 1,
+                     (("Horizon World", ((9, 16),) * 20),)) for i in range(12)]
+            long = ds.render(0, 0, now=100, community=many)
+            self.assertLessEqual(len(long), ds.MAX_MESSAGE)
+            self.assertTrue(long.endswith("· updated <t:100:R>"))
+            self.assertIn("\n…\n", long)
+        self.assertNotIn("community servers", ds.render(0, 0, now=100))
         self.assertEqual(ds.status_url("us.example.org:1819"), "http://us.example.org:1820/status")
         self.assertEqual(ds.status_url("main.example.org"), "http://main.example.org:21201/status")
         self.assertEqual(ds.status_url("[2001:db8::1]:5000"), "http://[2001:db8::1]:5001/status")
 
     def test_render_named(self):
-        self.assertIn("public server**", ds.render(0, 0, now=100))
-        self.assertIn("set by default in the launcher", ds.render(0, 0, now=100))
+        self.assertIn("ReImagined** — IP: `forza-reimagined.playit.plus:56677`",
+                      ds.render(0, 0, now=100))
+        self.assertIn("Set by default in the launcher", ds.render(0, 0, now=100))
         with mock.patch.object(ds, "SERVER_NAME", "US East"), \
                 mock.patch.object(ds, "PUBLIC_ADDRESS", "us.example.org:1819"):
             text = ds.render(2, 1, now=100)
-            self.assertIn("ReImagined — US East**", text)
-            self.assertIn("`us.example.org:1819` (on the launcher's Servers page)", text)
-            self.assertNotIn("public server", text)
-            self.assertIn("US East offline", ds.render(0, 0, online=False, now=100))
+            self.assertIn("ReImagined — US East** — IP: `us.example.org:1819`", text)
+            self.assertIn("Pick it on the launcher's Servers page", text)
+            self.assertNotIn("Set by default", text)
+            self.assertIn("🔴 **Forza Horizon 1: ReImagined — US East** — IP:",
+                          ds.render(0, 0, online=False, now=100))
 
     def test_due_on_change_and_heartbeat(self):
         ds._state.update(key=(2, 1, ()), sent=1000.0)

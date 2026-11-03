@@ -34,7 +34,7 @@ COMMUNITY_POLL = 120     # seconds between checks of the listed community server
 COMMUNITY_TIMEOUT = 4
 MAX_COMMUNITY = 12       # servers checked and shown
 MAX_STATUS = 4 << 20     # bytes of a community server's /status read
-MAX_COMMUNITY_LOBBIES = 4  # lobby lines under each community server
+MAX_MESSAGE = 2000         # characters Discord takes in a message
 
 _state = {"key": None, "sent": 0.0, "polled": None, "community": []}
 
@@ -140,31 +140,32 @@ def render_relays(states):
 
 
 def render(players, worlds, online=True, now=None, found=None, relays=None, community=None):
+    """The message: this server's block, then each community server's in the same form."""
     now = int(now if now is not None else time.time())
-    if not online:
-        return (f"🔴 **Forza Horizon 1: ReImagined — {SERVER_NAME or 'public server'} offline**\n"
-                f"Back soon. Address: `{PUBLIC_ADDRESS}` · since <t:{now}:R>")
-    who = "1 player online" if players == 1 else f"{players} players online"
-    open_worlds = "1 Horizon World open" if worlds == 1 else f"{worlds} Horizon Worlds open"
-    lines = [f"🟢 **Forza Horizon 1: ReImagined — {SERVER_NAME or 'public server'}**",
-             f"**{who}** · {open_worlds}"]
-    if found:
-        in_lobbies = sum(p for sessions in found.values() for p, _ in sessions)
-        lines.append("**Online lobbies** (players/slots, join through Find Game or "
-                     "Find Custom Game):")
-        lines += render_lobbies(found)
-        rest = max(players - in_lobbies, 0)
-        if rest:
-            lines.append(f"• Single player or menus: {rest}")
-    elif players:
-        lines.append("No online lobbies open right now: start one from Find Game!")
-    if relays:
+    lines = render_server(SERVER_NAME, PUBLIC_ADDRESS, online, players, worlds, found,
+                          since=now)
+    for name, address, up, c_players, c_worlds, c_found in community or ():
+        lines.append("")
+        lines += render_server(name, address, up, c_players, c_worlds,
+                               {k: list(v) for k, v in c_found})
+    lines.append("")
+    if relays and online:
         lines.append(render_relays(relays))
-    if community:
-        lines += render_community(community)
-    where = "on the launcher's Servers page" if SERVER_NAME else "set by default in the launcher"
-    lines.append(f"Address: `{PUBLIC_ADDRESS}` ({where}) · updated <t:{now}:R>")
-    return "\n".join(lines)
+    if SERVER_NAME:
+        lines.append(f"Pick it on the launcher's Servers page · updated <t:{now}:R>")
+    elif community:
+        lines.append("The first server is the launcher's default. The others are community "
+                     "servers with their own friends lists and leaderboards: pick one on the "
+                     f"launcher's Servers page · updated <t:{now}:R>")
+    else:
+        lines.append(f"Set by default in the launcher · updated <t:{now}:R>")
+    text = "\n".join(lines)
+    if len(text) > MAX_MESSAGE:  # Discord's limit: drop whole lines from the end of the blocks
+        footer = lines[-1]
+        while len("\n".join(lines[:-1] + ["…", footer])) > MAX_MESSAGE and len(lines) > 2:
+            lines.pop(-2)
+        text = "\n".join(lines[:-1] + ["…", footer])
+    return text
 
 
 def status_url(address):
@@ -227,20 +228,26 @@ def community_states(data_dir, now=None, fetch=fetch_status):
     return states
 
 
-def render_community(states):
-    lines = ["**Community servers** (their own friends lists and leaderboards; pick one on the "
-             "launcher's Servers page):"]
-    for name, address, up, players, worlds, found in states:
-        if not up:
-            lines.append(f"• 🔴 **{name}**: offline — `{address}`")
-            continue
-        who = "1 player" if players == 1 else f"{players} players"
-        open_worlds = "1 Horizon World" if worlds == 1 else f"{worlds} Horizon Worlds"
-        lines.append(f"• 🟢 **{name}**: {who} · {open_worlds} — `{address}`")
-        lobby_lines = render_lobbies({k: list(v) for k, v in found})
-        lines += ["  ↳ " + line[2:] for line in lobby_lines[:MAX_COMMUNITY_LOBBIES]]
-        if len(lobby_lines) > MAX_COMMUNITY_LOBBIES:
-            lines.append(f"  ↳ +{len(lobby_lines) - MAX_COMMUNITY_LOBBIES} more kinds of lobby")
+def render_server(name, address, up, players=0, worlds=0, found=None, since=None):
+    """One server's block: the same for this server and each community server."""
+    title = "Forza Horizon 1: ReImagined" + (f" — {name}" if name else "")
+    lines = [f"{'🟢' if up else '🔴'} **{title}** — IP: `{address}`"]
+    if not up:
+        lines.append("Offline. Back soon" + (f" · since <t:{since}:R>" if since else ""))
+        return lines
+    who = "1 player online" if players == 1 else f"{players} players online"
+    open_worlds = "1 Horizon World open" if worlds == 1 else f"{worlds} Horizon Worlds open"
+    lines.append(f"**{who}** · {open_worlds}")
+    if found:
+        in_lobbies = sum(p for sessions in found.values() for p, _ in sessions)
+        lines.append("**Online lobbies** (players/slots, join through Find Game or "
+                     "Find Custom Game):")
+        lines += render_lobbies(found)
+        rest = max(players - in_lobbies, 0)
+        if rest:
+            lines.append(f"• Single player or menus: {rest}")
+    else:
+        lines.append("No online lobbies open right now: start one from Find Game!")
     return lines
 
 
@@ -307,4 +314,4 @@ def update(status, data_dir, now=None):
 
 def offline(data_dir):
     if enabled():
-        post(data_dir, render(0, 0, online=False))
+        post(data_dir, render(0, 0, online=False, community=_state["community"]))
