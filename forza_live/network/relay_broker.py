@@ -18,6 +18,17 @@ Off unless the operator listed a relay (core/relays.py): then the server
   Tickets last TICKET_LIFE s and are renewed at half of that; a session whose relay goes down is
   dissolved and its players get a withdrawal.
 
+- probes every listed relay (PROBE_EVERY s; PROBE_RETRY s while it fails or is not listed):
+  its link must be up and it must echo a RELAY_PING of a fresh nonce sent to the address the
+  players get (PROBE_TRIES tries, PROBE_TIMEOUT s), the time of which is its probe ping. A new
+  relay is used and published in /relays.json once a probe passes; one failing DROP_FAILS probes
+  in a row drops out of both (its sessions dissolved) and comes back after RETURN_PASSES passes.
+  What was listed, and since when, is kept in DATA_DIR/relay_health.json across restarts.
+- puts a relay on probation for PROBATION_TIME s after it is listed: it gets only a
+  PROBATION_SHARE of the new pairs it would be picked for, at most PROBATION_SESSIONS sessions at
+  once. Its link reports what it can take (its slots, the bandwidth its operator offers): a full
+  relay gets no new pairs.
+
 Games without FEATURE_RELAYS, and every pair while no relay is up, are relayed by this server
 as before.
 
@@ -31,13 +42,15 @@ RELAY_INFO (kind 27), op byte first:
 
 import asyncio
 import ipaddress
+import json
 import logging
+import os
 import random
 import socket
 import struct
 import time
 
-from forza_live.core import relays
+from forza_live.core import durable, relays
 from forza_live.network import relay_node
 
 log = logging.getLogger("forza-live")
@@ -54,14 +67,41 @@ RESOLVE_EVERY = 600.0
 NO_ANSWER = 0xFFFF
 UNKNOWN_PING = 5000   # a relay a game did not report: picked only before none
 MAX_OFFER_PEERS = 100
+PROBE_EVERY = 180.0   # seconds between the probes of a listed relay that passes them
+PROBE_RETRY = 60.0    # while it fails them, or is not listed
+PROBE_TRIES = 3       # pings of one probe (one a tick, every 5 s)
+PROBE_TIMEOUT = 14.0  # without an echo: the probe failed
+PROBE_GRACE = 30.0    # after a start, the links' time to come up before the first probes
+DROP_FAILS = 3        # failed probes in a row: the relay drops out
+RETURN_PASSES = 2     # passed probes in a row: a relay that dropped out is listed again
+PROBATION_TIME = 3600.0
+PROBATION_SHARE = 0.1
+PROBATION_SESSIONS = 4
+HEALTH_FILE = "relay_health.json"
 
 
 class Link:
-    __slots__ = ("addr", "seen", "nonces", "slots", "sessions", "bytes")
+    __slots__ = ("addr", "seen", "nonces", "slots", "sessions", "bytes", "max_slots", "bandwidth")
 
     def __init__(self):
         self.addr, self.seen, self.nonces = None, None, []
-        self.slots = self.sessions = self.bytes = 0
+        self.slots = self.sessions = self.bytes = self.max_slots = self.bandwidth = 0
+
+
+class Health:
+    """What the probes found of one relay."""
+    __slots__ = ("listed", "dropped", "since", "fails", "passes", "next_probe", "nonce", "started",
+                 "sent", "tries", "probe_ms", "probed", "sessions_relayed")
+
+    def __init__(self, next_probe, listed=False, dropped=False, since=None):
+        self.listed, self.dropped = listed, dropped  # dropped: listed once, then dropped out
+        self.since = since  # unix time it was listed (its probation runs from there)
+        self.fails = self.passes = 0
+        self.next_probe = next_probe
+        self.nonce, self.started, self.sent, self.tries = None, 0.0, 0.0, 0
+        self.probe_ms = None
+        self.probed = False  # since this server started
+        self.sessions_relayed = 0
 
 
 class RelaySession:
@@ -99,12 +139,21 @@ class RelayBroker:
         self.version = 1
         self.probe_list = []  # relay ids, in the order of the probe list
         self.offer_after = OFFER_AFTER
+        self.probation_time = PROBATION_TIME  # --relay-probation
+        self.health = {}    # id -> Health
+        self.saved_health = {}  # id -> what relay_health.json says (configure)
+        self.random = random.random
         self.counters = {"offers": 0, "withdrawals": 0, "links_refused": 0}
 
     # --- the operator's list ---
 
     def configure(self, data_dir):
         self.data_dir = data_dir
+        try:
+            saved = durable.load(os.path.join(data_dir, HEALTH_FILE)).get("relays", {})
+            self.saved_health = saved if isinstance(saved, dict) else {}
+        except (OSError, ValueError, AttributeError):
+            self.saved_health = {}
         self.reload()
 
     def reload(self):
@@ -126,11 +175,26 @@ class RelayBroker:
         secrets = relays.load_secrets(entries, self.data_dir)
         changed = {rid for rid in set(self.secrets) | set(secrets)
                    if self.secrets.get(rid) != secrets.get(rid)}
+        known = set(self.secrets)
         self.entries = {e["id"]: e for e in entries if e["id"] in secrets}
         self.secrets = secrets
         for rid in changed:  # revoked, or a new secret: its link must prove it again
             self.links.pop(rid, None)
             self.resolved.pop(rid, None)
+            if rid in known:
+                self.health.pop(rid, None)  # and the probes start over
+        for rid in [r for r in self.health if r not in self.entries]:
+            del self.health[rid]
+        for rid in self.entries:
+            if rid not in self.health:
+                saved = self.saved_health.pop(rid, None)
+                saved = saved if isinstance(saved, dict) else {}
+                since = saved.get("since")
+                self.health[rid] = Health(
+                    self.clock() + PROBE_GRACE, listed=saved.get("listed") is True,
+                    dropped=saved.get("dropped") is True,
+                    since=since if isinstance(since, (int, float)) else None)
+        self.publish_listed()
         if self.entries:
             log.info("relays: %d listed (%s)", len(self.entries), ", ".join(sorted(self.entries)))
         self.update_up()
@@ -143,9 +207,10 @@ class RelayBroker:
 
     def on_link(self, body, addr):
         try:
-            rid, wall, nonce, slots, sessions, nbytes, signed, tag = relay_node.parse_link(body)
+            got = relay_node.parse_link(body)
         except (ValueError, UnicodeDecodeError, struct.error):
             return
+        rid, wall, nonce, signed, tag = got.relay_id, got.wall, got.nonce, got.signed, got.mac
         secret = self.secrets.get(rid)
         if secret is None or relays.mac(secret, relays.LINK_TAG, signed) != tag:
             self.counters["links_refused"] += 1
@@ -162,11 +227,16 @@ class RelayBroker:
         link.nonces = (link.nonces + [nonce])[-64:]
         was_up = self.up(rid)
         link.addr, link.seen = addr, self.clock()
-        link.slots, link.sessions, link.bytes = slots, sessions, nbytes
+        link.slots, link.sessions, link.bytes = got.slots, got.sessions, got.bytes
+        link.max_slots, link.bandwidth = got.max_slots, got.bandwidth
         self.server.send(addr, relay_node.RELAY_LINKED, relay_node.linked_body(secret, nonce, self.wall()))
         self.resolve(rid)
         if not was_up and self.up(rid):
-            log.info("relays: %s is up", rid)
+            log.info("relays: %s is linked", rid)
+            health = self.health.get(rid)
+            if (health is not None and health.nonce is None and
+                    (not health.probed or (not health.listed and self.clock() >= health.next_probe))):
+                self.start_probe(rid)  # a relay just linked: probed at once
             self.update_up()
 
     def refuse(self, addr, nonce, why):
@@ -202,7 +272,7 @@ class RelayBroker:
                 was_up = self.up(rid)
                 self.resolved[rid] = (result, self.clock())
                 if not was_up and self.up(rid):
-                    log.info("relays: %s is up", rid)
+                    log.info("relays: %s is linked", rid)
                     self.update_up()
 
         try:
@@ -218,12 +288,120 @@ class RelayBroker:
         return self.resolved.get(rid, (None, None))[0]
 
     def up(self, rid):
+        """Whether the relay's link is up (and its address known)."""
         link = self.links.get(rid)
         return (rid in self.secrets and link is not None and link.seen is not None and
                 self.clock() - link.seen <= LINK_TIMEOUT and self.address(rid) is not None)
 
+    def listed(self, rid):
+        health = self.health.get(rid)
+        return health is not None and health.listed
+
+    def usable(self, rid):
+        """Linked, and listed by the probes: the relays players are sent to."""
+        return self.up(rid) and self.listed(rid)
+
     def up_relays(self):
-        return sorted(rid for rid in self.entries if self.up(rid))
+        return sorted(rid for rid in self.entries if self.usable(rid))
+
+    # --- probes ---
+
+    def start_probe(self, rid):
+        health = self.health[rid]
+        if not self.up(rid):
+            self.probe_result(rid, False, "its link is down")
+            return
+        health.nonce, health.started, health.tries = os.urandom(16), self.clock(), 0
+        self.send_probe(rid)
+
+    def send_probe(self, rid):
+        health = self.health[rid]
+        health.tries += 1
+        health.sent = self.clock()
+        self.server.send(self.address(rid), relay_node.RELAY_PING, health.nonce)
+
+    def on_pong(self, body, addr):
+        """A RELAY_PONG: the echo of a probe, from the address the players are sent to."""
+        for rid, health in self.health.items():
+            if health.nonce is not None and body == health.nonce and addr == self.address(rid):
+                health.probe_ms = int((self.clock() - health.sent) * 1000)
+                self.probe_result(rid, True)
+                return
+
+    def probe_result(self, rid, ok, why=""):
+        health = self.health[rid]
+        health.nonce, health.probed = None, True
+        now = self.clock()
+        changed = False
+        if ok:
+            health.fails, health.passes = 0, health.passes + 1
+            if not health.listed and health.passes >= (RETURN_PASSES if health.dropped else 1):
+                health.listed, health.dropped, health.since = True, False, self.wall()
+                log.info("relays: %s passes its probes (%d ms): listed, on probation for %d "
+                         "min", rid, health.probe_ms, self.probation_time // 60)
+                changed = True
+        else:
+            health.passes, health.fails = 0, health.fails + 1
+            log.warning("relays: %s failed a probe (%s), %d in a row", rid, why, health.fails)
+            if health.listed and health.fails >= DROP_FAILS:
+                health.listed, health.dropped, health.since = False, True, None
+                log.warning("relays: %s failed %d probes in a row: it drops out of the list "
+                            "until it passes %d", rid, health.fails, RETURN_PASSES)
+                changed = True
+        health.next_probe = now + (PROBE_EVERY if health.listed and not health.fails
+                                   else PROBE_RETRY)
+        if changed:
+            self.save_health()
+            self.publish_listed()
+            self.update_up()
+
+    def probe_tick(self):
+        now = self.clock()
+        for rid in sorted(self.health):
+            health = self.health[rid]
+            if health.nonce is not None:
+                if now - health.started >= PROBE_TIMEOUT:
+                    self.probe_result(rid, False, "no echo from %s" % self.entries[rid]["address"])
+                elif health.tries < PROBE_TRIES:
+                    self.send_probe(rid)
+            elif now >= health.next_probe:
+                self.start_probe(rid)
+
+    def on_probation(self, rid):
+        health = self.health.get(rid)
+        return self.probation_time > 0 and (health is None or health.since is None or
+                self.wall() - health.since < self.probation_time)
+
+    def capacity(self, rid):
+        """The players the relay takes, roughly: its slots, and the bandwidth its operator
+        offers at the rate cap a player has."""
+        link = self.links.get(rid)
+        if link is None:
+            return 0
+        slots = link.max_slots or relay_node.MAX_SLOTS
+        if link.bandwidth:
+            slots = min(slots, link.bandwidth * 1024 // max(1, self.rate()))
+        return slots
+
+    def players_on(self, rid):
+        return sum(len(s.members) for s in self.sessions.values() if s.relay == rid)
+
+    def publish_listed(self):
+        relays.set_listed(sorted(rid for rid in self.entries if self.listed(rid))
+                          if self.data_dir is not None else None)
+
+    def save_health(self):
+        if self.data_dir is None:
+            return
+        data = {"relays": {rid: {"listed": h.listed, "dropped": h.dropped, "since": h.since}
+                           for rid, h in sorted(self.health.items())}}
+        path = os.path.join(self.data_dir, HEALTH_FILE)
+        try:
+            with open(path + ".tmp", "w") as f:
+                json.dump(data, f, indent=1)
+            durable.replace(path + ".tmp", path)
+        except OSError as e:
+            log.warning("relays: cannot save %s: %s", HEALTH_FILE, e)
 
     def update_up(self):
         """A new probe list when the up relays changed; sessions on a relay that went down are
@@ -280,18 +458,25 @@ class RelayBroker:
 
     def choose(self, a, b):
         """The up relay with the lowest worst ping of the pair (one either could not reach is
-        never picked), then the fewest sessions; None when there is none."""
-        best = None
+        never picked), then the fewest sessions, that has room for two more players; a relay on
+        probation is taken for only PROBATION_SHARE of the pairs, and PROBATION_SESSIONS
+        sessions. None when there is none."""
+        candidates = []
         for rid in self.up_relays():
             pa, pb = self.ping(a, rid), self.ping(b, rid)
             if NO_ANSWER in (pa, pb):
                 continue
             worst = max(UNKNOWN_PING if pa is None else pa, UNKNOWN_PING if pb is None else pb)
             load = sum(1 for s in self.sessions.values() if s.relay == rid)
-            key = (worst, load, rid)
-            if best is None or key < best:
-                best = key
-        return None if best is None else best[2]
+            candidates.append((worst, load, rid))
+        for _, load, rid in sorted(candidates):
+            if self.players_on(rid) + 2 > self.capacity(rid):
+                continue
+            if self.on_probation(rid) and (load >= PROBATION_SESSIONS or
+                                           self.random() >= PROBATION_SHARE):
+                continue
+            return rid
+        return None
 
     def note_relayed(self, src, dst):
         """The server relayed a datagram from src to dst (server.on_relay)."""
@@ -339,6 +524,7 @@ class RelayBroker:
                     return
                 target = RelaySession(self.new_session_id(a, b), rid)
                 self.sessions[target.id] = target
+                self.health[rid].sessions_relayed += 1
                 log.info("relays: #%d %r and #%d %r relayed through %s (session %016X)", a.id,
                          a.name, b.id, b.name, rid, target.id)
             for peer in (a, b):
@@ -411,6 +597,7 @@ class RelayBroker:
         self.reload()
         if not self.enabled and not self.sessions:
             return
+        self.probe_tick()
         self.update_up()
         now = self.clock()
         for session in list(self.sessions.values()):
@@ -428,11 +615,17 @@ class RelayBroker:
         players = {}
         for session in self.sessions.values():
             players[session.relay] = players.get(session.relay, 0) + len(session.members)
-        return {"relays": [
-            {"id": rid, "name": e["name"], "region": e["region"], "up": self.up(rid),
-             "sessions": sum(1 for s in self.sessions.values() if s.relay == rid),
-             "players": players.get(rid, 0),
-             "slots": getattr(self.links.get(rid), "slots", 0),
-             "relayed_bytes": getattr(self.links.get(rid), "bytes", 0)}
-            for rid, e in sorted(self.entries.items())],
-            "relay_offers": self.counters["offers"]}
+        out = []
+        for rid, e in sorted(self.entries.items()):
+            health = self.health.get(rid) or Health(0.0)
+            out.append({
+                "id": rid, "name": e["name"], "region": e["region"], "up": self.usable(rid),
+                "linked": self.up(rid), "listed": health.listed,
+                "probation": health.listed and self.on_probation(rid),
+                "probe_ms": health.probe_ms, "probe_fails": health.fails,
+                "sessions": sum(1 for s in self.sessions.values() if s.relay == rid),
+                "sessions_relayed": health.sessions_relayed,
+                "players": players.get(rid, 0), "capacity": self.capacity(rid),
+                "slots": getattr(self.links.get(rid), "slots", 0),
+                "relayed_bytes": getattr(self.links.get(rid), "bytes", 0)})
+        return {"relays": out, "relay_offers": self.counters["offers"]}

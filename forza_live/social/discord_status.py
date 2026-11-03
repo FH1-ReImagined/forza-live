@@ -6,7 +6,9 @@ online lobbies change (each lobby's playlist or custom game type and its players
 players can see where everyone is), and every 10 minutes, so its "updated" time stays
 fresh; on shutdown it marks the server offline. Webhooks may edit their own messages, so no bot is needed. The message id is kept
 in DATA_DIR/discord_status.json, so a restart edits the same message instead of posting a
-new one. Probe registrations (room "probe") are not counted.
+new one. Probe registrations (room "probe") are not counted. With volunteer relays listed
+(network/relay_broker.py), a line shows each one's region, whether it is up and the sessions
+it relays; a relay going up or down edits the message.
 """
 import json
 import logging
@@ -107,7 +109,26 @@ def render_lobbies(found):
     return lines
 
 
-def render(players, worlds, online=True, now=None, found=None):
+def relay_states(status):
+    """[(region or name, up, sessions now, sessions relayed)] of the volunteer relays in the
+    server's status() (none without relays)."""
+    return [(r.get("region") or r.get("name") or r.get("id", "?"), bool(r.get("up")),
+             r.get("sessions", 0), r.get("sessions_relayed", 0))
+            for r in status.get("relays", [])]
+
+
+def render_relays(states):
+    parts = []
+    for where, up, sessions, relayed in states:
+        if not up:
+            parts.append(f"🔴 {where}: down")
+        else:
+            now_text = "1 session" if sessions == 1 else f"{sessions} sessions"
+            parts.append(f"🟢 {where}: {now_text} ({relayed} relayed)")
+    return "**Relays**: " + " · ".join(parts)
+
+
+def render(players, worlds, online=True, now=None, found=None, relays=None):
     now = int(now if now is not None else time.time())
     if not online:
         return (f"🔴 **Forza Horizon 1: ReImagined — public server offline**\n"
@@ -125,6 +146,8 @@ def render(players, worlds, online=True, now=None, found=None):
             lines.append(f"• Single player or menus: {rest}")
     elif players:
         lines.append("No online lobbies open right now: start one from Find Game!")
+    if relays:
+        lines.append(render_relays(relays))
     lines.append(f"Address: `{PUBLIC_ADDRESS}` (set by default in the launcher) · "
                  f"updated <t:{now}:R>")
     return "\n".join(lines)
@@ -179,10 +202,12 @@ def update(status, data_dir, now=None):
     if not enabled():
         return
     players, worlds, found = summary(status)
-    key = (players, worlds, tuple(sorted((k, tuple(v)) for k, v in found.items())))
+    states = relay_states(status)
+    key = (players, worlds, tuple(sorted((k, tuple(v)) for k, v in found.items())),
+           tuple((where, up) for where, up, _, _ in states))  # sessions: at the heartbeat
     if not due(key, now):
         return
-    if post(data_dir, render(players, worlds, now=now, found=found)):
+    if post(data_dir, render(players, worlds, now=now, found=found, relays=states)):
         _state["key"], _state["sent"] = key, (now if now is not None else time.time())
 
 

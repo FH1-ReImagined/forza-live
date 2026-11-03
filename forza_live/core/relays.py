@@ -26,7 +26,8 @@ them. A ticket lets one player (its peer id, as the main server numbers players)
 at the relay, inside one session (the players the main server put together there), up to `rate`
 bytes a second, until `expiry` (unix time).
 
-GET /relays.json is the list, signed as /servers.json is (server_list.py), with the same key and
+GET /relays.json lists the relays that pass the main server's probes (network/relay_broker.py:
+a relay failing them again and again drops out, and comes back once it passes again), signed as /servers.json is (server_list.py), with the same key and
 its own tag, so the launcher checks both with the public key it ships:
 
     {"format": "forza-live-relays-1", "key": "<public key, 64 hex>",
@@ -75,12 +76,19 @@ Ticket = namedtuple("Ticket", "session xuid peer_id expiry rate")
 
 _data_dir = "forza_live_data"
 _cache = {"stamp": None, "signed": 0.0, "body": None}
+_listed = None  # the ids the main server's probes pass (set_listed); None: every entry
 
 
 def configure(data_dir):
     global _data_dir
     _data_dir = data_dir
     _cache.update(stamp=None, signed=0.0, body=None)
+
+
+def set_listed(ids):
+    """The relays /relays.json lists (those passing the probes), or None for all of them."""
+    global _listed
+    _listed = None if ids is None else frozenset(ids)
 
 
 def relay_tag(relay_id):
@@ -317,7 +325,7 @@ def check_document(document, public, now=None):
 
 def document():
     """The current /relays.json body (bytes), or None when no relay is listed."""
-    current = stamp()
+    current = (stamp(), _listed)
     now = time.time()
     if _cache["body"] is not None and _cache["stamp"] == current and now - _cache["signed"] < RESIGN:
         return _cache["body"]
@@ -330,6 +338,8 @@ def document():
         return _cache["body"]
     for problem in problems:
         log.warning("relays: %s: %s (left out)", LIST_FILE, problem)
+    if _listed is not None:
+        entries = [e for e in entries if e["id"] in _listed]
     seed = server_list.load_key(_data_dir)
     if seed is None:
         return None
