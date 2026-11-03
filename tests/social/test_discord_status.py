@@ -11,7 +11,7 @@ from forza_live.social import discord_status as ds
 
 class DiscordStatusTest(unittest.TestCase):
     def setUp(self):
-        ds._state.update(key=None, sent=0.0)
+        ds._state.update(key=None, sent=0.0, polled=None, community=[])
         self.dir = tempfile.mkdtemp()
 
     def test_summary_skips_probe(self):
@@ -79,6 +79,41 @@ class DiscordStatusTest(unittest.TestCase):
         self.assertIn("**4 players online** · 0 Horizon Worlds open", ds.render(4, 0, now=100))
         self.assertIn("offline", ds.render(0, 0, online=False, now=100))
         self.assertIn("<t:100:R>", ds.render(0, 0, now=100))
+
+    def test_community_servers(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "server_list.json"), "w") as f:
+                json.dump({"self": {"name": "Main", "address": "main.example.org"},
+                           "servers": [{"name": "US East", "address": "us.example.org:1819"},
+                                       {"name": "Down", "address": "[2001:db8::1]"},
+                                       {"name": "Odd", "address": "odd.example.org"}]}, f)
+            asked = []
+
+            def fetch(address):
+                asked.append(address)
+                world = {"playlist": 3, "session": "aa", "players": 2, "slots": 8}
+                return {"us.example.org:1819": {"rooms": {"#TU4": [
+                            {"id": 1, "match": world}, {"id": 2, "standby": world}]}},
+                        "odd.example.org": {"rooms": "junk"}}.get(address)
+            states = ds.community_states(d, now=1000, fetch=fetch)
+            self.assertEqual(sorted(asked), ["[2001:db8::1]", "odd.example.org",
+                                             "us.example.org:1819"])
+            self.assertEqual(states[0], ("US East", "us.example.org:1819", True, 2, 1))
+            self.assertEqual(states[1], ("Down", "[2001:db8::1]", False, 0, 0))
+            self.assertEqual(states[2][2], True)
+            # between polls the last answers are used, without asking again
+            self.assertEqual(ds.community_states(d, now=1000 + ds.COMMUNITY_POLL - 1,
+                                                 fetch=fetch), states)
+            self.assertEqual(len(asked), 3)
+            text = ds.render(0, 0, now=100, community=states)
+            self.assertIn("**Community servers**", text)
+            self.assertIn("• 🟢 **US East**: 2 players · 1 Horizon World — `us.example.org:1819`",
+                          text)
+            self.assertIn("• 🔴 **Down**: offline — `[2001:db8::1]`", text)
+        self.assertNotIn("Community servers", ds.render(0, 0, now=100))
+        self.assertEqual(ds.status_url("us.example.org:1819"), "http://us.example.org:1820/status")
+        self.assertEqual(ds.status_url("main.example.org"), "http://main.example.org:21201/status")
+        self.assertEqual(ds.status_url("[2001:db8::1]:5000"), "http://[2001:db8::1]:5001/status")
 
     def test_render_named(self):
         self.assertIn("public server**", ds.render(0, 0, now=100))

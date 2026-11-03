@@ -8,15 +8,18 @@ fresh; on shutdown it marks the server offline. Webhooks may edit their own mess
 in DATA_DIR/discord_status.json, so a restart edits the same message instead of posting a
 new one. Probe registrations (room "probe") are not counted. With volunteer relays listed
 (network/relay_broker.py), a line shows each one's region, whether it is up and the sessions
-it relays; a relay going up or down edits the message.
+it relays; a relay going up or down edits the message. The community servers of the server
+list (core/server_list.py, DATA_DIR/server_list.json) get a line each, with their players and
+open Horizon Worlds from their own /status, checked every COMMUNITY_POLL seconds.
 """
+import concurrent.futures
 import json
 import logging
 import os
 import time
 import urllib.error
 import urllib.request
-from forza_live.core import durable
+from forza_live.core import durable, server_list
 
 log = logging.getLogger("forza-live")
 
@@ -27,8 +30,12 @@ PUBLIC_ADDRESS = os.environ.get("FORZA_PUBLIC_ADDRESS", "forza-reimagined.playit
 SERVER_NAME = os.environ.get("FORZA_DISCORD_STATUS_NAME", "").strip()[:48]
 HEARTBEAT = 600  # seconds between edits when nothing changed
 HIDDEN_ROOMS = {"probe"}
+COMMUNITY_POLL = 120     # seconds between checks of the listed community servers
+COMMUNITY_TIMEOUT = 4
+MAX_COMMUNITY = 12       # servers checked and shown
+MAX_STATUS = 4 << 20     # bytes of a community server's /status read
 
-_state = {"key": None, "sent": 0.0}
+_state = {"key": None, "sent": 0.0, "polled": None, "community": []}
 
 
 def enabled():
@@ -131,7 +138,7 @@ def render_relays(states):
     return "**Relays**: " + " · ".join(parts)
 
 
-def render(players, worlds, online=True, now=None, found=None, relays=None):
+def render(players, worlds, online=True, now=None, found=None, relays=None, community=None):
     now = int(now if now is not None else time.time())
     if not online:
         return (f"🔴 **Forza Horizon 1: ReImagined — {SERVER_NAME or 'public server'} offline**\n"
@@ -152,9 +159,80 @@ def render(players, worlds, online=True, now=None, found=None, relays=None):
         lines.append("No online lobbies open right now: start one from Find Game!")
     if relays:
         lines.append(render_relays(relays))
+    if community:
+        lines += render_community(community)
     where = "on the launcher's Servers page" if SERVER_NAME else "set by default in the launcher"
     lines.append(f"Address: `{PUBLIC_ADDRESS}` ({where}) · updated <t:{now}:R>")
     return "\n".join(lines)
+
+
+def status_url(address):
+    """http://host:<port + 1>/status of a server address as players type it (host[:port], the
+    UDP port, 21200 by default; the HTTP port is the next one)."""
+    host, port = address, 21200
+    if address.startswith("["):
+        end = address.index("]")
+        host, rest = address[:end + 1], address[end + 1:]
+        if rest:
+            port = int(rest[1:])
+    elif ":" in address:
+        host, port = address.rsplit(":", 1)
+        port = int(port)
+    return f"http://{host}:{port + 1}/status"
+
+
+def fetch_status(address, timeout=COMMUNITY_TIMEOUT):
+    """A listed server's /status as a dict, or None when it does not answer with one."""
+    try:
+        req = urllib.request.Request(status_url(address),
+                                     headers={"User-Agent": "forza-live (status)"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(MAX_STATUS + 1)
+        status = json.loads(body) if len(body) <= MAX_STATUS else None
+        return status if isinstance(status, dict) else None
+    except Exception:
+        return None
+
+
+def community_states(data_dir, now=None, fetch=fetch_status):
+    """[(name, address, up, players, worlds)] of the community servers in the server list (not
+    this one), checked at most every COMMUNITY_POLL seconds: in between, the last answers."""
+    now = now if now is not None else time.time()
+    if _state["polled"] is not None and now - _state["polled"] < COMMUNITY_POLL:
+        return _state["community"]
+    _state["polled"] = now
+    try:
+        entries, _ = server_list.load_entries(os.path.join(data_dir, server_list.LIST_FILE))
+    except (OSError, ValueError):
+        entries = []
+    entries = [e for e in entries if not e.get("main")][:MAX_COMMUNITY]
+    states = []
+    if entries:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(entries)) as pool:
+            answers = list(pool.map(lambda e: fetch(e["address"]), entries))
+        for entry, status in zip(entries, answers):
+            players = worlds = 0
+            if status is not None:
+                try:
+                    players, worlds = summary(status)[:2]
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    pass  # another server's status must never stop this message
+            states.append((entry["name"], entry["address"], status is not None, players, worlds))
+    _state["community"] = states
+    return states
+
+
+def render_community(states):
+    lines = ["**Community servers** (their own friends lists and leaderboards; pick one on the "
+             "launcher's Servers page):"]
+    for name, address, up, players, worlds in states:
+        if not up:
+            lines.append(f"• 🔴 **{name}**: offline — `{address}`")
+            continue
+        who = "1 player" if players == 1 else f"{players} players"
+        open_worlds = "1 Horizon World" if worlds == 1 else f"{worlds} Horizon Worlds"
+        lines.append(f"• 🟢 **{name}**: {who} · {open_worlds} — `{address}`")
+    return lines
 
 
 def _id_path(data_dir):
@@ -207,11 +285,14 @@ def update(status, data_dir, now=None):
         return
     players, worlds, found = summary(status)
     states = relay_states(status)
+    community = community_states(data_dir, now)
     key = (players, worlds, tuple(sorted((k, tuple(v)) for k, v in found.items())),
-           tuple((where, up) for where, up, _, _ in states))  # sessions: at the heartbeat
+           tuple((where, up) for where, up, _, _ in states),  # sessions: at the heartbeat
+           tuple(community))
     if not due(key, now):
         return
-    if post(data_dir, render(players, worlds, now=now, found=found, relays=states)):
+    if post(data_dir, render(players, worlds, now=now, found=found, relays=states,
+                             community=community)):
         _state["key"], _state["sent"] = key, (now if now is not None else time.time())
 
 
