@@ -13,6 +13,9 @@ from unittest import mock
 
 from forza_live.competition import objectives as ob
 from forza_live.competition import scores
+from forza_live.content import market
+from forza_live.social import discord_status as ds
+from forza_live.social import notifications
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
 from forza_live.title_services import lsp
@@ -32,10 +35,10 @@ class Base(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         scores.configure(self.dir.name, "main-1")
-        ob.configure(self.dir.name)
         self.addCleanup(ob.STORE.__init__)       # no later test writes into this folder
-        self.addCleanup(setattr, ob, "SEED", ob.SEED)
-        self.addCleanup(setattr, ob, "ENABLED", True)
+        for name in ("SEED", "ENABLED", "GIFTS"):
+            self.addCleanup(setattr, ob, name, getattr(ob, name))
+        ob.configure(self.dir.name, enabled=True)
         self.addCleanup(setattr, ob, "RACE_GAP", ob.RACE_GAP)
         ob.RACE_GAP = 0
         self.addCleanup(setattr, lsp, "DATA_DIR", lsp.DATA_DIR)
@@ -58,7 +61,7 @@ class Base(unittest.TestCase):
                 for s in doc["sets"]}
 
     def race(self, place=1, places=8, cls=B_CLASS, finished=True, humans=1, xuid=A_XUID,
-             trusted=True, scored=True):
+             trusted=True, scored=True, build="0.2.0/tu4", now=WED):
         """User.WriteRaceStatsEx through lsp, as the game sends it at a race's end."""
         stats = {"finished": finished, "userFinishPosition": place, "maxPlaces": places,
                  "numHumans": humans, "numAI": places - humans, "eventId": 199}
@@ -68,9 +71,9 @@ class Base(unittest.TestCase):
             ptype = A.ForzaUserWriteRaceStatsEx_Params
             params["scoreData"] = {"base": {"carId": 1398, "carClassId": cls}, "numCarsPassed": 0}
         caller = lsp._caller.set(lsp.TRUSTED if trusted else lsp.UNVERIFIED)
-        source = scores.set_source(trusted, "0.2.0/tu4")
+        source = scores.set_source(trusted, build)
         try:
-            with mock.patch("time.time", return_value=WED):
+            with mock.patch("time.time", return_value=now):
                 return lsp.user_write_race_stats(xuid, bytes(x.encode(ptype, params)))
         finally:
             scores.reset_source(source)
@@ -280,10 +283,185 @@ class TrustTest(Base):
         ob.ENABLED = True
         self.assertEqual(self.progress()["daily"], [(0, False)])
 
+    def test_off_unless_the_server_turns_them_on(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        lsp.add_arguments(parser)
+        data = tempfile.TemporaryDirectory()
+        self.addCleanup(data.cleanup)
+        self.addCleanup(lsp.configure, parser.parse_args(["--data-dir", self.dir.name]))
+        lsp.configure(parser.parse_args(["--data-dir", data.name]))
+        self.assertFalse(ob.ENABLED)
+        self.assertEqual(lsp.handle(None, "GET", "/challenges", {}, b"", ("127.0.0.1", 1))[0], 404)
+        self.assertFalse(os.path.exists(os.path.join(data.name, ob.SEED_FILE)))
+        lsp.configure(parser.parse_args(["--data-dir", data.name, "--daily-challenges"]))
+        self.assertTrue(ob.ENABLED)
+        self.assertFalse(ob.GIFTS)
+        self.assertEqual(lsp.handle(None, "GET", "/challenges", {}, b"", ("127.0.0.1", 1))[0], 200)
+        lsp.configure(parser.parse_args(["--data-dir", data.name, "--daily-challenges-gifts"]))
+        self.assertFalse(ob.GIFTS)   # gifts only with the challenges on
+
     def test_players_are_apart(self):
         self.use(daily=[PODIUM])
         self.race(place=1, xuid=A_XUID)
         self.assertEqual(self.progress(B_XUID)["daily"], [(0, False)])
+
+
+class SeedTest(Base):
+    def test_a_secret_seed_is_made_once_and_kept(self):
+        path = os.path.join(self.dir.name, ob.SEED_FILE)
+        with open(path) as f:
+            seed = f.read().strip()
+        self.assertEqual(len(seed), 64)
+        self.assertEqual(ob.SEED, seed)
+        if os.name == "posix":
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        ob.configure(self.dir.name, enabled=True)   # a restart: the same seed
+        self.assertEqual(ob.SEED, seed)
+        with tempfile.TemporaryDirectory() as other:
+            ob.configure(other, enabled=True)
+            self.assertNotEqual(ob.SEED, seed)      # another server: its own
+            ob.STORE.__init__()
+
+    def test_a_seed_given_is_used_and_nothing_written(self):
+        with tempfile.TemporaryDirectory() as other:
+            ob.configure(other, "the operator's own", enabled=True)
+            self.assertEqual(ob.SEED, "the operator's own")
+            self.assertFalse(os.path.exists(os.path.join(other, ob.SEED_FILE)))
+            ob.STORE.__init__()
+
+    def test_the_seed_is_never_served(self):
+        with mock.patch("time.time", return_value=WED):
+            for path in ("/challenges", "/challenges/progress"):
+                body = ob.handle(None, "GET", path, {}, b"", lambda *a: A_XUID)[2]
+                self.assertNotIn(ob.SEED.encode(), body)
+
+
+class GiftTest(Base):
+    def setUp(self):
+        super().setUp()
+        ob.configure(self.dir.name, enabled=True, gifts=True)
+        market.configure(self.dir.name)
+        notifications.configure(self.dir.name)
+        self.use(daily=[PODIUM, ob.objective("race", "Finish a race", 1)],
+                 weekly=[ob.objective("race", "Finish 2 races", 2)])
+
+    def gifts(self, xuid=A_XUID):
+        market.MARKET.loaded = False
+        market.MARKET.load()
+        return [(g["type"], g["credits"]) for g in market.MARKET.gifts.values()
+                if g["recipient"] == "%016X" % xuid]
+
+    def test_three_finished_in_a_week_send_one_gift(self):
+        self.race(place=5)          # Finish a race: 1
+        self.assertEqual(self.gifts(), [])
+        self.race(place=5)          # Finish 2 races: 2
+        self.assertEqual(self.gifts(), [])
+        self.race(place=2)
+        self.race(place=2)
+        self.assertEqual(self.gifts(), [])
+        self.race(place=2)          # the third podium: 3 finished
+        self.assertEqual(self.gifts(), [("credits", ob.GIFT_CREDITS)])
+        note, = notifications.pending(A_XUID)
+        self.assertEqual((note["type"], note["params"]["Amount"]),
+                         (notifications.GIFT_CREDITS, ob.GIFT_CREDITS))
+        status, ctype, body, extra = ob.handle(None, "GET", "/challenges/progress", {}, b"",
+                                               lambda *a: A_XUID)
+        doc = json.loads(body)
+        self.assertEqual(doc["gift"], {"credits": 10000, "after": 3})
+        self.assertEqual(doc["player"]["gift"]["finished"], 3)
+        self.assertIsNotNone(doc["player"]["gift"]["sent"])
+
+    def test_never_twice_in_a_week_even_after_a_restart(self):
+        for _ in range(4):
+            self.race(place=1)
+        ob.configure(self.dir.name, enabled=True, gifts=True)
+        # tomorrow (the same week): the day's two objectives again
+        self.race(place=1, now=WED + 86400)
+        self.race(place=1, now=WED + 86400)
+        self.race(place=1, now=WED + 86400)
+        self.assertEqual(self.gifts(), [("credits", ob.GIFT_CREDITS)])
+        rec = ob.STORE.data["gifts"]["weekly-2026-W45"]["%016X" % A_XUID]
+        self.assertEqual(rec["n"], 5)
+        # next week: a new gift
+        monday = WED + 5 * 86400
+        for _ in range(4):
+            self.race(place=1, now=monday)
+        self.assertEqual(self.gifts(), [("credits", ob.GIFT_CREDITS)] * 2)
+
+    def test_only_ranked_builds_earn_it(self):
+        for build in ("git-908ea56c5b/tu4", "0.1.0/tu4", ""):
+            self.assertFalse(ob.ranked_build(build), build)
+        self.assertTrue(ob.ranked_build("0.2.1/tu0"))
+        for _ in range(4):
+            self.race(place=1, build="git-908ea56c5b/tu4")
+        self.assertEqual(self.progress()["daily"], [(3, True), (1, True)])  # progress still counts
+        self.assertEqual(self.gifts(), [])
+        self.assertEqual(ob.STORE.data["gifts"], {})
+
+    def test_an_objective_with_one_unranked_step_earns_nothing(self):
+        self.race(place=2, build="0.1.0/tu4")   # podium 1 (unranked), finish 1, 2 races 1
+        self.race(place=2)                      # podium 2, 2 races done (it had an unranked step)
+        self.race(place=2)                      # podium done (unranked step)
+        self.assertEqual(self.gifts(), [])
+        self.assertEqual(ob.STORE.data["gifts"], {})
+
+    def test_without_gifts_the_count_is_kept_and_nothing_sent(self):
+        ob.configure(self.dir.name, enabled=True, gifts=False)
+        for _ in range(4):
+            self.race(place=1)
+        self.assertEqual(self.gifts(), [])
+        doc = ob.document(A_XUID, WED)
+        self.assertNotIn("gift", doc)
+        self.assertNotIn("gift", doc["player"])
+
+    def test_unverified_callers_earn_nothing(self):
+        for _ in range(4):
+            self.race(place=1, trusted=False)
+        self.assertEqual(self.gifts(), [])
+
+
+class DiscordTest(Base):
+    def test_the_status_message_lists_the_challenges(self):
+        self.use(daily=[PODIUM, PHOTO], weekly=[TRAPS])
+        self.race(place=1)
+        self.race(place=1)
+        self.race(place=1)
+        states = ds.challenge_states(WED)
+        text = ds.render(3, 1, now=WED, challenges=states)
+        self.assertIn("🏁 **Today's challenges** (until <t:1793836800:R>): Finish 3 races on the "
+                      "podium (1 done) · Upload a Big Shot (0 done)", text)
+        self.assertIn("🏁 **This week's challenges** (until <t:1794182400:R>): Hit 250 km/h at 2 "
+                      "different speed traps (0 done)", text)
+        self.assertTrue(text.endswith("· updated <t:%d:R>" % WED))
+        self.assertNotIn("challenges", ds.render(0, 0, online=False, now=WED, challenges=states))
+        ob.ENABLED = False
+        self.assertEqual(ds.challenge_states(WED), ())
+
+    def test_within_discords_limit_challenges_go_first(self):
+        states = ds.challenge_states(WED)
+        many = [(f"Server {i}", f"s{i}.example.org", True, 9, 1,
+                 (("Horizon World", ((9, 16),) * 20),)) for i in range(12)]
+        text = ds.render(0, 0, now=WED, community=many, challenges=states)
+        self.assertLessEqual(len(text), ds.MAX_MESSAGE)
+        self.assertTrue(text.endswith("· updated <t:%d:R>" % WED))
+        self.assertNotIn("challenges**", text)
+        self.assertIn("Server 0", text)
+
+    def test_a_finished_objective_edits_the_message(self):
+        self.use(daily=[PODIUM])
+        ds._state.update(key=None, sent=0.0, polled=None, community=[])
+        self.addCleanup(ds._state.update, key=None, sent=0.0, polled=None, community=[])
+        with mock.patch.object(ds, "WEBHOOK", "https://discord.com/api/webhooks/1/x"), \
+                mock.patch.object(ds, "post", return_value=True) as post:
+            ds.update({}, self.dir.name, now=WED)
+            ds.update({}, self.dir.name, now=WED + 30)
+            self.race(place=1)
+            self.race(place=1)
+            self.race(place=1)
+            ds.update({}, self.dir.name, now=WED + 60)
+        self.assertEqual(post.call_count, 2)
+        self.assertIn("(1 done)", post.call_args[0][1])
 
 
 class HttpTest(Base):

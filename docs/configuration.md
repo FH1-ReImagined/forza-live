@@ -28,8 +28,9 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--rebind-legacy` | `FORZA_REBIND_LEGACY=1` | let an XUID bound to a friends key move to the first signed game |
 | `--raw-key-cutoff UNIX_TIME` | `FORZA_RAW_KEY_CUTOFF` | refuse friends keys sent raw after this time |
 | `--server-id NAME` | `FORZA_SERVER_ID` | the id written on score rows ([which results count](website-data.md#which-results-count)) |
-| `--daily-challenges-seed TEXT` | `FORZA_DAILY_CHALLENGES_SEED` | the seed the [daily and weekly challenges](website-data.md#daily-and-weekly-challenges) are chosen with (default a fixed one: anyone can work out the coming sets) |
-| `--no-daily-challenges` | | no daily and weekly challenges |
+| `--daily-challenges` | `FORZA_DAILY_CHALLENGES=1` | run the [daily and weekly challenges](website-data.md#daily-and-weekly-challenges) (off by default) |
+| `--daily-challenges-seed TEXT` | `FORZA_DAILY_CHALLENGES_SEED` | the secret seed they are chosen with (default: a random one made at the first start, kept in the data folder) |
+| `--daily-challenges-gifts` | `FORZA_DAILY_CHALLENGES_GIFTS=1` | a weekly credits gift for finished challenges (for the main server) |
 | | `FORZA_COMMUNITY_HOLD=1` | new community photos wait for release ([photos](operating.md#community-photos)) |
 | | `FORZA_COMMUNITY_MAX_WIDTH` | width of a published big shot (default 1920) |
 | | `FORZA_DISCORD_STATUS_WEBHOOK` | a Discord webhook for the [players-online message](#players-online-in-discord) |
@@ -274,6 +275,12 @@ of players or open Horizon Worlds changes (and every 10 minutes); on shutdown it
 server is offline. The message id is kept in the data folder (`discord_status.json`), so a
 restart edits the same message. `FORZA_PUBLIC_ADDRESS` sets the address it shows. With
 Docker, keep the URL in an env file: `--env-file /path/discord.env`.
+
+With [daily and weekly challenges](website-data.md#daily-and-weekly-challenges) on, the message
+ends with a short Challenges block: today's and this week's objectives, each with how many
+players finished it. A finished objective edits the message; nothing else is posted for them.
+When the message is over Discord's 2000 characters, lines go from the end first (the challenges
+before the servers), and the last line always stays.
 
 The community servers in the [server list](operating.md#listing-community-servers) follow in
 the same message, each in the same form as this server: up or offline, players, open Horizon

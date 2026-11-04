@@ -6,11 +6,16 @@ player, and each player's progress, from results it already takes from signed-in
     GET /challenges/progress  the same with the caller's own progress, for the player that signed
                               the request (the launcher's card; the proof of /coop/results)
 
+Off unless the server is started with --daily-challenges (FORZA_DAILY_CHALLENGES=1); any server
+may turn them on, and the launcher shows the main server's.
+
 The rotation: a daily set from 00:00 UTC to the next, a weekly set from Monday 00:00 UTC to the
-next Monday. Each set is chosen from DAILY or WEEKLY by the seed (--daily-challenges-seed) and the
-period's id with sha256, not `random`: every player and every restart get the same set, whatever
-the Python version. A set is kept with its progress once made, so a server update during a period
-keeps that period's objectives.
+next Monday. Each set is chosen from DAILY or WEEKLY by the seed and the period's id with sha256,
+not `random`: every player and every restart get the same set, whatever the Python version. The
+seed is the server's secret, never served: --daily-challenges-seed, or without it a random one
+made at the first start and kept in DATA_DIR/daily_challenges_seed.txt, so the coming sets cannot
+be worked out from the code. A set is kept with its progress once made, so a server update during
+a period keeps that period's objectives.
 
 What counts (the leaderboards' rule, #517): only title service calls that carry their player's
 own key (scores.source(), set by lsp.service_call for every call). Results taken by another
@@ -30,8 +35,16 @@ launcher reads the main server's. The steps:
   photo  a photo mode Big Shot published as a community photo (community.photo_uploaded).
 
 Each player's progress keeps the builds (X-Forza-Build) that made it, for review. No gamertag is
-kept. Stored in DATA_DIR/objectives.json: the current and the previous period of each kind, and
-each player's count of finished objectives (completed).
+kept. Stored in DATA_DIR/objectives.json: the current and the previous period of each kind, each
+player's count of finished objectives (completed) and the weekly gifts (gifts).
+
+Weekly gift (--daily-challenges-gifts, FORZA_DAILY_CHALLENGES_GIFTS=1; for the main server only,
+off by default): GIFT_CREDITS credits through the Message Center (market.gift_credits: the game's
+NEW GIFT message, collected with Gifting.RetrieveCreditsGift), once a week (the ISO week of the
+weekly set) to a player who has finished GIFT_AFTER objectives that week, daily or weekly. An
+objective counts toward it only when every step of it came from a ranked build (ranked_build: a
+release launcher's build, 0.2.0 or later). The gift is recorded before it is sent, so a week is
+never paid twice (a crash between the two loses that gift rather than sending it again).
 """
 
 import datetime
@@ -39,6 +52,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -50,8 +64,19 @@ from forza_live.core import limits
 log = logging.getLogger("forza-live")
 
 FILE = "objectives.json"
-ENABLED = True               # --no-daily-challenges turns them off
-SEED = "forza-live"          # --daily-challenges-seed / FORZA_DAILY_CHALLENGES_SEED
+SEED_FILE = "daily_challenges_seed.txt"
+ENABLED = False              # --daily-challenges / FORZA_DAILY_CHALLENGES=1 turns them on
+SEED = ""                    # --daily-challenges-seed / FORZA_DAILY_CHALLENGES_SEED, else SEED_FILE
+GIFTS = False                # --daily-challenges-gifts / FORZA_DAILY_CHALLENGES_GIFTS=1
+# The weekly gift: a fraction of one festival event's prize (an early one pays 35,000 CR for
+# first place), about what a won Rivals race pays with its bounty (7,440 CR seen).
+GIFT_CREDITS = 10000
+GIFT_AFTER = 3               # objectives finished in the week (daily or weekly) for the gift
+KEEP_GIFT_WEEKS = 8
+# A release launcher's build (X-Forza-Build "0.2.1/tu4"): not a source checkout's "0.1.0", a
+# "git-<commit>" build or a game before the header.
+RANKED_BUILD = re.compile(r"(\d+)\.(\d+)\.(\d+)/tu\d")
+FIRST_RANKED = (0, 2, 0)
 DAY = 86400
 WEEK = 7 * DAY
 RACE_GAP = 20.0              # seconds: at most one race a player counts in that time
@@ -157,7 +182,7 @@ def period(kind, now):
 class Store:
     def __init__(self):
         self.path = None
-        self.data = {"version": 1, "periods": {}, "completed": {}}
+        self.data = {"version": 1, "periods": {}, "completed": {}, "gifts": {}}
         self.loaded = False
         self.lock = threading.Lock()
         self.last_race = {}     # XUID hex -> when its last race counted (monotonic)
@@ -172,7 +197,8 @@ class Store:
             return
         if isinstance(data, dict) and isinstance(data.get("periods"), dict):
             self.data = {"version": 1, "periods": data["periods"],
-                         "completed": data.get("completed") or {}}
+                         "completed": data.get("completed") or {},
+                         "gifts": data.get("gifts") or {}}
 
     def save(self):
         if not self.path:
@@ -207,13 +233,41 @@ class Store:
 STORE = Store()
 
 
-def configure(data_dir, seed=None, enabled=True):
-    global SEED, ENABLED
+def load_seed(data_dir):
+    """The server's secret seed from DATA_DIR/SEED_FILE, made (random, 256 bits) when there is
+    none."""
+    path = os.path.join(data_dir, SEED_FILE)
+    try:
+        with open(path, encoding="ascii") as f:
+            seed = f.read().strip()
+        if len(seed) >= 32:
+            return seed
+        log.warning("challenges: %s is too short: a new seed is made", path)
+    except FileNotFoundError:
+        pass
+    seed = os.urandom(32).hex()
+    os.makedirs(data_dir, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(seed + "\n")
+    durable.replace(tmp, path)
+    log.info("challenges: a new secret seed is kept in %s", path)
+    return seed
+
+
+def configure(data_dir, seed=None, enabled=False, gifts=False):
+    global SEED, ENABLED, GIFTS
     STORE.__init__()
     STORE.path = os.path.join(data_dir, FILE)
-    if seed:
-        SEED = seed
-    ENABLED = enabled
+    ENABLED, GIFTS = enabled, enabled and gifts
+    if enabled:
+        SEED = seed or load_seed(data_dir)
+
+
+def ranked_build(build):
+    m = RANKED_BUILD.fullmatch(build or "")
+    return bool(m) and tuple(int(v) for v in m.groups()) >= FIRST_RANKED
 
 
 def hx(xuid):
@@ -232,6 +286,7 @@ def step(xuid, type_, match, now=None):
     now = time.time() if now is None else now
     key = hx(xuid)
     changed = False
+    finished_ranked = []
     with STORE.lock:
         STORE.load()
         for kind in KINDS:
@@ -260,8 +315,12 @@ def step(xuid, type_, match, now=None):
                 if build and build not in mine.setdefault("builds", []) and \
                         len(mine["builds"]) < MAX_BUILDS:
                     mine["builds"].append(build)
+                if not ranked_build(build):
+                    prog["unranked"] = True   # finished, it earns nothing towards a gift
                 if prog["n"] >= obj["target"]:
                     prog["done"] = int(now)
+                    if not prog.get("unranked"):
+                        finished_ranked.append(obj["title"])
                     rec["completed"][i] += 1
                     totals = STORE.data["completed"]
                     if key in totals or len(totals) < limits.MAX_PLAYERS:
@@ -269,9 +328,48 @@ def step(xuid, type_, match, now=None):
                         counts[kind] = counts.get(kind, 0) + 1
                     log.info("challenges: %s finished %s.%d (%s)", key, pid, i, obj["title"])
                 changed = True
+        if finished_ranked:
+            gift_step(xuid, len(finished_ranked), now)
         if changed:
             STORE.save()
     return changed
+
+
+def gift_record(key, now, create=False):
+    """The player's record of the week of `now` ({"n": objectives finished, "sent", "gift"}),
+    the weeks older than KEEP_GIFT_WEEKS pruned when one is made."""
+    week = period("weekly", now)[0]
+    weeks = STORE.data.setdefault("gifts", {})
+    if create and week not in weeks:
+        weeks[week] = {}
+        for old in sorted(weeks)[:-KEEP_GIFT_WEEKS]:
+            del weeks[old]
+    players = weeks.get(week, {})
+    if create and key not in players and len(players) < limits.MAX_PLAYERS:
+        players[key] = {"n": 0, "sent": None, "gift": None}
+    return week, players.get(key)
+
+
+def gift_step(xuid, finished, now):
+    """`finished` objectives done with results that count (STORE.lock held): the week's count,
+    and the gift once it reaches GIFT_AFTER (recorded, then sent)."""
+    key = hx(xuid)
+    week, rec = gift_record(key, now, create=True)
+    if rec is None:
+        return
+    rec["n"] += finished
+    if not GIFTS or rec["sent"] or rec["n"] < GIFT_AFTER:
+        return
+    rec["sent"] = int(now)
+    STORE.save()   # before the gift: a week is never paid twice
+    from forza_live.content import market
+    try:
+        rec["gift"] = market.gift_credits(int(key, 16), GIFT_CREDITS,
+                                          "Weekly challenges: %d finished this week" % rec["n"])
+    except (OSError, ValueError) as e:
+        log.warning("challenges: %s: the %s gift was not sent: %s", key, week, e)
+        return
+    log.info("challenges: %s: %d credits for %s (gift %s)", key, GIFT_CREDITS, week, rec["gift"])
 
 
 def race(xuid, stats, class_id=None, now=None):
@@ -359,8 +457,14 @@ def document(xuid=None, now=None):
         if len(STORE.data["periods"]) != made:   # a new period was made: keep its objectives
             STORE.save()
         doc = {"version": 1, "server": scores.server_id(), "now": int(now), "sets": sets}
+        if GIFTS:
+            doc["gift"] = {"credits": GIFT_CREDITS, "after": GIFT_AFTER}
         if key:
             doc["player"] = {"completed": dict(STORE.data["completed"].get(key, {}))}
+            if GIFTS:
+                week, rec = gift_record(key, now)
+                doc["player"]["gift"] = {"week": week, "finished": (rec or {}).get("n", 0),
+                                         "sent": (rec or {}).get("sent")}
     return doc
 
 

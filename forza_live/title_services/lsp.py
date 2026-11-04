@@ -194,13 +194,19 @@ def add_arguments(parser):
                              "470 km/h, and remove kept ones at start; by default they are "
                              "only logged (modified and modded cars go faster)")
     parser.add_argument("--no-trap-limits", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--daily-challenges", action="store_true",
+                        default=os.environ.get("FORZA_DAILY_CHALLENGES") == "1",
+                        help="run daily and weekly challenges (objectives.py; off by default: "
+                             "/challenges answers 404)")
     parser.add_argument("--daily-challenges-seed",
                         default=os.environ.get("FORZA_DAILY_CHALLENGES_SEED", ""),
-                        help="the seed the daily and weekly challenges are chosen with "
-                             "(objectives.py; default: a fixed one, so anyone can work out "
-                             "the coming sets)")
-    parser.add_argument("--no-daily-challenges", action="store_true",
-                        help="no daily and weekly challenges (/challenges answers 404)")
+                        help="the secret seed the challenges are chosen with (default: a random "
+                             "one made at the first start, kept in "
+                             "DATA_DIR/daily_challenges_seed.txt); never served")
+    parser.add_argument("--daily-challenges-gifts", action="store_true",
+                        default=os.environ.get("FORZA_DAILY_CHALLENGES_GIFTS") == "1",
+                        help="send a weekly credits gift (objectives.GIFT_CREDITS) through the "
+                             "Message Center for finished challenges; for the main server")
     parser.add_argument("--world-round-minutes", type=float, default=WORLD_ROUND_MINUTES,
                         help="length of a Horizon World round in minutes (default "
                              "%(default)s: endless). Only for clients with world_drop_in off, "
@@ -237,7 +243,8 @@ def configure(args):
     design_feed.configure()
     shader_lists.configure(DATA_DIR)
     leaderboards.configure(DATA_DIR)
-    objectives.configure(DATA_DIR, args.daily_challenges_seed, not args.no_daily_challenges)
+    objectives.configure(DATA_DIR, args.daily_challenges_seed, args.daily_challenges,
+                         args.daily_challenges_gifts)
     server_list.configure(DATA_DIR, scores.server_id)
     relays.configure(DATA_DIR)
 

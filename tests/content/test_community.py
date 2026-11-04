@@ -616,6 +616,8 @@ class ChallengesTest(Base):
     def test_a_published_photo_is_a_step_of_the_daily_challenges(self):
         """objectives.py: a photo objective moves on when the player's photo is published, not
         for an upload that is not (a game before signed requests)."""
+        self.addCleanup(setattr, objectives, "ENABLED", objectives.ENABLED)
+        objectives.ENABLED = True   # --daily-challenges
         big_shot = objectives.objective("photo", "Upload a Big Shot", 1)
         with mock.patch.object(objectives, "choose", lambda kind, pid, seed=None: [dict(big_shot)]):
             self.upload(LEGACY, make_jpeg(), how="raw")
