@@ -29,7 +29,7 @@ player's own machine, and **My own server** connects to one you host.
 | `forza_live/network/` | the title services' wire format (`xtsw`) and all its records (`xtsw_all`), the PROXY protocol behind a tunnel (`proxy`), a volunteer relay (`relay_node`, `--relay-only`) and the main server's side of the relays (`relay_broker`) |
 | `forza_live/title_services/` | Turn 10's title services on the HTTP port (`lsp`) and the playlists' round presets (`playground_rounds.xml`) |
 | `forza_live/social/` | friends, chat, car clubs, Message Center notifications, the Discord status message |
-| `forza_live/competition/` | scores and leaderboards, Rivals ghosts, community events, head-to-head challenges, Xbox LIVE stats |
+| `forza_live/competition/` | scores and leaderboards, Rivals ghosts, daily and weekly challenges (`objectives`), community events, head-to-head challenges, Xbox LIVE stats |
 | `forza_live/world/` | the Horizon World, who hosts it, clubs in it, the Co-op Festival and its results |
 | `forza_live/content/` | photos and community photos, designs and their previews, the Auction House and gifts, shader lists |
 | `tests/` | the unit tests, one folder per `forza_live/` folder (`tests/server/` for `server.py`); shared helpers in `tests/support.py` |

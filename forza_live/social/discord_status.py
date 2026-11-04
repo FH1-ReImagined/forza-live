@@ -10,7 +10,10 @@ new one. Probe registrations (room "probe") are not counted. With volunteer rela
 (network/relay_broker.py), a line shows each one's region, whether it is up and the sessions
 it relays; a relay going up or down edits the message. The community servers of the server
 list (core/server_list.py, DATA_DIR/server_list.json) get a line each, with their players and
-open Horizon Worlds from their own /status, checked every COMMUNITY_POLL seconds.
+open Horizon Worlds from their own /status, checked every COMMUNITY_POLL seconds. With daily
+challenges on (competition/objectives.py), a short Challenges block lists today's and this
+week's objectives and how many players finished each; a finished objective edits the message. No
+other message is posted for them.
 """
 import concurrent.futures
 import json
@@ -139,8 +142,37 @@ def render_relays(states):
     return "**Relays**: " + " · ".join(parts)
 
 
-def render(players, worlds, online=True, now=None, found=None, relays=None, community=None):
-    """The message: this server's block, then each community server's in the same form."""
+CHALLENGE_SETS = {"daily": "Today's challenges", "weekly": "This week's challenges"}
+
+
+def challenge_states(now=None):
+    """((kind, ends, ((title, players who finished), ...)), ...) of this server's current
+    challenges; () when they are off."""
+    from forza_live.competition import objectives
+    if not objectives.ENABLED:
+        return ()
+    try:
+        doc = objectives.document(None, now)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log.warning("discord status: challenges: %s", e)
+        return ()
+    return tuple((s["kind"], s["ends"], tuple((o["title"], o["completed"]) for o in s["objectives"]))
+                 for s in doc["sets"])
+
+
+def render_challenges(states):
+    """One line per set: its objectives and how many players finished each."""
+    lines = []
+    for kind, ends, objectives in states:
+        parts = " · ".join(f"{title} ({done} done)" for title, done in objectives)
+        lines.append(f"🏁 **{CHALLENGE_SETS.get(kind, kind)}** (until <t:{ends}:R>): {parts}")
+    return lines
+
+
+def render(players, worlds, online=True, now=None, found=None, relays=None, community=None,
+           challenges=None):
+    """The message: this server's block, then each community server's in the same form, then this
+    server's challenges."""
     now = int(now if now is not None else time.time())
     lines = render_server(SERVER_NAME, PUBLIC_ADDRESS, online, players, worlds, found,
                           since=now)
@@ -149,6 +181,8 @@ def render(players, worlds, online=True, now=None, found=None, relays=None, comm
         lines += render_server(name, address, up, c_players, c_worlds,
                                {k: list(v) for k, v in c_found})
     lines.append("")
+    if challenges and online:
+        lines += render_challenges(challenges)
     if relays and online:
         lines.append(render_relays(relays))
     if SERVER_NAME:
@@ -302,13 +336,14 @@ def update(status, data_dir, now=None):
     players, worlds, found = summary(status)
     states = relay_states(status)
     community = community_states(data_dir, now)
+    challenges = challenge_states(now)
     key = (players, worlds, tuple(sorted((k, tuple(v)) for k, v in found.items())),
            tuple((where, up) for where, up, _, _ in states),  # sessions: at the heartbeat
-           tuple(community))
+           tuple(community), challenges)
     if not due(key, now):
         return
     if post(data_dir, render(players, worlds, now=now, found=found, relays=states,
-                             community=community)):
+                             community=community, challenges=challenges)):
         _state["key"], _state["sent"] = key, (now if now is not None else time.time())
 
 

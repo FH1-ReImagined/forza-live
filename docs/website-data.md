@@ -1,6 +1,6 @@
 # Forza Live data for a website
 
-What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the map, community photos and designs, shader lists, and the list of servers. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
+What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the daily and weekly challenges, the map, community photos and designs, shader lists, and the list of servers. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
 
 ## Leaderboards
 
@@ -84,6 +84,55 @@ time yet" (FLT_MAX for a time, 0 for a speed): the game submits a time only when
 answer (FH1 #591).
 
 To tag and move rows by source, see the [score admin](operating.md#score-admin).
+
+## Daily and weekly challenges
+
+`forza_live/competition/objectives.py` sets three objectives a day (00:00 to 00:00 UTC) and three a
+week (Monday 00:00 UTC to the next Monday), the same for every player of the server. They are off
+by default: a server runs them with `--daily-challenges` (`FORZA_DAILY_CHALLENGES=1`). Any server,
+a community one too, can turn them on for its own players; the launcher shows only the main
+server's, and only results the main server took count there.
+
+Each set is chosen from the module's pool by a secret seed and the period, with sha256, so a
+restart gets the same set. The seed is `--daily-challenges-seed`, or without it a random one
+made at the first start and kept in the data folder (`daily_challenges_seed.txt`; keep it with
+the rest of the data folder, or the next sets change). It is never served, so the coming sets
+cannot be worked out from the code. A set is kept once made, so a server update during a day
+keeps that day's objectives. Players progress from what the game already sends, with the
+leaderboards' rule ([below](#which-results-count)): only calls that carry their player's own key
+count.
+
+| Objective | From |
+|-----------|------|
+| races: won, on the podium, finished, in a class, against other players | `User.WriteRaceStats(Ex)` at every race's end (the place, the grid, the humans, the car's class), at most one race every 20 s a player |
+| speed traps and speed zones: a speed at so many different ones, in a class | every pass (`SubmitScore` types 1 and 2), only below the trap's record and 470 km/h (`scores.speed_over_limit`), whether or not `--trap-limits` is on |
+| 1000 Club medals (Title Update 4) | `Challenge.ChallengeCompleted`: each (car, challenge) once a period |
+| big shots | a photo mode Big Shot published as a [community photo](#community-photos) |
+
+- `GET /challenges`: `{"version": 1, "server", "now", "sets": [{"kind": "daily"|"weekly", "id":
+  "daily-2026-11-04"|"weekly-2026-W45", "starts", "ends", "objectives": [{"id", "type", "title",
+  "target", "completed"}]}]}`. `completed` is how many players finished the objective; no names or
+  ids. `Cache-Control: public, max-age=60`.
+- `GET /challenges/progress`: the same with the caller's `progress` and `done` (unix time or null)
+  on each objective, and `"player": {"completed": {"daily": n, "weekly": n}}` (the objectives it
+  finished so far). Needs a [signed request](configuration.md#signed-requests), like the co-op
+  results: 403 otherwise. The launcher's Play page shows it.
+
+**Weekly gift** (`--daily-challenges-gifts`, `FORZA_DAILY_CHALLENGES_GIFTS=1`, off by default; for
+the main server): 10,000 CR (`objectives.GIFT_CREDITS`) once a week, sent through the Message
+Center as a gift from Forza Live (the game's NEW GIFT message; DOWNLOAD adds the credits to the
+save), to a player who has finished 3 objectives (`GIFT_AFTER`) in that ISO week, daily or weekly.
+An objective counts toward it only when all of its steps came from a release launcher's build
+(`X-Forza-Build` 0.2.0 or later: not a source checkout's `0.1.0`, a `git-<commit>` build or a game
+before the header), besides the rule above. The gift is recorded before it is sent, so a week is
+never paid twice. With gifts on, `/challenges` has `"gift": {"credits", "after"}` and
+`/challenges/progress` the player's `"gift": {"week", "finished", "sent"}`.
+
+Data: `objectives.json` in the data folder: the current and the previous period of each kind
+with each player's progress (by XUID, with the builds that made it, no gamertag), each player's
+count of finished objectives, and the last 8 weeks' gift records (objectives finished, when the
+gift was sent and its id). Results taken by another server never reach this one: a
+community server's challenges are its own, and the launcher shows the main server's.
 
 ## The map
 
