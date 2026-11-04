@@ -1,4 +1,6 @@
-"""What happens around a sign-in: the audit events, the session records, the provider's data."""
+"""What happens around a sign-in: the audit events, the session records, the provider's data. And
+when an account is deleted, whichever way (the account page, the admin, the nightly purge), its
+linked key's likes go with it."""
 
 import time
 
@@ -8,10 +10,10 @@ from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
 from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.contrib.sessions.models import Session
-from django.db.models.signals import pre_save
+from django.db.models.signals import pre_delete, pre_save
 from django.dispatch import receiver
 
-from members.models import AuditEvent, SignIn
+from members.models import AuditEvent, GameLink, Like, SignIn, User
 
 
 @receiver(pre_save, sender=SocialAccount)
@@ -28,6 +30,13 @@ def method_of(request, user):
     if last.get("method") == "code":
         return "email"
     return last.get("method") or "unknown"
+
+
+@receiver(pre_delete, sender=User)
+def delete_the_key_s_likes(sender, instance, **kwargs):
+    link = GameLink.objects.filter(user=instance).first()
+    if link is not None:
+        Like.objects.filter(xuid=link.xuid).delete()
 
 
 @receiver(user_signed_up)

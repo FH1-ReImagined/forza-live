@@ -138,6 +138,19 @@ def find(kind, item_id):
     return index().items.get((kind, item_id))
 
 
+def present():
+    """{kind: the ids of every photo or design in the game server's file, whatever its state, or
+    None when the file is missing or damaged (and so is its .bak)}: for members.moderation's
+    purge of the likes of items that are gone."""
+    photos = (_read("community.json", None) or {}).get("photos")
+    files = (_read("designs.json", None) or {}).get("files")
+    return {
+        PHOTO: set(photos) if isinstance(photos, dict) else None,
+        DESIGN: {f["webId"] for f in files.values() if isinstance(f, dict) and isinstance(f.get("webId"), str)}
+        if isinstance(files, dict) else None,
+    }
+
+
 def forget():
     """The next index() reads the files again (after this service deleted an item)."""
     with _lock:

@@ -58,6 +58,7 @@ from members.models import CODE_CHARS, AuditEvent, GameLink, LinkRequest, SignIn
 log = logging.getLogger("members")
 
 CODES_OFF = "fh:link-codes-off"
+LINKS_HALF_WARNED = "fh:links-half-warned"
 REQUEST_ID = re.compile(r"[0-9a-f]{32}")
 State = Literal["pending", "claimed", "declined", "linked", "cancelled", "expired"]
 
@@ -345,7 +346,17 @@ def link_confirm(request, rid: str, body: ConfirmIn):
         limits.take(request, "link_change", key=k)
     log.info("accounts: account %s linked a game%s; %d other session(s) ended", user.public_id,
              " (moved from another account)" if moved else "", ended)
+    warn_links_half_used(t)
     return {"ok": True, "state": "linked"}
+
+
+def warn_links_half_used(t):
+    """A warning, once a day, when the past day's new links reach half of LINKS_DAILY: a key farm
+    growing shows here before the cap stops it."""
+    n = GameLink.objects.filter(linked_at__gte=t - timedelta(days=1)).count()
+    if n >= max(1, settings.LINKS_DAILY // 2) and cache.add(LINKS_HALF_WARNED, True, 86400):
+        log.warning("accounts: %d new game links in the past day, half of the daily cap (%d) or more", n,
+                    settings.LINKS_DAILY)
 
 
 @api.post("/game/link/{rid}/cancel", response={200: StateOut}, auth=None)

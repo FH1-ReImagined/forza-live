@@ -291,6 +291,10 @@ LINK_CODES_OFF_MINUTES = 10  # codes stop this long after too many wrong ones (l
 LIKES_AFTER_HOURS = 72
 LIKES_SIGNED_DAYS = 2
 LIKE_COUNTS_SECONDS = 60  # the public totals are counted again at most this often (per worker)
+# The likes of a photo or design that is no longer in community.json or designs.json (the operator
+# deleted it, the game removed it, the screening took it down) are deleted once it has been missing
+# this long (members.moderation, run by nightly), so a file that is briefly missing wipes nothing.
+LIKES_PURGE_GRACE_DAYS = 7
 # The game server's HTTP port, for its owner-only delete route (forza_live/content/owners.py),
 # reached directly, never through the tunnel or a proxy, with its own token. Without both,
 # deleting from the account page is off (503).

@@ -15,7 +15,9 @@ every worker, so a signed request works once.
 
 Like is a thumbs-up for a community photo or design (members.likes). It belongs to the game key
 (the XUID), not to the account: a second account, or a link that moved, cannot like twice. Who
-liked what is never shown; only the totals are public.
+liked what is never shown; only the totals are public. MissingItem is a liked item that the
+nightly purge (members.moderation) no longer found in the game server's files, and since when:
+its likes go once it has been missing for LIKES_PURGE_GRACE_DAYS.
 """
 
 import secrets
@@ -111,3 +113,12 @@ class Like(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=["xuid", "kind", "item"], name="one_like_per_key")]
         indexes = [models.Index(fields=["kind", "item"], name="likes_of_an_item")]
+
+
+class MissingItem(models.Model):
+    kind = models.CharField(max_length=6, choices=Like.KINDS)
+    item = models.CharField(max_length=12)
+    since = models.DateTimeField()  # the first purge that did not find it
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["kind", "item"], name="one_missing_row_per_item")]
