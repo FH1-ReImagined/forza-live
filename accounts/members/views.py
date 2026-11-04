@@ -43,9 +43,10 @@ class StandInLoginCodeInput(RequestLoginCodeInput):
         stand_in = identity.stand_in(address)
         if not limits.take(request, "request_login_code", key=stand_in):
             raise get_adapter().validation_error("too_many_login_attempts")
-        users = filter_users_by_email(stand_in, is_active=True, prefer_verified=True, for_login=True)
-        user = users[0] if users else None
-        if user is None and adapters.new_account_allowed(request):
+        users = filter_users_by_email(stand_in, prefer_verified=True, for_login=True)
+        user = next((u for u in users if u.is_active), None)
+        # A suspended account (members.moderation) gets no code, and no new account in its place.
+        if not users and adapters.new_account_allowed(request):
             user = User.objects.create()
             EmailAddress.objects.create(user=user, email=stand_in, primary=True, verified=False)
             AuditEvent.objects.create(user=user, event="created with email")

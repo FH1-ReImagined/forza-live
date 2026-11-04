@@ -1,7 +1,8 @@
 """The daily upkeep: expired sessions, audit events past 90 days, accounts unused for 30 days that
-are not linked to a game, email accounts whose code was never used after a day, link requests and
-launcher nonces that are over, then a dated backup of the database and the email pepper (7
-kept)."""
+are not linked to a game (suspended ones stay), email accounts whose code was never used after a
+day, link requests and launcher nonces that are over, the likes of photos and designs gone from
+the game server for LIKES_PURGE_GRACE_DAYS (members.moderation, also the purge_likes command),
+then a dated backup of the database and the email pepper (7 kept)."""
 
 import datetime
 import os
@@ -15,6 +16,8 @@ from django.db import connection
 from django.db.models import Q
 from django.utils import timezone
 
+from members import moderation
+from members.management.commands.purge_likes import summary
 from members.models import AuditEvent, LinkRequest, SignedNonce, SignIn, User
 
 AUDIT_DAYS = 90
@@ -32,7 +35,8 @@ def purge(now=None):
     unused = now - datetime.timedelta(days=UNUSED_CODE_DAYS)
     LinkRequest.objects.filter(expires__lt=now - datetime.timedelta(hours=1)).delete()
     SignedNonce.objects.filter(until__lt=now).delete()
-    stale = User.objects.filter(is_staff=False, is_superuser=False, game_link__isnull=True).filter(
+    # A suspended account stays (members.moderation): deleting it would let it sign up afresh.
+    stale = User.objects.filter(is_staff=False, is_superuser=False, is_active=True, game_link__isnull=True).filter(
         Q(last_login__lt=idle) | Q(last_login__isnull=True, date_joined__lt=unused))
     return stale.delete()[1].get("members.User", 0)
 
@@ -63,9 +67,12 @@ def backup(now=None, source=None):
 
 
 class Command(BaseCommand):
-    help = "Purge expired sessions, old audit events, unused accounts and old link requests, then back up."
+    help = ("Purge expired sessions, old audit events, unused accounts, old link requests and the likes of "
+            "items gone from the game server, then back up.")
 
     def handle(self, *args, **options):
         gone = purge()
+        likes = moderation.purge_missing_likes()
         dest = backup()
-        self.stdout.write("deleted %d unused accounts; backup %s" % (gone, dest))
+        self.stdout.write("deleted %d unused accounts; likes: %s; backup %s" % (
+            gone, summary(likes) if likes else "no game data", dest))

@@ -32,9 +32,11 @@ readers, and uses them on the game server's data folder, mounted read-only.
 | `members/likes.py` | likes, the public like totals, and My items with its delete |
 | `members/items.py` | the game server's photos and designs, read-only, with its own rules for which are public |
 | `members/game.py` | the game server's data, read-only (keys, players, bans), the signed-request check, and which keys' likes count |
+| `members/moderation.py` | the operator's tools (void likes, suspend, sign out, unlink, stats) and the purge of likes whose item is gone |
+| `members/admin.py` | the Django admin: accounts, game links, likes, audit events (see "Moderation") |
 | `members/middleware.py` | answer headers, the allauth routes that exist, Sec-Fetch-Site, the admin allow list, session lifetime |
 | `members/identity.py` | the email stand-in: an HMAC of the address |
-| `members/management/commands/` | `checkdb` (integrity check) and `nightly` (purge and backup) |
+| `members/management/commands/` | `checkdb` (integrity check), `nightly` (purge and backup), and the operator's `void_likes`, `purge_likes`, `stats`, `backup` and `restore` |
 | `members/tests/` | the tests (Django's test client, a fake OAuth provider, a fake `smtplib.SMTP`) |
 | `requirements.in`, `requirements.txt` | pinned dependencies; the `.txt` has hashes |
 | `Dockerfile`, `docker-entrypoint.sh` | the image: a digest-pinned `python:3.12-slim`, a user without privileges, gunicorn |
@@ -118,7 +120,7 @@ away).
 | `POST /api/me/items/delete` | `{"kind", "id"}` -> `{"ok": true, "deleted": true}`; 403 `sign in again` unless the last sign-in was in the past 10 minutes, 404 when it is not this key's, 502 `try again later` when the game server did not delete it, 503 when deleting is not configured |
 
 Which likes count in the public totals (`members.game.counted`): those of a key whose link is
-active, whose XUID is still bound to the pinned key and not banned, and whose first sign-in
+active, whose account is not suspended, whose XUID is still bound to the pinned key and not banned, and whose first sign-in
 signed by its key (`firstSigned`, written by the game server) is 72 hours old, with signed
 sign-ins on 2 days (`signedDays`). A key that is too new keeps its likes, which count once it
 qualifies. A frozen, banned or unlinked key's likes are kept but not counted; deleting the account
@@ -318,21 +320,63 @@ CSP must keep its other directives; the line above shows only what to add.
 It removes:
 - expired sessions;
 - audit events older than 90 days;
-- accounts not used for 30 days that are not linked to a game;
+- accounts not used for 30 days that are not linked to a game (a suspended account stays);
 - link requests that ended over an hour ago, and the launcher's used nonces past their window;
-- email accounts whose first code was never used, after a day.
+- email accounts whose first code was never used, after a day;
+- the likes of photos and designs that are no longer in the game server's `community.json` or
+  `designs.json` (the operator deleted one, the game removed it, the screening took it down),
+  once they have been missing for 7 days (`LIKES_PURGE_GRACE_DAYS`). An item that comes back
+  within that time keeps its likes. A file that is missing, damaged (with no good `.bak`) or
+  empty is not judged at all, so a bad mount deletes nothing. `purge_likes [--dry-run]
+  [--grace-days N]` runs the same on demand.
 
-Then it copies the database and the pepper to `backups/` (7 days kept). To restore, stop the
-container, copy `backups/accounts-<date>.sqlite3` over `accounts.sqlite3` (and delete
-`accounts.sqlite3-wal` and `-shm`), and start it again.
+Then it copies the database and the pepper to `backups/` (7 days kept); `backup` makes one now.
+To restore one:
 
-**The admin** (for moderation later): `/admin/`, Django's admin. nginx does not pass it on, and
+    docker exec forza-accounts python manage.py restore 2026-11-03           # checks it, changes nothing
+    docker exec forza-accounts python manage.py restore 2026-11-03 --yes
+    docker restart forza-accounts
+
+`restore` checks the backup (`PRAGMA integrity_check`, this service's tables), keeps the current
+database as `backups/pre-restore-<time>.sqlite3`, and copies the backup in through SQLite's
+backup API, which is safe while the service runs. It brings the pepper back from `backups/` when
+it is missing. The restart applies the migrations (for a backup from an older version). By hand
+instead: stop the container, copy `backups/accounts-<date>.sqlite3` over `accounts.sqlite3`,
+delete `accounts.sqlite3-wal` and `-shm`, and start it again.
+
+**The admin:** `/admin/`, Django's admin. nginx does not pass it on, and
 the service answers it only for `FORZA_ADMIN_ALLOW`. Make a staff user with
 `docker exec -it forza-accounts python manage.py createsuperuser`. To open it, either:
 - publish the port on the host's loopback only (`-p 127.0.0.1:<port>:8080`), set
   `FORZA_ADMIN_ALLOW` to the Docker bridge's gateway address (`<bridge-gateway-ip>/32`, the
   address such connections come from), and reach it through an SSH tunnel to the host; or
 - use `docker exec` with `curl` or the Django shell.
+
+## Moderation
+
+There is no admin HTTP route on the public side. Everything is in the admin (above) or a
+command run with `docker exec forza-accounts python manage.py <command>`. Every change to an
+account writes an audit event, which the player sees on the account page (for example "the
+operator suspended this account"), and a log line that names the account id only.
+
+| To | Admin | Command |
+|----|-------|---------|
+| find an account | Accounts: search by account id (`K7Q2-XM4P`, with or without the dash), linked gamertag or XUID; Game links: the same | |
+| see an account | its page: the game link, the audit events, and its likes given (a link to the like list) | |
+| see who liked what | Likes: read-only; filter by kind, item, key (XUID) and account, with the most liked items and most liking keys and accounts listed; the item's state now (`gone` when the game server no longer has it) | |
+| void likes (a key farm, a script) | Likes: "Void the selected likes" or "Void every like of the selected likes' keys"; Accounts and Game links: "Void the likes of the linked key" | `void_likes --account K7Q2-XM4P` or `--key <XUID>` (`--dry-run` counts them) |
+| suspend an account | Accounts: "Suspend": every session ends, it cannot sign in again (by email it gets no code and no new account in its place), and its key's likes are left out of the totals (they are kept). "Lift the suspension" undoes it | |
+| sign an account out everywhere | Accounts: "Sign out everywhere" | |
+| unlink a game | Game links: "Unlink". The key keeps its likes, which stop counting | |
+| unfreeze a link | Game links: "Unfreeze, pinning the key the XUID is bound to now" (after checking with the player) | |
+| delete an account | Accounts: delete. Its link, audit events and its key's likes go too | |
+| numbers | | `stats` (`--json`): accounts, suspended, links, frozen, new today, likes, liked items missing |
+
+Staff accounts are left out of suspend and sign-out. Voided likes can be given again: to stop a
+key for good, ban its XUID on the game server (`POST /admin/photos/ban/<XUID>` from the game
+server's own machine, or `banned_xuids.json`); a banned key cannot link or like, and its likes do
+not count. A link made by a key farm shows in `stats` (`links new today`), and the log warns once
+a day when the past day's new links reach half of `FORZA_ACCOUNTS_LINKS_DAILY`.
 
 ## What is stored
 
@@ -351,8 +395,11 @@ the service answers it only for `FORZA_ADMIN_ALLOW`. Make a staff user with
   gamertag, HMACs of the token and the code, and the account that claimed it.
 - **Launcher nonces:** the random nonce of each signed call, for 4 minutes, so none works twice.
 - **Likes:** the XUID of the key that gave it, the photo's or design's id, and when. Who liked
-  what is never shown; only the totals per item are public. A deleted item's likes are deleted
-  with it, and deleting the account deletes its key's likes.
+  what is never shown (only the operator sees it, in the admin); only the totals per item are
+  public. A deleted item's likes are deleted with it, those of an item gone from the game server
+  7 days after it went, and deleting the account deletes its key's likes.
+- **Missing items:** the id of each liked photo or design the nightly purge no longer finds, and
+  since when; until it comes back or its likes go.
 - **Audit events:** sign-ins, sign-outs, account creation, links made, moved and removed, items
   deleted (with their title); 90 days, with no IP address.
 - **Rate-limit counters:** in the cache table. They hold IP addresses and address hashes for an
@@ -409,6 +456,17 @@ Differences from the design (M3):
   so a page does not add a like to a total that will not show it.
 - **Taking a like back works for any item**, also one that left the public feeds.
 - **An item that is deleted takes its likes with it** (the design kept them stored).
+
+Differences from the design (M4, moderation):
+- **The operator's tools are the Django admin and management commands**, not one
+  `forza_accounts.py admin ...` CLI: `find` and `show` are the admin's search and account page,
+  `suspend`, `unsuspend`, `signout`, `unlink`, `unfreeze` and `void-likes` are admin actions
+  (`void-likes` is also the `void_likes` command), and `stats`, `backup` and `restore` are
+  commands.
+- **A suspended account's key's likes do not count**, and a suspended email account gets no new
+  account in its place when it asks for a code again.
+- **The likes of an item gone from the game server are purged** after 7 days missing, rather than
+  kept forever without counting.
 
 ## Development
 
