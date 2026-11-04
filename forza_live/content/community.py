@@ -72,6 +72,7 @@ import urllib.parse
 import zlib
 
 from forza_live.competition import leaderboards
+from forza_live.competition import objectives
 from forza_live.content import designs
 from forza_live.core import durable
 from forza_live.core import limits
@@ -511,6 +512,7 @@ def photo_uploaded(fid, rec, path, signed):
     save()
     log.info("community: %016X: file %d is photo %s (%dx%d, %d bytes, %s)", xuid, fid, pid, w, h,
              len(clean), status)
+    objectives.photo(xuid)  # daily and weekly challenges
     return pid
 
 

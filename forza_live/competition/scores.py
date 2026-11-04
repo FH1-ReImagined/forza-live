@@ -424,6 +424,10 @@ def submit(xuid, gamertag, kind, data, extra=None):
     for k in ("usedSTM", "usedTCS", "usedABS", "usedAutoBrake", "usedAutoShifting", "usedClutch"):
         entry[k] = data[k]
     tag(entry, trusted, build)
+    if trusted and kind in (SPEED_TRAP, SPEED_ZONE):
+        # Daily and weekly challenges: every pass counts there, a best or not (objectives.py)
+        from forza_live.competition import objectives  # it imports this module
+        objectives.speed(xuid, kind, sbid, score, data["carClassId"])
     if not trusted:
         # Not this server's player (an older game, or someone else): the boards are for players
         # signed in here.
@@ -608,6 +612,8 @@ def challenge_completed(gamertag_of):
             log.info("title: 1000 Club %016X: challenge %08X in car %d from an unverified caller: "
                      "not counted", xuid, thumb, car)
             return x.reply()
+        from forza_live.competition import objectives  # it imports this module
+        objectives.medal(xuid, car, thumb)  # daily and weekly challenges
         STORE.load()
         key = "%016X" % xuid
         entry = STORE.club.setdefault(key, {"xuid": key, "cars": {}})

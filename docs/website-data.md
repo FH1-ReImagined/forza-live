@@ -1,6 +1,6 @@
 # Forza Live data for a website
 
-What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the map, community photos and designs, shader lists, and the list of servers. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
+What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the daily and weekly challenges, the map, community photos and designs, shader lists, and the list of servers. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
 
 ## Leaderboards
 
@@ -84,6 +84,37 @@ time yet" (FLT_MAX for a time, 0 for a speed): the game submits a time only when
 answer (FH1 #591).
 
 To tag and move rows by source, see the [score admin](operating.md#score-admin).
+
+## Daily and weekly challenges
+
+`forza_live/competition/objectives.py` sets three objectives a day (00:00 to 00:00 UTC) and three a
+week (Monday 00:00 UTC to the next Monday), the same for every player: each set is chosen from the
+module's pool by the seed (`--daily-challenges-seed`) and the period, with sha256, so a restart
+or another machine gets the same set. A set is kept once made, so a server update during a day
+keeps that day's objectives. Players progress from what the game already sends, with the
+leaderboards' rule ([below](#which-results-count)): only calls that carry their player's own key
+count.
+
+| Objective | From |
+|-----------|------|
+| races: won, on the podium, finished, in a class, against other players | `User.WriteRaceStats(Ex)` at every race's end (the place, the grid, the humans, the car's class), at most one race every 20 s a player |
+| speed traps and speed zones: a speed at so many different ones, in a class | every pass (`SubmitScore` types 1 and 2), only below the trap's record and 470 km/h (`scores.speed_over_limit`), whether or not `--trap-limits` is on |
+| 1000 Club medals (Title Update 4) | `Challenge.ChallengeCompleted`: each (car, challenge) once a period |
+| big shots | a photo mode Big Shot published as a [community photo](#community-photos) |
+
+- `GET /challenges`: `{"version": 1, "server", "now", "sets": [{"kind": "daily"|"weekly", "id":
+  "daily-2026-11-04"|"weekly-2026-W45", "starts", "ends", "objectives": [{"id", "type", "title",
+  "target", "completed"}]}]}`. `completed` is how many players finished the objective; no names or
+  ids. `Cache-Control: public, max-age=60`.
+- `GET /challenges/progress`: the same with the caller's `progress` and `done` (unix time or null)
+  on each objective, and `"player": {"completed": {"daily": n, "weekly": n}}` (the objectives it
+  finished so far). Needs a [signed request](configuration.md#signed-requests), like the co-op
+  results: 403 otherwise. The launcher's Play page shows it.
+
+Data: `objectives.json` in the data folder: the current and the previous period of each kind
+with each player's progress (by XUID, with the builds that made it, no gamertag), and each
+player's count of finished objectives. Results taken by another server never reach this one: a
+community server's challenges are its own, and the launcher shows the main server's.
 
 ## The map
 

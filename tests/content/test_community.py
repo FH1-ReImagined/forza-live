@@ -21,6 +21,7 @@ import zlib
 from types import SimpleNamespace
 from unittest import mock
 
+from forza_live.competition import objectives
 from forza_live.core import auth
 from forza_live.content import community
 from forza_live.competition import leaderboards
@@ -609,6 +610,19 @@ class UploadTest(Base):
         with mock.patch.object(limits, "DISK_CAP", limits.usage() + len(data) + size // 2):
             self.upload(BOB, data)  # the private file fits, its community copy does not
         self.assertEqual(len(self.records()), 1)
+
+
+class ChallengesTest(Base):
+    def test_a_published_photo_is_a_step_of_the_daily_challenges(self):
+        """objectives.py: a photo objective moves on when the player's photo is published, not
+        for an upload that is not (a game before signed requests)."""
+        big_shot = objectives.objective("photo", "Upload a Big Shot", 1)
+        with mock.patch.object(objectives, "choose", lambda kind, pid, seed=None: [dict(big_shot)]):
+            self.upload(LEGACY, make_jpeg(), how="raw")
+            self.upload(ALICE, make_jpeg())
+            daily = objectives.document(ALICE)["sets"][0]["objectives"][0]
+            self.assertEqual((daily["progress"], daily["completed"]), (1, 1))
+            self.assertEqual(objectives.document(LEGACY)["sets"][0]["objectives"][0]["progress"], 0)
 
 
 class BigShotUploadTest(Base):

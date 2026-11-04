@@ -28,6 +28,8 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--rebind-legacy` | `FORZA_REBIND_LEGACY=1` | let an XUID bound to a friends key move to the first signed game |
 | `--raw-key-cutoff UNIX_TIME` | `FORZA_RAW_KEY_CUTOFF` | refuse friends keys sent raw after this time |
 | `--server-id NAME` | `FORZA_SERVER_ID` | the id written on score rows ([which results count](website-data.md#which-results-count)) |
+| `--daily-challenges-seed TEXT` | `FORZA_DAILY_CHALLENGES_SEED` | the seed the [daily and weekly challenges](website-data.md#daily-and-weekly-challenges) are chosen with (default a fixed one: anyone can work out the coming sets) |
+| `--no-daily-challenges` | | no daily and weekly challenges |
 | | `FORZA_COMMUNITY_HOLD=1` | new community photos wait for release ([photos](operating.md#community-photos)) |
 | | `FORZA_COMMUNITY_MAX_WIDTH` | width of a published big shot (default 1920) |
 | | `FORZA_DISCORD_STATUS_WEBHOOK` | a Discord webhook for the [players-online message](#players-online-in-discord) |

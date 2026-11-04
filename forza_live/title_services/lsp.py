@@ -64,6 +64,7 @@ from forza_live.content import owners
 from forza_live.core import relays
 from forza_live.core import server_list
 from forza_live.competition import leaderboards
+from forza_live.competition import objectives
 from forza_live.content import market
 from forza_live.social import notifications
 from forza_live.content import photos
@@ -193,6 +194,13 @@ def add_arguments(parser):
                              "470 km/h, and remove kept ones at start; by default they are "
                              "only logged (modified and modded cars go faster)")
     parser.add_argument("--no-trap-limits", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--daily-challenges-seed",
+                        default=os.environ.get("FORZA_DAILY_CHALLENGES_SEED", ""),
+                        help="the seed the daily and weekly challenges are chosen with "
+                             "(objectives.py; default: a fixed one, so anyone can work out "
+                             "the coming sets)")
+    parser.add_argument("--no-daily-challenges", action="store_true",
+                        help="no daily and weekly challenges (/challenges answers 404)")
     parser.add_argument("--world-round-minutes", type=float, default=WORLD_ROUND_MINUTES,
                         help="length of a Horizon World round in minutes (default "
                              "%(default)s: endless). Only for clients with world_drop_in off, "
@@ -229,6 +237,7 @@ def configure(args):
     design_feed.configure()
     shader_lists.configure(DATA_DIR)
     leaderboards.configure(DATA_DIR)
+    objectives.configure(DATA_DIR, args.daily_challenges_seed, not args.no_daily_challenges)
     server_list.configure(DATA_DIR, scores.server_id)
     relays.configure(DATA_DIR)
 
@@ -364,8 +373,17 @@ def race_multipliers(xuid, body):
     return x.reply(x.HopperGetRaceMultipliers_Results, {"specialMultiplier": value})
 
 
+def race_class(body, pos):
+    """The car's class from the scoreData after a WriteRaceStats(Ex) head (both start with the
+    submission's ScoreSubmission), or None when the call has none."""
+    try:
+        return x.decode(x.ScoreSubmission, body, pos)[0]["carClassId"]
+    except ValueError:
+        return None
+
+
 def user_write_race_stats(xuid, body):
-    head, _ = x.decode(x.UserWriteRaceStats_Head, body)
+    head, pos = x.decode(x.UserWriteRaceStats_Head, body)
     stats = head["raceStats"]
     record = load_player(xuid)
     record.update(userLevel=stats["userLevel"], userXP=stats["userXP"],
@@ -382,6 +400,7 @@ def user_write_race_stats(xuid, body):
              "" if caller_trusted() else " (unverified caller)")
     if caller_trusted():  # what the player's last co-op round paid online (coop_ledger)
         coop_ledger.LEDGER.race_written(xuid, stats["onlineWinnings"])
+        objectives.race(xuid, stats, race_class(body, pos))  # daily and weekly challenges
     if stats["hopperId"] in WORLD_HOPPERS:
         world.WORLDS.result(xuid, stats["userFinishPosition"], stats["maxPlaces"],
                             stats["finished"], session=stats["sessionId"],
@@ -881,6 +900,10 @@ def handle(server, method, path, headers, body, peer):
             return answer
     if url.path.startswith("/coop/"):  # co-op campaign results (coop_ledger.py)
         answer = coop_ledger.handle(server, method, path, headers, body, shader_lists.authenticate)
+        if answer is not None:
+            return answer
+    if url.path.startswith("/challenges"):  # daily and weekly challenges (objectives.py)
+        answer = objectives.handle(server, method, path, headers, body, shader_lists.authenticate)
         if answer is not None:
             return answer
     if url.path == "/servers.json":  # the signed list of servers (server_list.py, FH1 #587)
