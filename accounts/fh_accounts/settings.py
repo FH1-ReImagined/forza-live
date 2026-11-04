@@ -3,8 +3,8 @@ public site comes from environment variables, and every secret can come from a f
 (NAME_FILE=/run/secrets/...); README.md lists them all.
 
 Sign-in is django-allauth in headless mode (its JSON API for the static website), with Discord,
-GitHub and an emailed code. Our own endpoints (me, logout-all, account delete, the game link) are
-django-ninja. Linking an account to the game's key checks the launcher's signed requests with the
+GitHub and an emailed code. Our own endpoints (me, logout-all, account delete, the game link,
+likes and the player's own items) are django-ninja. Linking an account to the game's key checks the launcher's signed requests with the
 game server's own code (forza_live.core.auth), imported from the repository (or the image's copy).
 """
 
@@ -227,6 +227,9 @@ ACCOUNT_RATE_LIMITS = {
     "link_code_failed": "100/m/key",   # codes that found nothing, in all: then codes stop 10 minutes
     "link_change": "1/d/key",          # a new link, per XUID and per account
     "new_link": "%d/d/key" % LINKS_DAILY,  # new links in all
+    # Likes and the player's own items (members.likes). "key" is the account.
+    "like": "120/h/key,500/d/key",     # likes given or taken back
+    "item_delete": "20/d/key",         # photos and designs deleted from the account page
     # allauth's password and signup forms are not routed (no passwords); closed all the same.
     "login": "20/h/ip",
     "signup": "5/d/ip",
@@ -279,6 +282,21 @@ EMAIL_SIGNIN_ENABLED = bool(EMAIL_HOST) or TESTING
 GAME_DATA = Path(env("FORZA_GAME_DATA")) if env("FORZA_GAME_DATA") else None
 LINK_MINUTES = 10        # a link request lasts this long
 LINK_CODES_OFF_MINUTES = 10  # codes stop this long after too many wrong ones (link_code_failed)
+
+# ---- Likes and the player's own items (members.likes, members.items) ----
+
+# The photos and designs are read from FORZA_GAME_DATA too (community.json, designs.json). A
+# key's likes count in public once its first sign-in signed by its key is LIKES_AFTER_HOURS old
+# and it has signed in on LIKES_SIGNED_DAYS days (the game server's firstSigned and signedDays).
+LIKES_AFTER_HOURS = 72
+LIKES_SIGNED_DAYS = 2
+LIKE_COUNTS_SECONDS = 60  # the public totals are counted again at most this often (per worker)
+# The game server's HTTP port, for its owner-only delete route (forza_live/content/owners.py),
+# reached directly, never through the tunnel or a proxy, with its own token. Without both,
+# deleting from the account page is off (503).
+GAME_URL = env("FORZA_GAME_URL").rstrip("/") or None
+OWNER_TOKEN = env("FORZA_OWNER_TOKEN")
+GAME_TIMEOUT = 10
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

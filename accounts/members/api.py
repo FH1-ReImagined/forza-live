@@ -6,7 +6,8 @@
   POST /api/account/delete  {"confirm": "<account id>"}; needs a sign-in in the last 10 minutes
 
 and, in members.links, the game link: the launcher's signed calls under /api/game/ and the
-website's /api/link/peek, claim and remove.
+website's /api/link/peek, claim and remove; in members.likes, likes (/api/likes, likes/mine and
+the public likes/counts) and the player's own photos and designs (/api/me/items).
 
 Session auth with Django's CSRF check on every change (the page sends X-CSRFToken). Nothing here
 returns an email address, a provider's id or an XUID. The OpenAPI page (/api/docs) exists only
@@ -28,7 +29,7 @@ from ninja import NinjaAPI, Schema
 from ninja.security import django_auth
 from pydantic import ConfigDict, Field
 
-from members.models import AuditEvent, SignIn
+from members.models import AuditEvent, GameLink, Like, SignIn
 
 api = NinjaAPI(
     title="forza.dyotson.dev accounts",
@@ -58,10 +59,12 @@ class EventOut(Strict):
 class LinkOut(Strict):
     """The linked game: active; frozen (the XUID is bound to another key now, so the operator
     checks it); waiting (the game server forgot the key after a long time away, and its next
-    sign-in brings it back); or banned. Its gamertag, never its XUID."""
+    sign-in brings it back); or banned. Its gamertag, never its XUID. counted: the key's likes
+    are in the public totals (members.game.counted: some days after its first signed sign-in)."""
     state: Literal["active", "frozen", "waiting", "banned"]
     gamertag: str
     since: date
+    counted: bool = False
 
 
 class MeOut(Strict):
@@ -160,5 +163,8 @@ def delete_account(request, body: DeleteIn):
     logout(request)
     with transaction.atomic():
         end_sessions(user)
-        user.delete()  # identities, email stand-in, sessions and audit go with it (CASCADE)
+        link = GameLink.objects.filter(user=user).first()
+        if link is not None:
+            Like.objects.filter(xuid=link.xuid).delete()  # the linked key's likes go too
+        user.delete()  # identities, email stand-in, sessions, link and audit go with it (CASCADE)
     return {"ok": True, "deleted": True}

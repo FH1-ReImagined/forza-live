@@ -16,8 +16,9 @@ has a web state, kept with it in DATA_DIR/designs.json:
 
 The website gets a design's public id (random, never the storefront's file id), type, share
 code, title, description, the creator's gamertag (community.credit: none on record, not
-listed), the car's name for a paint job, counts and the preview as a PNG. Never a XUID, never
-the payload (it holds the creator's XUID).
+listed) and player id (owner: leaderboards.player_id, the salted id the leaderboards publish),
+the car's name for a paint job, counts and the preview as a PNG. Never a XUID, never the payload
+(it holds the creator's XUID).
 
 Previews: the design's cxds texture converted by cxds.py (gamma 1/2.2, an RGB PNG with
 IHDR, IDAT and IEND only), kept as DATA_DIR/designs/<file id>.png beside the design. Converted
@@ -37,7 +38,7 @@ is null.
 Public routes, on the title services port (no side effects, never a XUID):
 
   GET /community/designs.json          {"version":1,"generated":<unix>,"designs":[{"id","type",
-                                       "code","title","description","gamertag","car","layers",
+                                       "code","title","description","gamertag","owner","car","layers",
                                        "downloads","rating","createdAt","preview","w","h",
                                        "sha256"}]}: designs listed in the game and clear, newest
                                        first, at most FEED_MAX; ETag, Cache-Control
@@ -200,6 +201,7 @@ def feed_entry(f, gamertag):
     return {"id": f["webId"], "type": TYPES[f["kind"]], "code": f["code"],
             "title": limits.clean_ascii_text(m["title"], 16),
             "description": limits.clean_ascii_text(m["description"], 256), "gamertag": gamertag,
+            "owner": leaderboards.player_id(designs.hx(f["owner"])),
             "car": {"name": name} if name else None,
             "layers": m.get("numLayers") if f["kind"] == "layergroup" else None,
             "downloads": len(f["downloaders"]),

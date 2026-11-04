@@ -142,8 +142,9 @@ the other title services (the launcher reaches it at the server's UDP port plus 
 
 Photo mode's BIG SHOT ("upload it to ForzaMotorsport.net") becomes a community photo on the
 website when the game signs its requests ([signed requests](configuration.md#signed-requests)): the server
-publishes a 1920x1080 PNG it makes from the 3840x2160 BMP the game sends, credited by gamertag,
-with no XUID anywhere in the public output. Details, limits and the feed format:
+publishes a 1920x1080 PNG it makes from the 3840x2160 BMP the game sends, credited by gamertag
+and the owner's player id (the leaderboards' opaque id), with no XUID anywhere in the public
+output. Details, limits and the feed format:
 [title services](title_services.md#community-photos-forza_livecontentcommunitypy). Nothing to set up: the
 routes are on the HTTP port with the rest.
 
@@ -158,7 +159,9 @@ routes are on the HTTP port with the rest.
   started an hour; copies count in `FORZA_DISK_CAP_MB`. Converting a big shot takes the server
   about 0.2 s.
 - Big shots are not kept as private files (only the published copy), and the game sends no
-  removal: a player who wants a photo gone asks the operator.
+  removal: a player who wants a photo gone deletes it from the website's account page (with an
+  account linked to their game, through the [owner routes](title_services.md#a-players-own-items-forza_livecontentownerspy))
+  or asks the operator.
 - Games built from game main up to 3896de8 capture the big shot's tiles wrongly with the default
   `--readback_resolve=some` (nine copies of the loading screen); the server sees that and
   publishes nothing. `--readback_resolve=full` in the game gives the real photo.
@@ -177,7 +180,8 @@ as three player reports do. Nothing to set up: the routes are on the HTTP port w
 the worker screens designs as well as photos.
 
 - Public: `GET /community/designs.json` (designs listed in the game and screened clear, newest
-  first, at most 500: public id, type, share code, title, description, gamertag, car name, layers,
+  first, at most 500: public id, type, share code, title, description, gamertag, the creator's
+  player id, car name, layers,
   downloads, rating, upload time and the preview's URL, size and SHA-256; no XUID, no payload) and
   `GET /community/design-img/<id>.png` (the preview, 288x160 or 256x128, made by the server from
   the game's texture). Cached and rate limited like the photos' routes.

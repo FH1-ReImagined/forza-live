@@ -23,6 +23,7 @@ from unittest import mock
 
 from forza_live.core import auth
 from forza_live.content import community
+from forza_live.competition import leaderboards
 from forza_live.core import ed25519
 from forza_live.social import friends
 from forza_live.core import limits
@@ -435,7 +436,7 @@ class UploadTest(Base):
         self.assertEqual(doc["version"], 1)
         self.assertGreaterEqual(doc["generated"], int(before))
         entry, = doc["photos"]
-        self.assertEqual(sorted(entry), ["approvedAt", "gamertag", "h", "id", "image", "sha256",
+        self.assertEqual(sorted(entry), ["approvedAt", "gamertag", "h", "id", "image", "owner", "sha256",
                                          "takenAt", "title", "w"])
         self.assertEqual((entry["id"], entry["gamertag"], entry["title"], entry["w"], entry["h"]),
                          (pid, "Alice", "Sunset at the lake", 1280, 720))
@@ -531,9 +532,10 @@ class UploadTest(Base):
                 made.append(next(pid for pid, p in self.records().items() if p["title"] == "P%d" % n))
             self.assertEqual(self.ids(), made[::-1][:3])
 
-    def test_gallery_has_no_owner_or_xuid_anywhere(self):
+    def test_gallery_has_no_xuid_anywhere_and_the_owner_is_the_salted_player_id(self):
         for xuid in (ALICE, BOB, CAROL):
             self.upload(xuid, make_jpeg())
+        self.upload(ALICE, make_jpeg(800, 360))
         status, _, data, _ = self.http("GET", "/community/gallery.json")
 
         def keys(v):
@@ -545,15 +547,24 @@ class UploadTest(Base):
                 for item in v:
                     yield from keys(item)
         found = set(keys(json.loads(data)))
-        self.assertFalse({"owner", "xuid", "fileId", "note", "created"} & {k.lower() for k in found})
-        self.assertFalse(any("xuid" in k.lower() or "owner" in k.lower() for k in found))
+        self.assertFalse({"xuid", "fileId", "note", "created"} & {k.lower() for k in found})
+        self.assertFalse(any("xuid" in k.lower() for k in found))
         for xuid in (ALICE, BOB, CAROL):
             for text in ("%016X" % xuid, "%016x" % xuid, "%x" % xuid, str(xuid)):
                 self.assertNotIn(text.encode(), data)
-        self.assertEqual(len(json.loads(data)["photos"]), 3)
+        photos = json.loads(data)["photos"]
+        self.assertEqual(len(photos), 4)
+        # owner: the id the leaderboards publish for the player (a salted hash), the same on
+        # each of a player's photos
+        owner_of = {p["owner"] for p in photos if p["gamertag"] == "Alice"}
+        self.assertEqual(owner_of, {leaderboards.player_id("%016X" % ALICE)})
+        self.assertEqual(len({p["owner"] for p in photos}), 3)
+        for p in photos:
+            self.assertRegex(p["owner"], r"^[0-9a-f]{12}$")
 
     def test_feed_reads_have_no_side_effects_and_answer_etags(self):
         self.upload(ALICE, make_jpeg())
+        leaderboards.salt()  # made once, by the first that needs it (the owner ids, the boards)
         index = os.path.join(self.dir.name, "community.json")
         before = (os.stat(index).st_mtime_ns, sorted(os.listdir(self.dir.name)))
         status, _, data, extra = self.http("GET", "/community/gallery.json")

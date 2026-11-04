@@ -155,7 +155,8 @@ class Flow(LinkTest):
         me = body(b.get_json("/api/me"))
         api.MeOut.model_validate(me)
         self.assertEqual(me["link"], {"state": "active", "gamertag": "DriverA",
-                                      "since": timezone.now().date().isoformat()})
+                                      "since": timezone.now().date().isoformat(),
+                                      "counted": False})  # one signed day, a day ago (members.likes)
         self.assertNotIn("0009000000000001", json.dumps(me))  # never the XUID
         self.assertIn("linked the game of DriverA", [e["event"] for e in me["events"]])
         link = GameLink.objects.get()

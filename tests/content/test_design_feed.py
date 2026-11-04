@@ -23,6 +23,7 @@ from unittest import mock
 
 from forza_live.core import auth
 from forza_live.content import cxds
+from forza_live.competition import leaderboards
 from forza_live.content import design_feed as feed
 from forza_live.content import designs
 from forza_live.core import ed25519
@@ -49,7 +50,7 @@ FLAG = {"High": 0x800000000, "Low": 1}
 ANY = {"PriceMax": -1, "MakeId": -1, "ModelId": -1, "ClassId": -1, "KeywordOneId": -1,
        "KeywordTwoId": -1, "ManualSearchKeywords": "", "EnvironmentId": -1, "TrackId": -1,
        "NumLayers": -1, "GamerTag": ""}
-FEED_FIELDS = {"id", "type", "code", "title", "description", "gamertag", "car", "layers",
+FEED_FIELDS = {"id", "type", "code", "title", "description", "gamertag", "owner", "car", "layers",
                "downloads", "rating", "createdAt", "preview", "w", "h", "sha256"}
 # The game repository's tools/xdc_decode.py, the decoder cxds ports: beside this repository
 # when it is that repository's server/ submodule, or where FORZA_REPO_TOOLS says (the CI checks
@@ -534,7 +535,7 @@ class FeedTest(Base):
         self.assertEqual(li, {
             "id": self.wid(livery), "type": "livery", "code": self.rec(livery)["code"],
             "title": "FLAMES", "description": "red and gold", "gamertag": "Alice",
-            "car": {"name": CAR}, "layers": None, "downloads": 1,
+            "owner": leaderboards.player_id("%016X" % ALICE), "car": {"name": CAR}, "layers": None, "downloads": 1,
             "rating": {"avg": 4.5, "count": 2}, "createdAt": int(self.rec(livery)["created"]),
             "preview": "/community/design-img/%s.png" % self.wid(livery), "w": 288, "h": 160,
             "sha256": li["sha256"]})
@@ -547,8 +548,8 @@ class FeedTest(Base):
             self.assertEqual(hashlib.sha256(png).hexdigest(), d["sha256"])
             self.assertEqual(decode_png(png)[:2], (d["w"], d["h"]))
 
-    def test_no_xuid_owner_or_payload_anywhere(self):
-        fids = [self.share(ALICE), self.share(BOB, kind="layergroup")]
+    def test_no_xuid_or_payload_anywhere_and_the_owner_is_the_salted_player_id(self):
+        fids = [self.share(ALICE), self.share(BOB, kind="layergroup"), self.share(ALICE, title="TWO")]
         for fid in fids:
             self.release(fid)
         status, ctype, body, extra = self.http("GET", "/community/designs.json")
@@ -556,7 +557,13 @@ class FeedTest(Base):
         for xuid in (ALICE, BOB):
             for form in ("%016X" % xuid, "%016x" % xuid, "%X" % xuid, str(xuid)):
                 self.assertNotIn(form, text)
-        for word in ("owner", "xuid", "Xuid", "payload", "crlv", "lvyg", "reporters", "downloaders",
+        owners = {d["code"]: d["owner"] for d in json.loads(body)["designs"]}
+        self.assertEqual(sorted(owners.values()), sorted(
+            [leaderboards.player_id("%016X" % ALICE)] * 2 + [leaderboards.player_id("%016X" % BOB)]))
+        for owner in owners.values():  # 12 hex digits of a salted hash: not the XUID, the same id
+            self.assertRegex(owner, r"^[0-9a-f]{12}$")  # the leaderboards publish for the player
+        self.assertNotEqual(owners[self.rec(fids[0])["code"]], owners[self.rec(fids[1])["code"]])
+        for word in ("xuid", "Xuid", "payload", "crlv", "lvyg", "reporters", "downloaders",
                      "fileId", "webNote"):
             self.assertNotIn(word, text)
         for fid in fids:  # the public id is not the storefront's file id

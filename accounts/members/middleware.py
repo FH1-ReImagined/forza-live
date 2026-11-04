@@ -1,7 +1,9 @@
 """Request rules for the whole service.
 
 ApiHeaders: every /api/ answer is no-store and nosniff, and carries no CORS header; OPTIONS is
-405; the launcher's calls (/api/game/) also get the server's clock (X-Forza-Time).
+405; the launcher's calls (/api/game/) also get the server's clock (X-Forza-Time). The public
+like totals (/api/likes/counts, the same for everybody) keep the short public cache their view
+sets.
 AdminOnlyFromAllowed: the admin (and the API docs, when on) answer only FORZA_ADMIN_ALLOW.
 AuthRoutes: of allauth's routes only the ones the sign-ins use exist (no password, signup or email
 management routes). FetchSiteCheck: a change (POST, PUT, PATCH, DELETE) from a browser that says
@@ -30,6 +32,7 @@ HEADLESS_ROUTES = {
     "auth/provider/redirect": ("POST",),
 }
 CALLBACK = re.compile(r"/api/auth/(discord|github)/login/callback/")
+PUBLIC_CACHE = ("/api/likes/counts",)
 
 
 class ApiHeaders:
@@ -44,7 +47,9 @@ class ApiHeaders:
         if request.path.startswith("/api/game/"):
             response["X-Forza-Time"] = str(int(time.time()))  # the launcher corrects its clock by it
         if request.path.startswith("/api/"):
-            response["Cache-Control"] = "no-store"
+            if not (request.path in PUBLIC_CACHE and response.status_code in (200, 304)
+                    and response.get("Cache-Control", "").startswith("public,")):
+                response["Cache-Control"] = "no-store"
             response["X-Content-Type-Options"] = "nosniff"
             for name in [h for h in response.headers if h.lower().startswith("access-control-")]:
                 del response[name]

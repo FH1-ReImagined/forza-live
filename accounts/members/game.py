@@ -6,15 +6,18 @@ read-only. It reads, with the game server's own code:
   again whenever the file changes;
 - players/<XUID>.json (forza_live.core.durable): the gamertag and the signed sign-ins
   (firstSigned, signedDays: forza_live.title_services.lsp.signed_logon);
-- banned_xuids.json (forza_live.content.designs.banned_xuids).
+- banned_xuids.json (forza_live.content.designs.banned_xuids);
+- community.json and designs.json, the photos and designs (members.items).
 
 A signed request is checked by forza_live.core.auth.check_request: the server name (this site's
 host only), the 120 s clock window, the signature by the key the XUID is bound to, and its nonce,
 in this process and (SignedNonce) in every worker. Refusals all look alike."""
 
+import hmac
 import logging
 import os
 import threading
+import time
 from datetime import timedelta
 
 from django.conf import settings
@@ -98,6 +101,23 @@ def bound_pub(xuid):
     """The public key (hex) the XUID is bound to now, or None (no record, or not a public key)."""
     pub = auth.bound_pub(store(), xuid)
     return pub.hex() if pub else None
+
+
+def counted(xuid_hex, pinned_pub, now=None):
+    """The key's likes count in public: it is still bound to the public key its link pinned, it
+    is not banned, and its first sign-in signed by its key (firstSigned) is LIKES_AFTER_HOURS old,
+    with signed sign-ins on LIKES_SIGNED_DAYS days (signedDays). Only the game server writes
+    those, and only for a sign-in its key signed, so nobody can age a key before binding it."""
+    xuid = int(xuid_hex, 16)
+    pub = bound_pub(xuid)
+    if pub is None or not hmac.compare_digest(pub, pinned_pub) or banned(xuid):
+        return False
+    record = player(xuid)
+    first, days = record.get("firstSigned"), record.get("signedDays")
+    if not (isinstance(first, int) and isinstance(days, int)) or isinstance(first, bool):
+        return False
+    now = time.time() if now is None else now
+    return now - first >= settings.LIKES_AFTER_HOURS * 3600 and days >= settings.LIKES_SIGNED_DAYS
 
 
 def hex_xuid(xuid):
