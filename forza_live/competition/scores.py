@@ -20,8 +20,8 @@ the build the game names (X-Forza-Build). A result kept off the boards is "unran
 does: kept for review (STORE.unranked, the player's best one per board) but never shown. That
 is a result from an unverified caller, one whose ghost fails the checks (ghost.py; the
 player's previous row stays), one faster than the time since its event started (score_token:
-GetBestScores as a race loads, a speed zone's GetRows as the car enters it), and rows an
-operator unranks. An unverified
+GetBestScores as a race loads, a speed zone's GetRows as the car enters it; with --score-tokens
+enforce, only logged with log, the default), and rows an operator unranks. An unverified
 caller is still told its own unranked best (own_best), to itself alone, so the game does not
 send its slower times again, and races it in Rivals when nobody else is on the board; a
 signed-in caller is told its ranked best only. /admin/scores
@@ -438,11 +438,17 @@ def submit(xuid, gamertag, kind, data, extra=None):
     # The time since the event's start (score_token): a result faster than that is not real.
     problem = score_token.check(xuid, kind, sbid, stt, score)
     if problem:
-        if unrank(board_key(kind, sbid, stt), entry, "start: " + problem):
-            STORE.save()
-        log.warning("title: score %016X on board %d type %d: %.3f %s; kept unranked", xuid, sbid,
-                    kind, score, problem)
-        return nothing
+        score_token.count(kind, sbid, stt, problem)
+        if score_token.MODE == "enforce":
+            if unrank(board_key(kind, sbid, stt), entry, "start: " + problem):
+                STORE.save()
+            log.warning("title: score %016X on board %d type %d: %.3f %s; kept unranked", xuid,
+                        sbid, kind, score, problem)
+            return nothing
+        # --score-tokens log: no gamertag or XUID, the public leaderboard id tells players apart
+        log.warning("title: score token: board %s, player %s, score %.3f: %s; ranked "
+                    "(--score-tokens log)", board_key(kind, sbid, stt), public_id(xuid), score,
+                    problem if problem == "no start" else "too fast, " + problem)
     board = STORE.board(kind, sbid, stt, create=True)
     if board is None:
         return nothing

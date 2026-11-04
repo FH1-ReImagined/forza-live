@@ -70,10 +70,12 @@ already makes, signed by the player: `GetBestScores` as an event's race loads (s
 festival race and Rivals), and a speed zone's `GetRows` (view 5) as the car enters the zone. Each result on the board spends its seconds from that start: a time its own, a speed zone
 the distance between its gates over the average speed. The results since one start must fit in
 the time since it, give or take 2 s and 2%. RESTART on the results screen races again without a
-new start, and its lap is paid for by the time that has passed. A result faster than that, or
-with no start, is kept unranked (`start: ...`), and the game is told nothing went wrong. Speed
-traps have no start (a speed at a single point). The starts are kept in memory: for 30 minutes
-after the server starts, a result without one still counts.
+new start, and its lap is paid for by the time that has passed. With `--score-tokens enforce`, a
+result faster than that, or with no start, is kept unranked (`start: ...`), and the game is told
+nothing went wrong. With `log`, the default, such a result stays ranked and is only logged and
+counted; with `off` nothing is checked ([score tokens](operating.md#score-tokens)). Speed traps
+have no start (a speed at a single point). The starts are kept in memory: for 30 minutes after
+the server starts, a result without one still counts.
 
 Each new row carries the server's id (`--server-id NAME` or `FORZA_SERVER_ID`; without it an id
 is made at the first start and kept in `server_id.txt`) and the build the game names on its calls

@@ -67,6 +67,7 @@ from forza_live.competition import leaderboards
 from forza_live.content import market
 from forza_live.social import notifications
 from forza_live.content import photos
+from forza_live.competition import score_token
 from forza_live.competition import scores
 from forza_live.content import shader_lists
 from forza_live.competition import stats
@@ -193,6 +194,12 @@ def add_arguments(parser):
                              "470 km/h, and remove kept ones at start; by default they are "
                              "only logged (modified and modded cars go faster)")
     parser.add_argument("--no-trap-limits", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--score-tokens", type=str.lower, choices=score_token.MODES,
+                        default=os.environ.get("FORZA_SCORE_TOKENS", "log").lower(),
+                        help="what a result faster than the time since its event's start (or "
+                             "with no start) does: enforce keeps it unranked, log (the "
+                             "default) only logs and counts it, off skips the check "
+                             "(score_token.py)")
     parser.add_argument("--world-round-minutes", type=float, default=WORLD_ROUND_MINUTES,
                         help="length of a Horizon World round in minutes (default "
                              "%(default)s: endless). Only for clients with world_drop_in off, "
@@ -217,7 +224,9 @@ def configure(args):
     os.makedirs(DATA_DIR, exist_ok=True)
     limits.configure(DATA_DIR)
     scores.configure(DATA_DIR, args.server_id)
-    log.info("scoreboards: rows are tagged with server id %s", scores.server_id())
+    score_token.configure(args.score_tokens)   # a bad FORZA_SCORE_TOKENS stops the start
+    log.info("scoreboards: rows are tagged with server id %s; score tokens: %s", scores.server_id(),
+             score_token.MODE)
     stats.configure(DATA_DIR)
     market.configure(DATA_DIR)
     clubs.configure(DATA_DIR, load_player)

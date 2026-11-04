@@ -41,6 +41,7 @@ from forza_live.title_services import lsp
 from forza_live.network import proxy
 from forza_live.network import relay_broker
 from forza_live.network import relay_node
+from forza_live.competition import score_token
 from forza_live.competition import scores
 from forza_live.competition import stats
 from forza_live.world import campaign
@@ -1395,6 +1396,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                 "relayed_packets": self.relayed_packets,
                 "dropped_packets": self.dropped_packets, "rooms": rooms, "worlds": worlds,
                 **self.challenges.status(), **self.friends.status(), **auth.status(),
+                **score_token.status(),
                 "chat": {"with_chat": len(self.chat.chatters()), "kept": len(self.chat.ring)},
                 **(self.relays.status() if self.relays.entries else {})}
 

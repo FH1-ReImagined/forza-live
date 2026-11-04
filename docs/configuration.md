@@ -28,6 +28,7 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--rebind-legacy` | `FORZA_REBIND_LEGACY=1` | let an XUID bound to a friends key move to the first signed game |
 | `--raw-key-cutoff UNIX_TIME` | `FORZA_RAW_KEY_CUTOFF` | refuse friends keys sent raw after this time |
 | `--server-id NAME` | `FORZA_SERVER_ID` | the id written on score rows ([which results count](website-data.md#which-results-count)) |
+| `--score-tokens off\|log\|enforce` | `FORZA_SCORE_TOKENS` | what a result faster than the time since its event started does: `enforce` keeps it unranked, `log` (the default) only logs and counts it, `off` skips the check ([score tokens](operating.md#score-tokens)) |
 | | `FORZA_COMMUNITY_HOLD=1` | new community photos wait for release ([photos](operating.md#community-photos)) |
 | | `FORZA_COMMUNITY_MAX_WIDTH` | width of a published big shot (default 1920) |
 | | `FORZA_DISCORD_STATUS_WEBHOOK` | a Discord webhook for the [players-online message](#players-online-in-discord) |
