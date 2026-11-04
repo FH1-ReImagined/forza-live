@@ -892,11 +892,12 @@ published file. It is `live`, `held` (for a screening worker, below; new photos 
 with `FORZA_COMMUNITY_HOLD=1`) or `hidden` (by the operator); a banned player's photos are served
 to nobody until the ban is lifted. When a player's file is removed by a later upload with
 overwriteOldest, its community photo goes too; photo mode sends overwriteOldest false and keeps
-no big shot file, so a player cannot withdraw a photo from the game: the operator deletes it.
+no big shot file, so a player cannot withdraw a photo from the game. The operator deletes it, or
+the player does, from the website's account page ([owner routes](#a-players-own-items-forza_livecontentownerspy)).
 
 | Route | |
 | --- | --- |
-| `GET /community/gallery.json` | `{"version":1,"generated":<unix>,"photos":[{"id","gamertag","title","takenAt","approvedAt","w","h","sha256","image"}]}`: live photos, newest first, at most 500. Built again only when a photo or the ban list changes; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60`. The website's `tools/build_gallery.py` reads it |
+| `GET /community/gallery.json` | `{"version":1,"generated":<unix>,"photos":[{"id","gamertag","owner","title","takenAt","approvedAt","w","h","sha256","image"}]}`: live photos, newest first, at most 500. `owner` is the photo owner's player id, the same opaque id the [leaderboards](website-data.md#leaderboards) publish (a hash of the XUID with the server's secret salt, 12 hex digits), so the website can show a player's photos and designs together; never the XUID. Built again only when a photo or the ban list changes; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60`. The website's `tools/build_gallery.py` reads it |
 | `GET /community/img/<id>.png` | a live photo (`.jpg` for a JPEG), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 image requests a minute (then 429) |
 | `/admin/photos...` | the operator's ([operating](operating.md#community-photos)) |
 
@@ -985,9 +986,26 @@ references into the game's compressed string tables, so without that file `car` 
 
 | Route | |
 | --- | --- |
-| `GET /community/designs.json` | `{"version":1,"generated":<unix>,"designs":[{"id","type","code","title","description","gamertag","car","layers","downloads","rating","createdAt","preview","w","h","sha256"}]}`: designs listed in the game and `clear`, newest first, at most 500. `id` is the design's random public id (12 base32 characters, never the storefront's file id); `type` `livery` or `vinylgroup`; `code` the share code; `gamertag` the creator's (a design whose creator has no gamertag on record is not listed); `car` `{"name": "2012 Lamborghini Aventador LP700-4"}` or null (always null for a vinyl group); `layers` a vinyl group's number of layers, null for a paint job (the storefront does not say); `rating` `{"avg", "count"}`; `createdAt` the upload's time; `preview` `/community/design-img/<id>.png`, `w`, `h` and `sha256` its size and hash. Never a XUID or a payload (a payload holds its creator's XUID). Built again when a design or the ban list changes, at most every 60 s otherwise; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60` |
+| `GET /community/designs.json` | `{"version":1,"generated":<unix>,"designs":[{"id","type","code","title","description","gamertag","owner","car","layers","downloads","rating","createdAt","preview","w","h","sha256"}]}`: designs listed in the game and `clear`, newest first, at most 500. `id` is the design's random public id (12 base32 characters, never the storefront's file id); `type` `livery` or `vinylgroup`; `code` the share code; `gamertag` the creator's (a design whose creator has no gamertag on record is not listed); `owner` the creator's player id, as in the photos' feed; `car` `{"name": "2012 Lamborghini Aventador LP700-4"}` or null (always null for a vinyl group); `layers` a vinyl group's number of layers, null for a paint job (the storefront does not say); `rating` `{"avg", "count"}`; `createdAt` the upload's time; `preview` `/community/design-img/<id>.png`, `w`, `h` and `sha256` its size and hash. Never a XUID or a payload (a payload holds its creator's XUID). Built again when a design or the ban list changes, at most every 60 s otherwise; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60` |
 | `GET /community/design-img/<id>.png` | the preview of a design in the feed, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 design image requests a minute (then 429) |
 | `/admin/designs...` | the operator's and the screening worker's ([operating](operating.md#community-designs)), with the community photos' rules |
+
+### A player's own items (`forza_live/content/owners.py`)
+
+The website accounts service ([`accounts/`](../accounts/README.md)) lets a signed-in player whose
+account is linked to their game delete their own community photos and designs. It asks this
+server, which checks again:
+
+| Route | |
+| --- | --- |
+| `POST /owner/photos/<id>/delete` | body `{"owner": "<the photo owner's XUID, 16 hex digits>"}`: the photo is dropped as the operator's delete drops it, but its picture may be published again (it is the player's own) |
+| `POST /owner/designs/<id>/delete` | the same for a design (its public id): it goes from the storefront too, as the game's own RemoveFile takes it |
+
+Both need the `X-Owner-Token` header to be `FORZA_OWNER_TOKEN` (a token of its own, not the admin
+token; without it set the routes answer 404), and refuse any request that came through the
+tunnel or a reverse proxy (as the photo moderation routes do) or has an `Origin` header (403).
+An item that is not the named owner's answers 404, as one that does not exist. The token can do
+nothing else. Answers: 200 `{"deleted": "<id>"}`, 400 a bad body, 403, 404, 405 not a POST.
 
 ### Notifications (Message Center) (`forza_live/social/notifications.py`)
 

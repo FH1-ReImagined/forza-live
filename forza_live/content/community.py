@@ -32,13 +32,17 @@ banned player's photos are served to nobody, whatever their status, until the ba
 When the player's file goes (an upload with overwriteOldest makes room by dropping the player's
 oldest file, photos.remove), its community photo goes with it. A big shot is not kept as a
 file (photos forgets it once it is here), and the game sends overwriteOldest false: a player
-cannot withdraw one from the game; the operator removes it.
+cannot withdraw one from the game. The operator removes it, or the player does, from the
+website's account page (owners.py: the website accounts service's owner-only route).
 
 Public routes, on the title services port (no side effects, never a XUID):
 
   GET /community/gallery.json   {"version":1,"generated":<unix>,"photos":[{"id","gamertag",
-                                "title","takenAt","approvedAt","w","h","sha256","image"}]}, live
-                                photos newest first, at most FEED_MAX; ETag, Cache-Control
+                                "owner","title","takenAt","approvedAt","w","h","sha256","image"}]},
+                                live photos newest first, at most FEED_MAX; ETag, Cache-Control.
+                                owner: the player id the leaderboards publish for its owner
+                                (leaderboards.player_id, salted: never the XUID), so the website
+                                can show a player's items together
   GET /community/img/<id>.png   a live photo (.jpg for a JPEG): nosniff, CSP default-src 'none',
                                 cached for IMAGE_SECONDS; at most IMAGES_PER_MINUTE a minute
 
@@ -67,6 +71,7 @@ import time
 import urllib.parse
 import zlib
 
+from forza_live.competition import leaderboards
 from forza_live.content import designs
 from forza_live.core import durable
 from forza_live.core import limits
@@ -539,7 +544,8 @@ def public(p, bans):
 
 def feed_entry(pid, p):
     """A photo as the feed lists it: exactly these fields (the website's contract)."""
-    return {"id": pid, "gamertag": p["gamertag"], "title": p["title"], "takenAt": p["takenAt"],
+    return {"id": pid, "gamertag": p["gamertag"], "owner": leaderboards.player_id(hx(p["owner"])),
+            "title": p["title"], "takenAt": p["takenAt"],
             "approvedAt": p["approvedAt"], "w": p["w"], "h": p["h"], "sha256": p["sha256"],
             "image": image_url(pid, p)}
 

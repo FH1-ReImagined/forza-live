@@ -28,6 +28,9 @@ services). This answers the ones online play needs:
     GET /community/designs.json, /community/design-img/..., /admin/designs
                                the design storefront's designs on the website, after
                                screening (design_feed.py)
+    POST /owner/photos/<id>/delete, /owner/designs/<id>/delete
+                               a player deletes their own photo or design from the website,
+                               through the website accounts service (owners.py)
     Xls.WebServices.Notifications  the Message Center (notifications.py): Rivals,
                                gifts, auctions and car club messages
 
@@ -57,6 +60,7 @@ from forza_live.content import design_feed
 from forza_live.content import designs
 from forza_live.social import friends
 from forza_live.core import limits
+from forza_live.content import owners
 from forza_live.core import relays
 from forza_live.core import server_list
 from forza_live.competition import leaderboards
@@ -893,6 +897,8 @@ def handle(server, method, path, headers, body, peer):
     if community.handles(url.path):  # community photos (community.py)
         return community.handle(method, path, headers, body,
                                 lambda: is_local_admin(peer, headers))
+    if owners.handles(url.path):  # a player's own photo or design, from the website (owners.py)
+        return owners.handle(method, path, headers, body, came_through_proxy(peer, headers))
     if url.path in ("/notify", "/gift", "/broadcast"):
         query = urllib.parse.parse_qs(url.query)
         if not is_admin(peer, headers, query):

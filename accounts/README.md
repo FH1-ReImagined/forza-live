@@ -2,8 +2,9 @@
 
 Optional accounts for the project website: players sign in with **Discord**, **GitHub** or an
 **8-digit code sent by email**, then link the account to their game from the launcher (milestone
-M2). The link is the account's second factor: later milestones (likes, "My items", uploads) are
-only for linked accounts. An account that is not linked can only browse.
+M2). The link is the account's second factor: likes on the community photos and designs, "My
+items" (the player's own photos and designs, which they can delete) (milestone M3) and later
+uploads are only for linked accounts. An account that is not linked can only browse.
 
 This is a Django project with its own dependencies, image and tests. The game server
 (`forza_live/`) stays dependency-free and does not import anything from here. This service
@@ -14,7 +15,8 @@ readers, and uses them on the game server's data folder, mounted read-only.
   static website calls (`/api/auth/browser/v1/...`), plus the providers' OAuth callbacks
   (`/api/auth/{discord,github}/login/callback/`).
 - **Our own endpoints:** [django-ninja](https://django-ninja.dev/) at `/api/` (`me`, `logout-all`,
-  `account/delete`, `health`), with a Pydantic schema for every request and answer.
+  `account/delete`, `health`, the game link, likes and My items), with a Pydantic schema for every
+  request and answer.
 - **Data:** one SQLite file, with Django migrations, WAL and `synchronous=FULL`. Sessions are kept
   in the database.
 
@@ -22,12 +24,14 @@ readers, and uses them on the game server's data folder, mounted read-only.
 |------|------|
 | `fh_accounts/settings.py` | every setting; the environment variables are below |
 | `fh_accounts/urls.py` | the routes |
-| `members/models.py` | the account (`User`, whose username is the public id such as `K7Q2-XM4P`), `SignIn` (sessions per account), `AuditEvent`, `GameLink`, `LinkRequest`, `SignedNonce` |
+| `members/models.py` | the account (`User`, whose username is the public id such as `K7Q2-XM4P`), `SignIn` (sessions per account), `AuditEvent`, `GameLink`, `LinkRequest`, `SignedNonce`, `Like` |
 | `members/adapters.py` | allauth's rules: the allowed return pages, no passwords, no profile data, the sign-in mail |
 | `members/views.py` | allauth's code request, code confirm and provider redirect views, with the limits and the email stand-in |
 | `members/api.py` | the django-ninja endpoints and their schemas |
 | `members/links.py` | the game link: the launcher's signed calls and the website's peek, claim and remove |
-| `members/game.py` | the game server's data, read-only (keys, players, bans), and the signed-request check |
+| `members/likes.py` | likes, the public like totals, and My items with its delete |
+| `members/items.py` | the game server's photos and designs, read-only, with its own rules for which are public |
+| `members/game.py` | the game server's data, read-only (keys, players, bans), the signed-request check, and which keys' likes count |
 | `members/middleware.py` | answer headers, the allauth routes that exist, Sec-Fetch-Site, the admin allow list, session lifetime |
 | `members/identity.py` | the email stand-in: an HMAC of the address |
 | `members/management/commands/` | `checkdb` (integrity check) and `nightly` (purge and backup) |
@@ -46,9 +50,14 @@ readers, and uses them on the game server's data folder, mounted read-only.
   `FORZA_ADMIN_ALLOW` (see "The admin" below).
 - The launcher's link calls come the same way, to `https://forza.dyotson.dev/api/game/...`,
   signed with the player's key (`X-Forza-Auth`).
-- The game server is never called. This service reads its data folder (`FORZA_GAME_DATA`,
-  mounted read-only): `friends.json` for the public key each XUID is bound to,
-  `players/<XUID>.json` for the gamertag and the signed sign-ins, and `banned_xuids.json`.
+- This service reads the game server's data folder (`FORZA_GAME_DATA`, mounted read-only):
+  `friends.json` for the public key each XUID is bound to, `players/<XUID>.json` for the gamertag
+  and the signed sign-ins, `banned_xuids.json`, and `community.json` and `designs.json` for the
+  photos and designs and who owns them.
+- It calls the game server for one thing only: deleting a player's own photo or design, through
+  the game server's owner-only route (`forza_live/content/owners.py`, `FORZA_GAME_URL`,
+  `FORZA_OWNER_TOKEN`), straight to its HTTP port from the internal network, never through the
+  tunnel or a proxy.
 
 ## The API
 
@@ -92,6 +101,36 @@ the reason, so the launcher can correct its clock and try once more.
 | `GET /api/game/account` | `{"linked", "state", "account"}`: the key's link |
 | `POST /api/game/unlink` | `{}` -> `{"ok": true, "unlinked": true}` |
 | `POST /api/game/signout` | `{}` -> `{"ok": true, "ended": n}`: every session of the linked account ends |
+
+Likes and My items (session; every change also needs the CSRF token, the Origin and JSON).
+Everything but the totals needs an account linked to its game, with the link usable: active,
+the XUID still bound to the pinned key (else the link freezes) and not banned. Otherwise the
+answer is 403 `link your game first` or `not available` (banned), or 409 `this link needs the
+operator` (frozen) or `play online first` (the game server forgot the key after a long time
+away).
+
+| Route | Answer |
+|-------|--------|
+| `POST /api/likes` | `{"kind": "photo"\|"design", "item": "<id>", "on": true\|false}` -> `{"ok": true, "on", "counted"}`. `counted`: this key's likes are in the public totals (see below). 404 `not found` when the item is not in the public feeds (taking a like back works for any item), 403 `your own`, 429 over the limits |
+| `GET /api/likes/mine?kind=photo\|design` | `{"kind", "liked": [ids], "own": [ids], "counted"}`: what this key liked, and its own public items (which it cannot like) |
+| `GET /api/likes/counts?kind=photo\|design` | anyone, no session: `{"version": 1, "kind", "generated", "counts": {"<id>": n}}`, the public totals (items with no counted like are left out). `Cache-Control: public, max-age=30` and an `ETag` (`If-None-Match` gives 304); counted again at most every 60 s in each worker. The website's build copies them into its pages |
+| `GET /api/me/items` | `{"items": [{"kind", "id", "title", "state", "public", "likes", "created"}], "counted"}`: the key's photos and designs, newest first, whatever their state: `live`, `pending` (waiting for the screening), `held` (left for the operator) or `hidden`. `public`: in the public feed (the website shows it) |
+| `POST /api/me/items/delete` | `{"kind", "id"}` -> `{"ok": true, "deleted": true}`; 403 `sign in again` unless the last sign-in was in the past 10 minutes, 404 when it is not this key's, 502 `try again later` when the game server did not delete it, 503 when deleting is not configured |
+
+Which likes count in the public totals (`members.game.counted`): those of a key whose link is
+active, whose XUID is still bound to the pinned key and not banned, and whose first sign-in
+signed by its key (`firstSigned`, written by the game server) is 72 hours old, with signed
+sign-ins on 2 days (`signedDays`). A key that is too new keeps its likes, which count once it
+qualifies. A frozen, banned or unlinked key's likes are kept but not counted; deleting the account
+deletes them. Self-likes are refused, and only items in the public feeds are counted (the same
+rules as the game server's feeds: `community.public`, `design_feed.on_site`, and their caps).
+
+Deleting an item: the service checks the owner, then asks the game server
+(`POST /owner/photos/<id>/delete` or `/owner/designs/<id>/delete`, body `{"owner": "<XUID>"}`,
+header `X-Owner-Token`), which checks the owner again and refuses any request that came through
+the tunnel or a proxy or carries an `Origin`. A photo is dropped as the operator's delete drops
+it, but its picture may be uploaded again; a design leaves the game's storefront too. The item's
+likes are deleted with it.
 
 No answer ever contains an email address, a provider's user id or an XUID. With
 `FORZA_API_DOCS=1` the OpenAPI page is at `/api/docs` (and `/api/openapi.json`). Like the admin, it
@@ -152,7 +191,9 @@ file (mode 600) that only this container reads. Never commit it.
 | `FORZA_EMAIL_PEPPER_FILE` | `$FORZA_ACCOUNTS_DATA/email_pepper.bin` | 32 random bytes made at the first email sign-in. Back it up with the database: without it, no email account can be matched again |
 | `FORZA_ACCOUNTS_BACKUPS` | `$FORZA_ACCOUNTS_DATA/backups` | where `nightly` writes its copies |
 | `FORZA_ACCOUNTS_PROXY` | none | the website nginx's address or network (`<web-nginx-ip>` or `<web-network-cidr>`): `X-Real-IP` is believed only from there. Without it every visitor counts as nginx for the rate limits |
-| `FORZA_GAME_DATA` | none | the game server's data folder, mounted read-only (`friends.json`, `players/`, `banned_xuids.json`). Without it, linking is off (503) |
+| `FORZA_GAME_DATA` | none | the game server's data folder, mounted read-only (`friends.json`, `players/`, `banned_xuids.json`, `community.json`, `designs.json`). Without it, linking, likes and My items are off (503) |
+| `FORZA_GAME_URL` | none | the game server's HTTP port as this container reaches it (`http://<game-server-address>:21201`), for deleting a player's own items. Straight to the port, never through the tunnel or a proxy: the game server refuses those. The address this container comes from must not be one of the game server's `--trusted-proxy` addresses |
+| `FORZA_OWNER_TOKEN` (`_FILE`) | none | the game server's `FORZA_OWNER_TOKEN` (`openssl rand -hex 32`), a token of its own, never the admin token. Without `FORZA_GAME_URL` and this, deleting from the account page is off (503) |
 | `FORZA_ACCOUNTS_LINKS_DAILY` | `200` | new game links a day in all |
 | `FORZA_ADMIN_ALLOW` | `127.0.0.1/32 ::1/128` | addresses that may open `/admin/` (and `/api/docs`) |
 | `FORZA_API_DOCS` | off | `1` serves the OpenAPI page to `FORZA_ADMIN_ALLOW` |
@@ -210,12 +251,16 @@ The mail is fixed plain text with the code and a same-browser link
     docker run -d --name forza-accounts --restart unless-stopped \
         --network <web-network> --env-file <accounts.env> \
         -v forza-accounts-data:/data \
-        -v <game-server-data>:/game-data:ro -e FORZA_GAME_DATA=/game-data forza-accounts
+        -v <game-server-data>:/game-data:ro -e FORZA_GAME_DATA=/game-data \
+        -e FORZA_GAME_URL=http://<game-server-address>:21201 forza-accounts
 
 Build it from the repository's root: the image copies the game server's `forza_live/` package
 for its signed-request check. `<game-server-data>` is the game server's data volume or folder
 (its `--data-dir`); mount it read-only (`:ro`). The container's user (uid 10001) needs to read
 it.
+
+A game server that runs with `--network host` is reached at the host's address on the
+container's network (its gateway), as the screening worker reaches it.
 
 Use no `-p`: only the website's nginx, on the same Docker network, reaches it. At every start
 the image:
@@ -305,8 +350,11 @@ the service answers it only for `FORZA_ADMIN_ALLOW`. Make a staff user with
 - **Link requests:** for 10 minutes (deleted an hour later): the XUID, its public key and
   gamertag, HMACs of the token and the code, and the account that claimed it.
 - **Launcher nonces:** the random nonce of each signed call, for 4 minutes, so none works twice.
-- **Audit events:** sign-ins, sign-outs, account creation, links made, moved and removed; 90
-  days, with no IP address.
+- **Likes:** the XUID of the key that gave it, the photo's or design's id, and when. Who liked
+  what is never shown; only the totals per item are public. A deleted item's likes are deleted
+  with it, and deleting the account deletes its key's likes.
+- **Audit events:** sign-ins, sign-outs, account creation, links made, moved and removed, items
+  deleted (with their title); 90 days, with no IP address.
 - **Rate-limit counters:** in the cache table. They hold IP addresses and address hashes for an
   hour or a day.
 - Deleting the account removes all of it at once. Backups age out in 7 days.
@@ -317,7 +365,7 @@ the service answers it only for `FORZA_ADMIN_ALLOW`. Make a staff user with
 |-----|-------|
 | per IP | 20 Discord or GitHub sign-in starts an hour; 5 new accounts a day; 5 code mails an hour; 20 wrong codes an hour |
 | per email address | 3 codes an hour, 5 a day; one live code per browser; 5 tries per code; a code lasts 10 minutes |
-| per account | 20 sessions; 10 link claims (and link peeks that find nothing) per 10 minutes; one new link a day |
+| per account | 20 sessions; 10 link claims (and link peeks that find nothing) per 10 minutes; one new link a day; 120 likes an hour and 500 a day (given or taken back); 20 items deleted a day |
 | per XUID (signed) | 600 calls an hour; 5 link starts an hour; one new link a day |
 | whole service | `FORZA_ACCOUNTS_EMAIL_DAILY` code mails a day (then email sign-in pauses); 1,000 new accounts a day; `FORZA_ACCOUNTS_LINKS_DAILY` new links a day; 100 link codes that find nothing a minute, after which codes stop for 10 minutes (the browser's token still works) |
 
@@ -350,6 +398,17 @@ Differences from the design (M2):
 - `firstSigned` (and `signedDays`, `lastSignedDay`) is written by the game server's Logon2 for a
   sign-in signed by the player's key (`forza_live.title_services.lsp.signed_logon`, the design's
   M0 piece, in the same change).
+
+Differences from the design (M3):
+- **The items that can be liked come from the game server's data files**, not from fetching its
+  public feeds over HTTP every 60 s: the service already reads that folder, and applies the game
+  server's own rules to it (`community.public`, `design_feed.on_site`, the feeds' order and caps),
+  so the two cannot differ and the service needs the game server's HTTP port only for deleting.
+- **`likes/mine` also lists the key's own public items** (`own`), so the pages can leave out the
+  thumbs-up on them, and every like answer says whether the key's likes count yet (`counted`),
+  so a page does not add a like to a total that will not show it.
+- **Taking a like back works for any item**, also one that left the public feeds.
+- **An item that is deleted takes its likes with it** (the design kept them stored).
 
 ## Development
 

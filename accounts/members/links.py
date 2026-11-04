@@ -255,7 +255,8 @@ def summary(user):
             state = "waiting"
         if game.banned(xuid):
             state = "banned"
-    return {"state": state, "gamertag": link.gamertag, "since": link.linked_at.date()}
+    counted = state == GameLink.ACTIVE and game.available() and game.counted(link.xuid, link.pub)
+    return {"state": state, "gamertag": link.gamertag, "since": link.linked_at.date(), "counted": counted}
 
 
 # ---- The launcher's calls ----

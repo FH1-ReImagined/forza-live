@@ -12,6 +12,10 @@ GameLink binds an account to one game key (members.links): one XUID per account 
 per XUID, with the key's public key pinned. LinkRequest is a link in progress (10 minutes): it
 keeps only hashes of its token and code. SignedNonce is the launcher's request nonces, shared by
 every worker, so a signed request works once.
+
+Like is a thumbs-up for a community photo or design (members.likes). It belongs to the game key
+(the XUID), not to the account: a second account, or a link that moved, cannot like twice. Who
+liked what is never shown; only the totals are public.
 """
 
 import secrets
@@ -93,3 +97,17 @@ class LinkRequest(models.Model):
 class SignedNonce(models.Model):
     nonce = models.CharField(max_length=32, primary_key=True)
     until = models.DateTimeField(db_index=True)
+
+
+class Like(models.Model):
+    PHOTO, DESIGN = "photo", "design"
+    KINDS = [(PHOTO, "photo"), (DESIGN, "design")]
+
+    xuid = models.CharField(max_length=16)  # the game key's XUID (16 upper-case hex digits)
+    kind = models.CharField(max_length=6, choices=KINDS)
+    item = models.CharField(max_length=12)  # the photo's or design's public id
+    at = models.DateTimeField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["xuid", "kind", "item"], name="one_like_per_key")]
+        indexes = [models.Index(fields=["kind", "item"], name="likes_of_an_item")]

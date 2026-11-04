@@ -356,9 +356,17 @@ The project website's accounts (sign-in with Discord, GitHub or an emailed code)
 service in [`accounts/`](../accounts/README.md), with its own image, database and settings. It
 runs behind the website's nginx at `/api/` and never on the game server's ports or tunnel. Its
 README lists every setting, what to register with Discord, GitHub and the mail relay, an nginx
-example, the daily upkeep and backups. To link accounts to players' games, it reads this server's
-data folder (`friends.json`, `players/`, `banned_xuids.json`) through a read-only mount, and
-never writes to it.
+example, the daily upkeep and backups. To link accounts to players' games, count likes and list
+players' own photos and designs, it reads this server's data folder (`friends.json`, `players/`,
+`banned_xuids.json`, `community.json`, `designs.json`) through a read-only mount, and never writes
+to it.
+
+Players delete their own photos and designs from the account page: the service asks this server's
+[owner routes](title_services.md#a-players-own-items-forza_livecontentownerspy), which need
+`FORZA_OWNER_TOKEN`. Give both the same random value (`openssl rand -hex 32`), never the admin
+token, and let the accounts container reach the HTTP port directly, from an address that is not a
+`--trusted-proxy` (the routes refuse the tunnel and proxies, as moderation does). Without the token
+the routes are off and the account page cannot delete.
 
 ## Backups and rollback
 
