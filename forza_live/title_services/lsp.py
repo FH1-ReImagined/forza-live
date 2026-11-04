@@ -130,7 +130,8 @@ HOPPERS = [
     # last, so the other rows keep their places
     {"id": COOP_HOPPER, "name": "Co-op Festival",
      "description": "A Horizon World with your friends only. Its host starts festival events "
-                    "for everyone in it: type /event FR05 in World chat (/events lists them).",
+                    "for everyone in it: an event's Details on the map, then SELECT, or "
+                    "/event FR05 in World chat.",
      "playerCount": 8, "allowVoteToSkip": False, "allowVoteToKick": False,
      "shouldVoteCarClassBeforeLaunch": False, "intermissionTimeMs": 5000},
 ]
