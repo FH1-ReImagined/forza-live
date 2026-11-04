@@ -1,0 +1,58 @@
+name: List my community server
+description: Ask for your Forza Live server to be listed on the launcher's Servers page and in the Discord status message.
+title: "List my server: "
+labels: ["community server"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for running a server. Before you apply, follow the [hosting guide](https://github.com/FH1-ReImagined/forza-live/blob/main/docs/hosting.md) and check that a friend outside your network can join it. We check the server before we list it, then answer here.
+  - type: input
+    id: name
+    attributes:
+      label: Server name
+      description: How it shows in the launcher and on Discord, at most 48 characters. A region works well, such as "US East".
+    validations:
+      required: true
+  - type: input
+    id: address
+    attributes:
+      label: Address
+      description: What players type, `host:port` (the UDP port). Its HTTP port must be the next one, such as 1819 and 1820.
+      placeholder: your-server.example.org:21200
+    validations:
+      required: true
+  - type: input
+    id: region
+    attributes:
+      label: Region
+      description: Where the server is, such as "US East" or "Europe West".
+    validations:
+      required: true
+  - type: input
+    id: contact
+    attributes:
+      label: Contact
+      description: Your Discord name, so we can reach you if the server has a problem. It is not shown in the launcher.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: How it runs
+      description: The computer or host, how players reach it (port forwarding or a tunnel such as playit.gg), and the hours it is usually up.
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: The server keeps its own friends list and leaderboards. I know only the main server's leaderboards are the official ones.
+          required: true
+        - label: I keep the player data private as the project's privacy note describes, and I don't sell anything on the server or put paid features in front of players.
+          required: true
+        - label: I keep the server reasonably up to date with forza-live main.
+          required: true
+        - label: I'll say here or on Discord when the server shuts down. A listed server that stays offline for a few days is taken off the list, and can apply again.
+          required: true

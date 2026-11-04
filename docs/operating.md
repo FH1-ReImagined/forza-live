@@ -205,7 +205,8 @@ To take a bad build off the boards:
 The launcher's Servers page lists the servers players can pick. It takes the list only from the
 main server, as `GET /servers.json`, and only when the list is signed with the key whose public
 half the launcher ships. Owners do not add themselves: they apply (address, region, contact and
-rules), you check the server, and you add it to `server_list.json` in the data folder:
+rules; on the main server, with the [List my community server](hosting.md#getting-listed) form),
+you check the server, and you add it to `server_list.json` in the data folder:
 
 ```json
 {
