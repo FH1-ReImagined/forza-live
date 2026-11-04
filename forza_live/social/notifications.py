@@ -225,6 +225,36 @@ def broadcast(ntype, params, keep_days=KEEP_DAYS):
     return nid
 
 
+def broadcasts():
+    """The broadcasts players can still get, oldest first (copies)."""
+    now = time.time()
+    with STORE.lock:
+        d = STORE.load()
+        return [dict(b) for b in d.get("broadcasts", []) if b["expires"] > now]
+
+
+def delete_broadcast(nid):
+    """Takes a broadcast back: it leaves every Message Center at the next poll. True when there
+    was one with that id."""
+    with STORE.lock:
+        d = STORE.load()
+        live = d.get("broadcasts", [])
+        kept = [b for b in live if b["id"] != nid]
+        if len(kept) == len(live):
+            return False
+        d["broadcasts"] = kept
+        state = d.get("broadcastState", {})
+        for who in list(state):
+            seen = state[who]
+            for k in ("read", "cleared"):
+                seen[k] = [i for i in seen.get(k, []) if i != nid]
+            if not seen["read"] and not seen["cleared"]:
+                del state[who]
+        STORE.save()
+    log.info("title: broadcast %d deleted by the operator", nid)
+    return True
+
+
 def pending(recipient):
     now = time.time()
     d = STORE.load()

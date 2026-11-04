@@ -860,6 +860,26 @@ def broadcast_request(query):
     return 200, "application/json", json.dumps({"id": nid}).encode()
 
 
+def broadcasts_admin(method, path):
+    """GET /admin/broadcasts (the broadcasts players can still get) and POST
+    /admin/broadcasts/<id>/delete (one taken back: it leaves every Message Center at the next
+    poll); operator only."""
+    if path == "/admin/broadcasts":
+        if method != "GET":
+            return 405, "text/plain", b"GET lists them, POST /admin/broadcasts/<id>/delete"
+        return 200, "application/json", json.dumps({"broadcasts": notifications.broadcasts()},
+                                                   indent=1).encode()
+    parts = path[len("/admin/broadcasts/"):].split("/")
+    if len(parts) != 2 or parts[1] != "delete" or not parts[0].isdigit():
+        return 404, "text/plain", b"not found"
+    if method != "POST":
+        return 405, "text/plain", b"POST"
+    nid = int(parts[0])
+    if not notifications.delete_broadcast(nid):
+        return 404, "application/json", json.dumps({"error": "no such broadcast"}).encode()
+    return 200, "application/json", json.dumps({"deleted": nid}).encode()
+
+
 def notify_request(query):
     """GET /notify?to=<gamertag|XUID>&type=<n>[&field=value...] (from this machine only):
     queue a Message Center notification, its parameters from the query (missing ones
