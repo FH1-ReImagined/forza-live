@@ -158,6 +158,27 @@ publishes are in the pages listed under [Going further](#going-further).
 
 ---
 
+## Getting listed
+
+The launcher's Servers page and the Discord status message list community servers, with their
+players and ping. To be listed, fill in the
+[List my community server](https://github.com/FH1-ReImagined/forza-live/issues/new?template=list-my-server.yml)
+form. It asks for the name, address, region, a contact and how the server runs, and for the rules:
+
+- Your server keeps its own friends list and leaderboards. Only the main server's leaderboards
+  are the official ones.
+- Player data stays private, as the
+  [privacy note](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/PRIVACY.md)
+  describes, and nothing is sold on the server.
+- You keep it reasonably up to date with forza-live main.
+- You say when it shuts down. A listed server that stays offline for a few days is taken off the
+  list and can apply again.
+
+We check that the status page (`http://host:<port + 1>/status`) answers from outside, that it
+runs a current version and that players can reach its title services, then list it and answer
+on the issue. The list is signed again within a minute, so the launcher shows it the next time
+it fetches the list.
+
 ## Going further
 
 - [Configuration](configuration.md): every option and environment variable, Docker, tunnels, limits, restarts.
