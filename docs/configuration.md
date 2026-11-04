@@ -11,6 +11,8 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--host ADDR` | | the address to listen on (`0.0.0.0` for all) |
 | `--http-port PORT` | | the TCP port of the title services and status page (default 21201) |
 | | `FORZA_ADMIN_TOKEN` | the password of the [operator endpoints](operating.md) |
+| | `FORZA_PANEL_GIFT_MAX` | the most credits one gift from the [operator panel](operating.md#operator-panel) may carry (default 1000000) |
+| | `FORZA_ACCOUNTS_ADMIN_URL` | the website accounts service's admin page, linked from the operator panel (never fetched) |
 | | `FORZA_OWNER_TOKEN` | the token of the [website accounts](operating.md#website-accounts) service, for players deleting their own photos and designs (unset: off) |
 | `--game-db FILE` | `FORZA_GAME_DB` | the game's `gamedb.slt`, for world events and the Co-op Festival |
 | `--trusted-proxy IP/CIDR` | `FORZA_TRUSTED_PROXIES` | addresses of a [tunnel agent](#behind-a-tunnel-playitgg) (repeatable; comma separated in the variable) |

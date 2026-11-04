@@ -1,6 +1,6 @@
 # Operating a public Forza Live server
 
-Day-to-day running of a server other people play on: the operator endpoints, chat, photo and design moderation, the score admin, the list of community servers, and backups. Options are in [configuration](configuration.md); the first setup is in the [hosting guide](hosting.md).
+Day-to-day running of a server other people play on: the operator endpoints and the [operator panel](#operator-panel), chat, photo and design moderation, the score admin, the list of community servers, and backups. Options are in [configuration](configuration.md); the first setup is in the [hosting guide](hosting.md).
 
 ## Operator endpoints
 
@@ -18,6 +18,107 @@ through a reverse proxy), or with `FORZA_ADMIN_TOKEN` (header `X-Admin-Token: <t
 or from your LAN: `curl -H "X-Admin-Token: <token>" "http://192.168.1.x:21201/gift?..."`.
 Without the token variable, remote use is impossible. Do not expose the token on the
 internet side (it travels in plain HTTP).
+
+## Operator panel
+
+The panel is a web page for everything on this page: `/operator/` on the server's HTTP port (the
+title services port, 21201 by default), opened in a browser on the home network. It asks for
+`FORZA_ADMIN_TOKEN` once, keeps it in that tab only (`sessionStorage`, forgotten when the tab
+closes) and sends it as the `X-Admin-Token` header with every request. Every change is written to
+the audit log, which the panel shows.
+
+Who can open it:
+
+- Only when `FORZA_ADMIN_TOKEN` is set. Without it the panel is off.
+- Never through the tunnel or a reverse proxy. Every panel URL, the page too, answers 404 to a
+  request from a `--trusted-proxy` address or with `X-Forwarded-For`, `X-Real-IP` or `Forwarded`
+  (the rule of the [photo moderation](#community-photos)). With a tunnel agent on the server's
+  own machine, open the panel from another machine on the LAN.
+- Only from a private or loopback address (10/8, 172.16/12, 192.168/16, 127/8, link-local,
+  IPv6 ULA and loopback), so a server whose port is forwarded to the internet without a tunnel
+  still keeps it to the home network.
+- Every request of the page needs the right token in its header. The token is never put in a
+  URL and no cookie is set, so a page on another site cannot act with it. Requests with an
+  `Origin` that is not the panel's own, or a `Sec-Fetch-Site` naming another site, are refused,
+  and a change must be `application/json`.
+- 10 wrong tokens from one address in 10 minutes (100 from everyone) answer 429 to everything,
+  the right token too, until the 10 minutes have passed.
+
+The page is plain HTML, JavaScript and CSS served from the package (`forza_live/panel/static/`),
+with a strict Content-Security-Policy and no framing. Everything it shows is set as text, since
+gamertags, photo titles and server names are other people's text. It holds no secrets: a relay's
+new secret goes to its file in the data folder, never to the page.
+
+The tabs:
+
+- **Status**: players online, Horizon Worlds (and `/world/event` to start an event in one), the
+  relays, score tokens, signed requests, and a preview of the Discord status message.
+- **Messages**: a broadcast to every player (type, text, days), the live broadcasts (delete one
+  to take it back from every Message Center), and a message to one player (`/notify`).
+- **Gifts**: credits or a stock car for one player, with a reason the player sees. A credits gift
+  is capped at `FORZA_PANEL_GIFT_MAX` (1,000,000 by default). The recent gifts are listed.
+- **Players**: search by gamertag or XUID. A player's page shows their key (signed, a friends key
+  or none), signed sign-ins, last seen, build, friends, club, scores (with unrank, rank and
+  delete), photos and designs, challenge progress, gifts and bans, with ban, sign-in ban, mute and
+  gift forms. With `FORZA_ACCOUNTS_ADMIN_URL` set, it links to the player in the website accounts
+  service's admin (accounts are managed there: suspend, unlink, void likes).
+- **Bans and chat**: the content bans (`banned_xuids.json`, with the reason given in the panel),
+  timed sign-in bans and chat mutes (`moderation.json`), and the recent chat.
+- **Scores**: `/admin/scores` with its filters, shortcuts for held ghosts, failed start checks,
+  unverified rows and rows before the tags, and the score token counts per board.
+- **Photos** and **Designs**: the moderation queues and every state, with the image or preview
+  on demand, and release, hold, hide, unhide, delete and ban.
+- **Servers**: `server_list.json`: this server's entry and the community servers (add, edit,
+  remove, each checked with `server_list.py`'s rules), the entries left out and why, the list's
+  public key, and a `/status` check of each address.
+- **Relays**: `relay_list.json`, with each relay's probes and load; add (or give a new secret)
+  and revoke.
+- **Challenges**: today's and this week's objectives, how many players finished each, and the
+  weekly gifts sent.
+- **Events**: the community events of [server events](server_events.md): enroll, create,
+  start, close, attendance, award and revoke.
+- **Audit log**: every change made from the panel, newest first.
+
+The audit log is `operator_audit.jsonl` in the data folder: one JSON line per change, with who
+(`operator`), the address it came from, the action, its target, the answer's status, the time and
+what was sent (cut to a few hundred characters a value, never the token). Past 4 MiB it becomes
+`operator_audit.jsonl.1`. Reads are not logged there.
+
+### What the panel covers
+
+Every operator endpoint and command, and where it is in the panel:
+
+| Endpoint or command | What it does | In the panel |
+|---|---|---|
+| `GET /status` | the status page | Status |
+| `GET /broadcast?type=..&Message=..&days=..` | a message for every player | Messages: Broadcast |
+| `GET /admin/broadcasts`, `POST /admin/broadcasts/<id>/delete` | the live broadcasts; take one back | Messages: Live broadcasts |
+| `GET /notify?to=..&type=..` (`type=sample` too) | a message for one player | Messages: Message one player |
+| `GET /gift?to=..&credits=..` or `&car=..` | a gift from the Message Center | Gifts; a player's page |
+| `GET /world/event?session=..&event=..` | start an event in a Horizon World | Status: Horizon Worlds |
+| `GET /admin/chat` | the recent chat, mutes and bans | Bans and chat |
+| `GET /admin/mute?who=..&minutes=..` | mute a player's chat (0 lifts it) | Bans and chat; a player's page |
+| `GET /admin/kick?who=..&minutes=..` | drop a player and refuse their sign-in (0 lifts it) | Bans and chat; a player's page |
+| `GET /admin/scores?..`, `POST /admin/scores/unrank\|rank\|delete?..` | leaderboard rows by source | Scores; a player's page |
+| `GET /admin/photos[?status=..]`, `/queue`, `/img/<id>` | the community photos | Photos |
+| `POST /admin/photos/<id>/hide\|unhide\|hold\|release\|delete\|ban` | moderate a photo | Photos; a player's page |
+| `POST /admin/photos/ban/<XUID>`, `unban/<XUID>` | the ban list | Bans and chat; a player's page |
+| `GET /admin/designs[?state=..]`, `/queue`, `/img/<id>.png` | the community designs | Designs |
+| `POST /admin/designs/<id>/release\|hold\|hide\|unhide\|delete\|ban` | moderate a design | Designs; a player's page |
+| `GET/POST /admin/events...` and `tools/event_admin.py` | community events | Events |
+| `python3 -m forza_live.core.server_list` | check `server_list.json`, print the public key | Servers (the panel does not make the key: the first `/servers.json` request does) |
+| editing `server_list.json` by hand | the launcher's server list | Servers |
+| `python3 -m forza_live.core.relays add\|remove\|list` | the volunteer relays | Relays |
+| `tools/server_probe.py` | check a server from outside (`/status` and a UDP HELLO) | Servers: the `/status` check (not the UDP one) |
+
+Not in the panel: the `/owner/` routes (the website accounts service's, with their own token),
+the screening worker (it uses the photo and design routes above), `tools/xtsw_decode.py` (a
+developer's tool), `--rebind-legacy` or clearing a key in `friends.json` (by hand, with the
+server stopped), backups, and the start options.
+
+The panel's own routes are under `/operator/api/`: `GET` for what it shows, `POST` with a JSON
+body for a change. They call the same code as the endpoints above, with the panel's rules
+(`forza_live/panel/routes.py` lists them).
 
 ## Friends, chat and clubs
 

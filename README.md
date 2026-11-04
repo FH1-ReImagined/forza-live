@@ -32,10 +32,11 @@ player's own machine, and **My own server** connects to one you host.
 | `forza_live/competition/` | scores and leaderboards, Rivals ghosts, daily and weekly challenges (`objectives`), community events, head-to-head challenges, Xbox LIVE stats |
 | `forza_live/world/` | the Horizon World, who hosts it, clubs in it, the Co-op Festival and its results |
 | `forza_live/content/` | photos and community photos, designs and their previews, the Auction House and gifts, shader lists |
+| `forza_live/panel/` | the operator panel: a web page for the operator's tools on the home network (`routes`, `audit`, `static/`) |
 | `tests/` | the unit tests, one folder per `forza_live/` folder (`tests/server/` for `server.py`); shared helpers in `tests/support.py` |
 | `docs/hosting.md` | the step-by-step guide to running a server |
 | `docs/configuration.md` | every option and environment variable, Docker, tunnels, limits |
-| `docs/operating.md` | running a public server: operator endpoints, moderation, score admin, the server list, backups |
+| `docs/operating.md` | running a public server: operator endpoints and panel, moderation, score admin, the server list, backups |
 | `docs/website-data.md` | what the server publishes for a website |
 | `docs/title_services.md` | the title services as the game calls them (the protocol) |
 | `docs/server_events.md` | organizer-approved community events |

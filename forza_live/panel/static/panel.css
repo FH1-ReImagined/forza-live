@@ -1,0 +1,65 @@
+:root {
+  --bg: #f6f7f9; --card: #fff; --ink: #1d232b; --muted: #5d6875; --line: #d9dee5;
+  --accent: #1f5fbf; --danger: #b3261e; --ok: #1e7a3c; --warn: #8a5a00;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 15px;
+  color: var(--ink); background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171b; --card: #1d2228; --ink: #e5e9ee; --muted: #9aa5b1; --line: #343c46;
+          --accent: #6ea8ff; --danger: #ff8a80; --ok: #7bd88f; --warn: #f2c14e; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; padding: .6rem 1rem;
+         background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 1.05rem; margin: 0; }
+nav { display: flex; flex-wrap: wrap; gap: .25rem; flex: 1; }
+nav button { background: transparent; color: var(--ink); border: 1px solid transparent; }
+nav button[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
+main { padding: 1rem; max-width: 1400px; margin: 0 auto; }
+h2 { font-size: 1.15rem; margin: 0 0 .6rem; }
+h3 { font-size: 1rem; margin: 1rem 0 .4rem; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem;
+        margin-bottom: 1rem; overflow-x: auto; }
+.narrow { max-width: 34rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; }
+.stat { font-size: 1.6rem; font-weight: 600; }
+.muted, .hint { color: var(--muted); }
+.hint { font-size: .87rem; }
+.error { color: var(--danger); }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+button, .button { font: inherit; padding: .35rem .75rem; border-radius: 6px; border: 1px solid var(--accent);
+         background: var(--accent); color: #fff; cursor: pointer; }
+button.quiet { background: transparent; color: var(--accent); }
+button.danger { background: var(--danger); border-color: var(--danger); }
+button.small { padding: .15rem .5rem; font-size: .85rem; }
+button:disabled { opacity: .5; cursor: default; }
+form.row, .row { display: flex; flex-wrap: wrap; gap: .5rem .75rem; align-items: flex-end; margin: .5rem 0; }
+label { display: flex; flex-direction: column; gap: .2rem; font-size: .87rem; color: var(--muted); }
+label.check { flex-direction: row; align-items: center; }
+input, select, textarea { font: inherit; padding: .3rem .45rem; border: 1px solid var(--line); border-radius: 5px;
+                          background: var(--bg); color: var(--ink); min-width: 6rem; }
+textarea { min-width: 22rem; min-height: 5rem; }
+textarea.json { min-width: 32rem; min-height: 14rem; font-family: ui-monospace, monospace; font-size: .85rem; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.actions { white-space: nowrap; }
+td.actions button { margin: 0 .2rem .2rem 0; }
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); padding: .6rem;
+      border-radius: 6px; border: 1px solid var(--line); font-size: .85rem; margin: 0; }
+code, .mono { font-family: ui-monospace, monospace; font-size: .88em; overflow-wrap: anywhere; }
+img.thumb { max-width: 320px; max-height: 200px; display: block; border-radius: 4px; border: 1px solid var(--line); }
+#flash .message { padding: .6rem .8rem; border-radius: 6px; margin-bottom: 1rem; border: 1px solid var(--line);
+                  background: var(--card); }
+#flash .message.bad { border-color: var(--danger); }
+#flash .message.good { border-color: var(--ok); }
+.tag { display: inline-block; padding: 0 .4rem; border-radius: 4px; font-size: .8rem; border: 1px solid var(--line); }
+.tag.on { border-color: var(--ok); color: var(--ok); }
+.tag.off { border-color: var(--danger); color: var(--danger); }
+input[type="checkbox"] { min-width: 0; }
+label.check { gap: .4rem; }

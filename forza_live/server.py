@@ -39,6 +39,7 @@ from forza_live.competition import events
 from forza_live.core import limits
 from forza_live.title_services import lsp
 from forza_live.network import proxy
+from forza_live.panel import routes as panel
 from forza_live.network import relay_broker
 from forza_live.network import relay_node
 from forza_live.competition import score_token
@@ -1467,12 +1468,15 @@ async def read_proxy_header(server, reader, idle):
     return proxy.client_address(source)
 
 
-def response(status, body, content_type="application/octet-stream", extra=()):
-    reason = {200: "OK", 304: "Not Modified", 400: "Bad Request", 403: "Forbidden",
-              404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+def response(status, body, content_type="application/octet-stream", extra=(), cors=True):
+    """cors: answer any site's page (Access-Control-Allow-Origin: *); the operator panel's
+    answers do not."""
+    reason = {200: "OK", 304: "Not Modified", 400: "Bad Request", 401: "Unauthorized",
+              403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+              413: "Payload Too Large", 415: "Unsupported Media Type",
               429: "Too Many Requests", 500: "Internal Server Error"}
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
-            f"Content-Length: {len(body)}", "Access-Control-Allow-Origin: *",
+            f"Content-Length: {len(body)}", *(["Access-Control-Allow-Origin: *"] if cors else []),
             f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (auth.py)
     return ("\r\n".join(head) + "\r\n\r\n").encode() + body
 
@@ -1510,6 +1514,14 @@ async def http_handler(server, reader, writer):
             if path in ("/", "/status"):
                 reply = response(200, json.dumps(server.status(), indent=2, default=str).encode(),
                                  "application/json", conn)
+            elif panel.handles(path):
+                # The operator panel (panel/routes.py): the home network only, the token in
+                # its header; 404 through the tunnel or a proxy.
+                status, content_type, data, extra = await panel.handle(server, method, path,
+                                                                       headers, body, peer)
+                log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method,
+                         urllib.parse.urlsplit(path).path, status, len(data))
+                reply = response(status, data, content_type, conn + tuple(extra), cors=False)
             elif path.startswith("/admin/") and not (community.handles(path)
                                                      or design_feed.handles(path)):
                 # Chat moderation (chat.py): /admin/chat, /admin/mute, /admin/kick.
@@ -1545,6 +1557,14 @@ async def http_handler(server, reader, writer):
                     except (OSError, sqlite3.Error):
                         log.exception("community event storage unavailable")
                         reply = response(500, b"event storage unavailable", "text/plain", conn)
+                elif url.path == "/admin/broadcasts" or url.path.startswith("/admin/broadcasts/"):
+                    # The live broadcasts, and taking one back (lsp.broadcasts_admin).
+                    if "origin" in headers:
+                        reply = response(403, b"use curl, not a cross-origin browser request",
+                                         "text/plain", conn)
+                    else:
+                        status, content_type, data = lsp.broadcasts_admin(method, url.path)
+                        reply = response(status, data, content_type, conn)
                 elif url.path == "/admin/chat":
                     reply = response(200, json.dumps(server.chat.moderation(), indent=2).encode(),
                                      "application/json", conn)
