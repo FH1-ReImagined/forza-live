@@ -22,6 +22,7 @@ from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
 from tests.core import test_auth as ta
 from tests.competition import test_ghost as tg
+from tests.support import RaceClock
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
 KEY = bytes(15) + bytes([7])
@@ -46,6 +47,7 @@ def status(reply):
 class Base(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
+        self.clock = RaceClock(self)
         scores.configure(self.dir.name, "main-1")
         lb.configure()
         self.svc = scores.services(lambda xuid: TAGS.get(xuid, "%016X" % xuid))
@@ -316,6 +318,7 @@ class OwnBestTest(Base):
                           x.ScoreboardGetBestScores_Params,
                           {"scoreType": kind, "gameScoreboardId": board, "isServerTimeTrial": False,
                            "carId": AVENTADOR, "carClassId": 7, "carDriveTypeId": 1}, **source)
+        self.clock.race()   # the race that follows its start
         return round(x.decode(x.ScoreboardGetBestScores_Results, reply, 12)[0]["bestScore"]["score"], 3)
 
     def rival(self, xuid, board=199, rival=0, with_best=True, **source):
@@ -443,6 +446,7 @@ class RivalsTest(Base):
                           {"scoreType": scores.EVENT_TIME, "gameScoreboardId": board,
                            "isServerTimeTrial": False, "carId": AVENTADOR, "carClassId": 7,
                            "carDriveTypeId": 1}, **source)
+        self.clock.race()   # the race that follows its start
         return round(x.decode(x.ScoreboardGetBestScores_Results, reply, 12)[0]["bestScore"]["score"], 3)
 
     def lap(self, xuid, lap, **source):

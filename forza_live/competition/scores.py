@@ -19,7 +19,9 @@ results only from players signed in to this server: a call that carries its play
 the build the game names (X-Forza-Build). A result kept off the boards is "unranked", as osu!
 does: kept for review (STORE.unranked, the player's best one per board) but never shown. That
 is a result from an unverified caller, one whose ghost fails the checks (ghost.py; the
-player's previous row stays), and rows an operator unranks. An unverified
+player's previous row stays), one faster than the time since its event started (score_token:
+GetBestScores as a race loads, a speed zone's GetRows as the car enters it), and rows an
+operator unranks. An unverified
 caller is still told its own unranked best (own_best), to itself alone, so the game does not
 send its slower times again, and races it in Rivals when nobody else is on the board; a
 signed-in caller is told its ranked best only. /admin/scores
@@ -42,6 +44,7 @@ import urllib.parse
 import uuid
 
 from forza_live.competition import ghost as ghostfile
+from forza_live.competition import score_token
 from forza_live.core import limits
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
@@ -248,6 +251,7 @@ def configure(data_dir, server=None):
         SERVER_ID = server
     _server_id = None
     STORE.__init__()
+    score_token.configure()
 
 
 def better(new, old, bigger):
@@ -434,6 +438,14 @@ def submit(xuid, gamertag, kind, data, extra=None):
         if unrank(board_key(kind, sbid, stt), entry, "unverified"):
             STORE.save()
             log.info("title: score %016X: unverified caller, kept unranked", xuid)
+        return nothing
+    # The time since the event's start (score_token): a result faster than that is not real.
+    problem = score_token.check(xuid, kind, sbid, stt, score)
+    if problem:
+        if unrank(board_key(kind, sbid, stt), entry, "start: " + problem):
+            STORE.save()
+        log.warning("title: score %016X on board %d type %d: %.3f %s; kept unranked", xuid, sbid,
+                    kind, score, problem)
         return nothing
     board = STORE.board(kind, sbid, stt, create=True)
     if board is None:
@@ -669,6 +681,10 @@ def club_only(entries, xuid):
 
 def get_rows(xuid, body):
     p, _ = x.decode(x.ScoreboardGetRows_Params, body)
+    if p["type"] == SPEED_ZONE and p["view"] == FRIENDS_AND_CLUB:
+        # A speed zone's HUD board, fetched as the car enters it: the zone's start (score_token).
+        score_token.start(xuid, p["type"], p["gameScoreboardId"], p["isServerTimeTrial"],
+                          source()[0])
     if p["type"] == ONLINE_XP_TYPE:
         entries = online_xp_entries()
     elif p["type"] == CLUB_TYPE:
@@ -870,6 +886,9 @@ def get_best_scores(xuid, body):
     time that beats it (FH1 #569): answering the board's record kept every slower time, and the
     player, off the board."""
     p, _ = x.decode(x.ScoreboardGetBestScores_Params, body)
+    # The event's race is loading: its start, for the result that follows (score_token).
+    score_token.start(xuid, p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"],
+                      source()[0])
     best = own_best(xuid, p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"])
     log.info("title: GetBestScores %016X board %d type %d car %d class %d: %s", xuid,
              p["gameScoreboardId"], p["scoreType"], p["carId"], p["carClassId"],
