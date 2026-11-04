@@ -679,12 +679,15 @@ already sends a signed call at each start:
 
 From a signed-in caller, either call starts the player's token on that board. Each result spends
 its claimed seconds from the token: a time's own seconds, or for a zone the distance between its
-gates (`ZONE_METRES`) over the average speed. A result counts if everything the token has paid
-for fits in the time since it started, give or take 2 s and 2%. Otherwise it is kept unranked
-(`start: ...`), and so is a result with no start at all. The game is told success either way,
-with no ghost asked for. A new start replaces the token. Calls that are unverified or forged
-start nothing, so nobody can move another player's start. For 30 minutes after the server
-starts, a result without a token still counts, because tokens are kept in memory.
+gates (`ZONE_METRES`) over the average speed. A result passes if everything the token has paid
+for fits in the time since it started, give or take 2 s and 2%; a result with no start fails.
+With `--score-tokens enforce` a failed result is kept unranked (`start: ...`). With `log`, the
+default, it stays ranked and is only logged and counted; with `off` nothing is checked
+([`operating.md`](operating.md#score-tokens)). The game is told success either way, and a failed
+result is not asked for its ghost under `enforce`. A new start replaces the token. Calls that
+are unverified or forged start nothing, so nobody can move another player's start. For 30
+minutes after the server starts, a result without a token still counts, because tokens are kept
+in memory.
 
 Seen in the game (TU4, a local server, GoPro Millennia Masters, board 199, laps by
 `tools/autodrive.py`):
@@ -698,8 +701,8 @@ Seen in the game (TU4, a local server, GoPro Millennia Masters, board 199, laps 
 - **RACE AGAIN** on the cash reward screen and a career race (ENTER EVENT, 4 laps against the CPU
   drivers) each sent a new `GetBestScores`. The race's best lap of 117.355 s was submitted 516 s
   after its start, and it ranked with its ghost.
-- Results signed with the game's own key but sent by a script went unranked, and each call was
-  still answered as a success:
+- With `enforce`, results signed with the game's own key but sent by a script went unranked,
+  and each call was still answered as a success:
   - a lap of 60 s sent 5 s after `GetBestScores`;
   - a time with no start;
   - 60 m/s on Rt. 20, sent 3 s after its `GetRows`, where 16.8 s are needed.

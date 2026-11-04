@@ -1,13 +1,25 @@
 """Score tokens (FH1 #517): a result counts only when the time since its event's start (the
 game's GetBestScores as a race loads, a speed zone's GetRows as the car enters it) is at least
-what it claims. A result faster than that, or without a start, is kept unranked; the game is
-never told an error.
+what it claims. With --score-tokens enforce a result faster than that, or without a start, is
+kept unranked (the game is never told an error); with log, the default, it is only logged and
+counted; off skips the tokens.
 
 Run: python3 -m unittest discover -p 'test_*.py'
 """
 
+import argparse
+import contextlib
+import io
+import json
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from forza_live import server as srv
 from forza_live.competition import score_token
 from forza_live.competition import scores
+from forza_live.title_services import lsp
 from forza_live.network import xtsw as x
 from tests.competition import test_ghost as tg
 from tests.competition import test_leaderboard_integrity as li
@@ -18,9 +30,18 @@ from tests.support import RaceClock
 LAP = 107.228
 
 
-class TokenTest(li.Base):
+def mode(test, name):
+    """score_token.MODE for the test."""
+    test.addCleanup(setattr, score_token, "MODE", score_token.MODE)
+    score_token.MODE = name
+
+
+class Base(li.Base):
+    MODE = "enforce"
+
     def setUp(self):
         super().setUp()
+        mode(self, self.MODE)
         self.clock.race(score_token.NO_START_GRACE)   # the server has been up a while
 
     def start(self, xuid=A_XUID, board=199, stt=False, **source):
@@ -38,6 +59,10 @@ class TokenTest(li.Base):
 
     def ranked(self, board=BOARD):
         return {k: round(e["score"], 3) for k, e in scores.STORE.boards.get(board, {}).items()}
+
+
+class TokenTest(Base):
+    """--score-tokens enforce."""
 
     def test_a_race_after_its_start_ranks(self):
         self.start()
@@ -234,6 +259,7 @@ class SignedTokenTest(ta.Base):
 
     def setUp(self):
         super().setUp()
+        mode(self, "enforce")
         self.clock = RaceClock(self)
         scores.configure(self.tmp.name, "main-1")
         self.addCleanup(scores.configure, self.tmp.name, "")
@@ -262,3 +288,116 @@ class SignedTokenTest(ta.Base):
         self.assertEqual(scores.STORE.unranked[BOARD]["%016X" % ta.XUID]["unranked"],
                          "start: 10.0 s after its start, it needs 50.0 s")
 
+
+
+class LogModeTest(Base):
+    """--score-tokens log (the default): the tokens run the same, a failed check is only logged
+    (the board and the player's public id, never a gamertag or an XUID) and counted."""
+
+    MODE = "log"
+
+    def test_a_failed_check_stays_ranked_and_is_logged(self):
+        self.start()
+        self.clock.race(30.0)
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            reply = self.submit(A_XUID, LAP)
+        self.assertTrue(reply["uploadFiles"])   # as any new best: its ghost is asked for
+        self.assertEqual(self.ranked(), {"%016X" % A_XUID: LAP})
+        self.assertEqual(scores.STORE.unranked, {})
+        line, = logs.output
+        self.assertIn("score token: board 3:199:0, player %s, score 107.228: too fast, 30.0 s "
+                      "after its start, it needs 107.2 s; ranked" % scores.public_id(A_XUID), line)
+        self.assertNotIn("%016X" % A_XUID, line.upper())
+        self.assertNotIn("DriverA", line)
+        # no start, on a speed zone
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            self.submit(B_XUID, 34.0, board=105, kind=scores.SPEED_ZONE)
+        self.assertIn("board 2:105:0, player %s, score 34.000: no start; ranked"
+                      % scores.public_id(B_XUID), logs.output[0])
+        self.assertEqual(self.ranked("2:105:0"), {"%016X" % B_XUID: 34.0})
+        counts = score_token.status()["score_tokens"]
+        self.assertEqual({k: counts[k] for k in ("mode", "checked", "failed", "no_start", "too_fast")},
+                         {"mode": "log", "checked": 2, "failed": 2, "no_start": 1, "too_fast": 1})
+        self.assertEqual(counts["boards"], {"2:105:0": {"no_start": 1, "too_fast": 0},
+                                            "3:199:0": {"no_start": 0, "too_fast": 1}})
+
+    def test_a_passed_check_is_counted_only(self):
+        self.start()
+        self.clock.race(300.0)
+        with self.assertNoLogs("forza-live", "WARNING"):
+            self.submit(A_XUID, LAP)
+        counts = score_token.status()["score_tokens"]
+        self.assertEqual((counts["checked"], counts["failed"], counts["boards"]), (1, 0, {}))
+
+    def test_counted_boards_are_bounded(self):
+        self.addCleanup(setattr, score_token, "MAX_COUNTED_BOARDS", score_token.MAX_COUNTED_BOARDS)
+        score_token.MAX_COUNTED_BOARDS = 2
+        with self.assertLogs("forza-live", "WARNING"):
+            for board in (199, 200, 201, 199):
+                self.submit(A_XUID, 100.0 - board / 10, board=board)
+        counts = score_token.status()["score_tokens"]
+        self.assertEqual(counts["no_start"], 4)
+        self.assertEqual(counts["boards"], {"3:199:0": {"no_start": 2, "too_fast": 0},
+                                            "3:200:0": {"no_start": 1, "too_fast": 0}})
+
+
+class OffModeTest(Base):
+    """--score-tokens off: no tokens, no checks."""
+
+    MODE = "off"
+
+    def test_nothing_is_checked(self):
+        self.call(self.svc[("Scoreboard", "GetBestScores")], A_XUID, x.ScoreboardGetBestScores_Params,
+                  {"scoreType": 3, "gameScoreboardId": 199, "isServerTimeTrial": False,
+                   "carId": AVENTADOR, "carClassId": 7, "carDriveTypeId": 1})
+        self.assertEqual(score_token._tokens, {})
+        with self.assertNoLogs("forza-live", "WARNING"):
+            self.submit(A_XUID, LAP)          # 0 s after its start
+            self.submit(B_XUID, LAP)          # no start
+        self.assertEqual(sorted(scores.STORE.boards[BOARD]), ["%016X" % A_XUID, "%016X" % B_XUID])
+        self.assertEqual(scores.STORE.unranked, {})
+        self.assertEqual(score_token.status()["score_tokens"]["checked"], 0)
+
+
+class ConfigureTest(unittest.TestCase):
+    """--score-tokens / FORZA_SCORE_TOKENS through lsp.configure, and /status."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        mode(self, score_token.MODE)
+        self.addCleanup(setattr, lsp, "DATA_DIR", lsp.DATA_DIR)
+        self.addCleanup(scores.configure, self.dir.name, "")
+
+    def configure(self, *argv):
+        parser = argparse.ArgumentParser()
+        lsp.add_arguments(parser)
+        lsp.configure(parser.parse_args(["--data-dir", self.dir.name] + list(argv)))
+
+    def parse(self, *argv):
+        parser = argparse.ArgumentParser()
+        lsp.add_arguments(parser)
+        return parser.parse_args(list(argv)).score_tokens
+
+    def test_the_default_is_log(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FORZA_SCORE_TOKENS", None)
+            self.assertEqual(self.parse(), "log")
+            os.environ["FORZA_SCORE_TOKENS"] = "Enforce"
+            self.assertEqual(self.parse(), "enforce")
+            self.assertEqual(self.parse("--score-tokens", "off"), "off")   # the flag wins
+
+    def test_modes(self):
+        for name in ("enforce", "OFF", "log"):
+            self.configure("--score-tokens", name)
+            self.assertEqual(score_token.MODE, name.lower())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.parse("--score-tokens", "strict")
+        with self.assertRaises(ValueError):   # FORZA_SCORE_TOKENS=strict stops the start
+            score_token.configure("strict")
+
+    def test_status(self):
+        self.configure("--score-tokens", "enforce")
+        server = srv.ForzaLive("test", 64)
+        got = json.loads(json.dumps(server.status()))["score_tokens"]
+        self.assertEqual((got["mode"], got["checked"], got["failed"]), ("enforce", 0, 0))

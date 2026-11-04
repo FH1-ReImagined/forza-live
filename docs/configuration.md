@@ -31,6 +31,7 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--daily-challenges` | `FORZA_DAILY_CHALLENGES=1` | run the [daily and weekly challenges](website-data.md#daily-and-weekly-challenges) (off by default) |
 | `--daily-challenges-seed TEXT` | `FORZA_DAILY_CHALLENGES_SEED` | the secret seed they are chosen with (default: a random one made at the first start, kept in the data folder) |
 | `--daily-challenges-gifts` | `FORZA_DAILY_CHALLENGES_GIFTS=1` | a weekly credits gift for finished challenges (for the main server) |
+| `--score-tokens off\|log\|enforce` | `FORZA_SCORE_TOKENS` | what a result faster than the time since its event started does: `enforce` keeps it unranked, `log` (the default) only logs and counts it, `off` skips the check ([score tokens](operating.md#score-tokens)) |
 | | `FORZA_COMMUNITY_HOLD=1` | new community photos wait for release ([photos](operating.md#community-photos)) |
 | | `FORZA_COMMUNITY_MAX_WIDTH` | width of a published big shot (default 1920) |
 | | `FORZA_DISCORD_STATUS_WEBHOOK` | a Discord webhook for the [players-online message](#players-online-in-discord) |

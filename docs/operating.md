@@ -204,6 +204,27 @@ last kind.
 To take a bad build off the boards:
 `curl -X POST -H "X-Admin-Token: <token>" "http://host:21201/admin/scores/unrank?build=0.2.1/tu4"`.
 
+### Score tokens
+
+A result needs the time it claims to have passed since its event started
+([which results count](website-data.md#which-results-count)). `--score-tokens` (or
+`FORZA_SCORE_TOKENS`) says what happens when a result fails that check:
+
+- `log` (the default): the check runs, but the result stays ranked. The server logs one line per
+  failed check, with the board, the reason and the player's public leaderboard id (never a
+  gamertag or an XUID): `score token: board 3:199:0, player 1a2b3c4d5e6f, score 60.000: too
+  fast, 5.0 s after its start, it needs 60.0 s; ranked (--score-tokens log)`.
+- `enforce`: the result is kept unranked with the reason `start: ...`. The game is told success.
+- `off`: no tokens and no check.
+
+The status page (`/status`) counts the checks since the server started: `score_tokens` has the
+mode, the open tokens, how many results were checked and failed (`no_start`, `too_fast`), and
+the failures per board (`3:199:0` is type 3, the event with Id 199), at most 500 boards.
+
+The main server runs `log` first. After a week of public play, the counts and log lines show
+whether honest players' events (street races, showcases, speed zones) ever arrive with no start
+or too fast. Switch to `enforce` once they don't, or after fixing those that do.
+
 ## Listing community servers
 
 The launcher's Servers page lists the servers players can pick. It takes the list only from the

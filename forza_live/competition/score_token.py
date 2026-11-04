@@ -29,10 +29,18 @@ not used up by its first result: RESTART on the results screen races the event a
 a new GetBestScores (seen in the game, a Rivals attempt), and its lap is paid for by the time
 that has passed since. A new start replaces the token.
 
-A result without a token, or faster than its token allows, is kept unranked ("start: ..."),
-never an error to the game. A speed trap (type 1) is a speed at one point: no start, nothing
-to time. Tokens live in memory: after a restart the server gives a result without one
-NO_START_GRACE before it counts that as missing (a race started before the restart).
+A result without a token, or faster than its token allows, fails the check ("no start", or
+"too fast"). A speed trap (type 1) is a speed at one point: no start, nothing to time. Tokens
+live in memory: after a restart the server gives a result without one NO_START_GRACE before it
+counts that as missing (a race started before the restart).
+
+MODE (--score-tokens, FORZA_SCORE_TOKENS) says what a failed check does:
+  - "enforce": the result is kept unranked ("start: ..."), never an error to the game;
+  - "log" (the default): the tokens run the same, but the result stays ranked; the server logs
+    one line per failed check (the board, the reason and the player's public leaderboard id,
+    never a gamertag or an XUID) and counts them (status(), in /status), to see whether honest
+    players' events ever arrive without a start or too fast before enforcing;
+  - "off": no tokens at all.
 """
 
 import collections
@@ -51,14 +59,58 @@ NO_START_GRACE = 1800     # s after the server's start when a missing token is l
 ZONE_METRES = {101: 645, 102: 576, 104: 437, 105: 1010, 106: 923, 107: 900, 108: 238,
                109: 582, 112: 399}
 
+MODES = ("off", "log", "enforce")
+MODE = "log"
+MAX_COUNTED_BOARDS = 500  # boards counted one by one in status()
+
 clock = time.monotonic
 _tokens = collections.OrderedDict()   # (xuid, kind, board, stt) -> [started, seconds paid for]
 _since = [clock()]                    # the server's start (configure)
 
 
-def configure():
+_counts = {"checked": 0, "failed": 0, "no start": 0, "too fast": 0, "boards": {}}
+
+
+def configure(mode=None):
+    """A new server start: no tokens, the counts at 0; and the mode, when given."""
+    global MODE
+    if mode is not None:
+        if mode not in MODES:
+            raise ValueError("score tokens: %r is not one of %s" % (mode, ", ".join(MODES)))
+        MODE = mode
     _tokens.clear()
     _since[0] = clock()
+    _counts.update({"checked": 0, "failed": 0, "no start": 0, "too fast": 0, "boards": {}})
+
+
+def board_key(kind, sbid, stt):
+    return "%d:%d:%d" % (kind, sbid, 1 if stt else 0)
+
+
+def kind_of(problem):
+    return "no start" if problem == "no start" else "too fast"
+
+
+def count(kind, sbid, stt, problem):
+    """A failed check, for status()."""
+    what = kind_of(problem)
+    _counts["failed"] += 1
+    _counts[what] += 1
+    boards = _counts["boards"]
+    key = board_key(kind, sbid, stt)
+    if key in boards or len(boards) < MAX_COUNTED_BOARDS:
+        board = boards.setdefault(key, {"no start": 0, "too fast": 0})
+        board[what] += 1
+
+
+def status():
+    """The mode and the checks since the server started: for /status."""
+    return {"score_tokens": {
+        "mode": MODE, "open": len(_tokens), "checked": _counts["checked"],
+        "failed": _counts["failed"], "no_start": _counts["no start"],
+        "too_fast": _counts["too fast"],
+        "boards": {k: {"no_start": v["no start"], "too_fast": v["too fast"]}
+                   for k, v in sorted(_counts["boards"].items())}}}
 
 
 def timed(kind):
@@ -69,7 +121,7 @@ def start(xuid, kind, sbid, stt, trusted):
     """A start of the player's event on a board: its token (replacing an older one). Only a
     signed-in caller's: an unverified result is unranked anyway, and a forged call must not move
     another player's start."""
-    if not trusted or not timed(kind):
+    if MODE == "off" or not trusted or not timed(kind):
         return
     now = clock()
     key = (xuid, kind, sbid, bool(stt))
@@ -92,11 +144,12 @@ def needed(kind, sbid, score):
 
 
 def check(xuid, kind, sbid, stt, score):
-    """The reason the player's result on the board is unranked, or None; a result that counts
-    spends its seconds from the token."""
-    claim = needed(kind, sbid, score) if timed(kind) else None
+    """Why the player's result on the board fails its check, or None; a result that passes
+    spends its seconds from the token. MODE says what a failure does (scores.submit)."""
+    claim = needed(kind, sbid, score) if MODE != "off" and timed(kind) else None
     if claim is None:
         return None
+    _counts["checked"] += 1
     now = clock()
     key = (xuid, kind, sbid, bool(stt))
     token = _tokens.get(key)
