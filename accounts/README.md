@@ -1,11 +1,14 @@
 # Website accounts (forza.dyotson.dev/api/)
 
 Optional accounts for the project website: players sign in with **Discord**, **GitHub** or an
-**8-digit code sent by email**. For now (milestone M1) an account can only browse. Linking the
-game's signing key, likes and "My items" come in later milestones.
+**8-digit code sent by email**, then link the account to their game from the launcher (milestone
+M2). The link is the account's second factor: later milestones (likes, "My items", uploads) are
+only for linked accounts. An account that is not linked can only browse.
 
 This is a Django project with its own dependencies, image and tests. The game server
-(`forza_live/`) stays dependency-free and does not import anything from here.
+(`forza_live/`) stays dependency-free and does not import anything from here. This service
+imports the game server's signed-request check (`forza_live/core/auth.py`) and a few of its
+readers, and uses them on the game server's data folder, mounted read-only.
 
 - **Sign-in flows:** [django-allauth](https://docs.allauth.org/) in headless mode, the JSON API the
   static website calls (`/api/auth/browser/v1/...`), plus the providers' OAuth callbacks
@@ -19,10 +22,12 @@ This is a Django project with its own dependencies, image and tests. The game se
 |------|------|
 | `fh_accounts/settings.py` | every setting; the environment variables are below |
 | `fh_accounts/urls.py` | the routes |
-| `members/models.py` | the account (`User`, whose username is the public id such as `K7Q2-XM4P`), `SignIn` (sessions per account), `AuditEvent` |
+| `members/models.py` | the account (`User`, whose username is the public id such as `K7Q2-XM4P`), `SignIn` (sessions per account), `AuditEvent`, `GameLink`, `LinkRequest`, `SignedNonce` |
 | `members/adapters.py` | allauth's rules: the allowed return pages, no passwords, no profile data, the sign-in mail |
 | `members/views.py` | allauth's code request, code confirm and provider redirect views, with the limits and the email stand-in |
 | `members/api.py` | the django-ninja endpoints and their schemas |
+| `members/links.py` | the game link: the launcher's signed calls and the website's peek, claim and remove |
+| `members/game.py` | the game server's data, read-only (keys, players, bans), and the signed-request check |
 | `members/middleware.py` | answer headers, the allauth routes that exist, Sec-Fetch-Site, the admin allow list, session lifetime |
 | `members/identity.py` | the email stand-in: an HMAC of the address |
 | `members/management/commands/` | `checkdb` (integrity check) and `nightly` (purge and backup) |
@@ -39,8 +44,11 @@ This is a Django project with its own dependencies, image and tests. The game se
   is never on the game server's tunnel.
 - `/admin/` and `/static/` are not passed on by nginx. They answer only the addresses in
   `FORZA_ADMIN_ALLOW` (see "The admin" below).
-- The game server is not involved in M1. From M2 this service reads the game server's
-  `friends.json` and player records, read-only, to check a key-signed link request.
+- The launcher's link calls come the same way, to `https://forza.dyotson.dev/api/game/...`,
+  signed with the player's key (`X-Forza-Auth`).
+- The game server is never called. This service reads its data folder (`FORZA_GAME_DATA`,
+  mounted read-only): `friends.json` for the public key each XUID is bound to,
+  `players/<XUID>.json` for the gamertag and the signed sign-ins, and `banned_xuids.json`.
 
 ## The API
 
@@ -62,9 +70,28 @@ Our own endpoints (django-ninja, session auth, CSRF checked on every change, JSO
 | Route | Answer |
 |-------|--------|
 | `GET /api/health` | `{"ok": true}` |
-| `GET /api/me` | `{"id": "K7Q2-XM4P", "created": "2026-11-03", "methods": ["discord"], "sessions": 1, "recent": true, "link": null, "events": [{"at", "event"}]}`; 401 when signed out |
+| `GET /api/me` | `{"id": "K7Q2-XM4P", "created": "2026-11-03", "methods": ["discord"], "sessions": 1, "recent": true, "link": null, "events": [{"at", "event"}]}`; 401 when signed out. A linked account's `link` is `{"state", "gamertag", "since"}`; `state` is `active`, `frozen`, `waiting` or `banned` (see "The game link") |
 | `POST /api/logout-all` | `{}` -> `{"ok": true, "ended": n}`: every session of the account ends, this one too |
 | `POST /api/account/delete` | `{"confirm": "<account id>"}` -> `{"ok": true, "deleted": true}`; 403 `{"error": "sign in again"}` unless the last sign-in was in the past 10 minutes |
+
+| `POST /api/link/peek` | `{"token"}` or `{"code"}` -> `{"state", "gamertag", "expires", "replaces"}`: the link request the launcher made. `replaces` is the gamertag this account is linked to now, when it is another game |
+| `POST /api/link/claim` | `{"token"}` or `{"code"}` -> `{"ok": true, "state": "claimed", "account": "K7Q2-XM4P"}`: this account asks for the link; the launcher then confirms it |
+| `POST /api/link/remove` | `{}` -> `{"ok": true, "unlinked": true}`; 403 `{"error": "sign in again"}` unless the last sign-in was in the past 10 minutes |
+
+The launcher's calls (signed with the player's key in `X-Forza-Auth`, the game server's scheme;
+no cookie is read, and a request with an `Origin` or `Sec-Fetch-Site` header is refused). Every
+answer carries `X-Forza-Time`, and a refused signature is a 401 `{"error": "refused"}`, whatever
+the reason, so the launcher can correct its clock and try once more.
+
+| Route | Answer |
+|-------|--------|
+| `POST /api/game/link/start` | `{"v": 1}` -> `{"id", "url", "code", "expires"}`: `url` is `https://forza.dyotson.dev/account.html#link=<token>` for the browser, `code` (`K7M2-QXPA`) for another device. 403 `not available` (banned), 409 `play online first` (no gamertag or signed sign-in on the game server yet), 429 `changed in the past day` or `too many requests` |
+| `GET /api/game/link/<id>` | `{"state", "account", "replaces"}`: `pending`, `claimed` (with `account: {"id", "method", "created"}` and `replaces`, the account the key is linked to now), `linked`, `declined`, `cancelled` or `expired` |
+| `POST /api/game/link/<id>/confirm` | `{"account": "K7Q2-XM4P"}`, the account the player was shown -> `{"ok": true, "state": "linked"}`; 409 when it is not that request's claimer |
+| `POST /api/game/link/<id>/cancel` | `{}` -> `{"ok": true, "state": "declined"}` ("Not me") |
+| `GET /api/game/account` | `{"linked", "state", "account"}`: the key's link |
+| `POST /api/game/unlink` | `{}` -> `{"ok": true, "unlinked": true}` |
+| `POST /api/game/signout` | `{}` -> `{"ok": true, "ended": n}`: every session of the linked account ends |
 
 No answer ever contains an email address, a provider's user id or an XUID. With
 `FORZA_API_DOCS=1` the OpenAPI page is at `/api/docs` (and `/api/openapi.json`). Like the admin, it
@@ -74,6 +101,41 @@ Every change needs the CSRF token from the `__Host-fh_csrf` cookie in `X-CSRFTok
 form's `csrfmiddlewaretoken`), an `Origin` of exactly `FORZA_ACCOUNTS_ORIGIN`, and, when the
 browser sends `Sec-Fetch-Site`, `same-origin`. `OPTIONS` is 405, and no answer carries a CORS
 header. Every `/api/` answer is `Cache-Control: no-store` and `nosniff`.
+
+## The game link
+
+Both sides approve every link, so a token, code or address that leaks is useless alone:
+
+1. In the launcher, Settings > Online > Website account > **Link**. The launcher signs
+   `game/link/start`. The service checks the signature with the key `friends.json` binds the
+   XUID to (`forza_live.core.auth.check_request`: the server name `forza.dyotson.dev` only, the
+   120-second clock window, the nonce used once in every worker), that the XUID is not banned,
+   and that `players/<XUID>.json` has a gamertag and a signed sign-in (`firstSigned`, which the
+   game server writes only for a sign-in signed by the player's key). It makes a request for 10
+   minutes, with a token (256 bits) and a code (8 characters); it keeps only their HMACs.
+2. The launcher opens `account.html#link=<token>` in the browser (or shows the code, to type at
+   `account.html` on another device). The page moves the token out of the address, has the
+   player sign in if needed, and shows "Link the game of *Gamertag*?". **Link** claims the
+   request for this account.
+3. The launcher polls the request, then asks "Link this game to website account K7Q2-XM4P
+   (Discord, created ...)?". **Link** confirms it by that account id; **Not me** declines it.
+   One transaction drops any older link of the key and of the account and writes the new link,
+   with the key's public key pinned. Every other session of the account ends.
+
+Rules:
+- One key per account, and one account per key. A key, or an account, links at most once a day.
+- The key holder always wins: the launcher can unlink and sign the account out everywhere,
+  even if someone else took over the web account. A player who lost their Discord login or
+  mailbox makes a new account and moves the link to it.
+- The website can unlink too (with a sign-in in the past 10 minutes).
+- **Pinning.** The link keeps the public key it was made with. When `friends.json` binds the XUID
+  to another key (the operator re-keyed it, or someone bound a recycled XUID), the link is
+  **frozen**: the new key cannot see the account, unlink or sign it out. The operator checks
+  with the player and unfreezes it in the admin (GameLink, "Unfreeze, pinning the key the XUID
+  is bound to now"). When the game server has forgotten the XUID (`FORGET_DAYS`), the link
+  **waits**; the same identity's next sign-in binds the same key again, and the link works.
+- A banned XUID cannot start a link, and its account shows the link as banned.
+- Deleting the account removes its link.
 
 ## Settings
 
@@ -90,6 +152,8 @@ file (mode 600) that only this container reads. Never commit it.
 | `FORZA_EMAIL_PEPPER_FILE` | `$FORZA_ACCOUNTS_DATA/email_pepper.bin` | 32 random bytes made at the first email sign-in. Back it up with the database: without it, no email account can be matched again |
 | `FORZA_ACCOUNTS_BACKUPS` | `$FORZA_ACCOUNTS_DATA/backups` | where `nightly` writes its copies |
 | `FORZA_ACCOUNTS_PROXY` | none | the website nginx's address or network (`<web-nginx-ip>` or `<web-network-cidr>`): `X-Real-IP` is believed only from there. Without it every visitor counts as nginx for the rate limits |
+| `FORZA_GAME_DATA` | none | the game server's data folder, mounted read-only (`friends.json`, `players/`, `banned_xuids.json`). Without it, linking is off (503) |
+| `FORZA_ACCOUNTS_LINKS_DAILY` | `200` | new game links a day in all |
 | `FORZA_ADMIN_ALLOW` | `127.0.0.1/32 ::1/128` | addresses that may open `/admin/` (and `/api/docs`) |
 | `FORZA_API_DOCS` | off | `1` serves the OpenAPI page to `FORZA_ADMIN_ALLOW` |
 | `FORZA_DISCORD_CLIENT_ID`, `FORZA_DISCORD_CLIENT_SECRET` (`_FILE`) | none | the Discord app. Without both, Discord sign-in is off |
@@ -141,11 +205,17 @@ The mail is fixed plain text with the code and a same-browser link
 
 ## Running it
 
-    docker build -t forza-accounts accounts/
+    docker build -t forza-accounts -f accounts/Dockerfile .
     docker volume create forza-accounts-data
     docker run -d --name forza-accounts --restart unless-stopped \
         --network <web-network> --env-file <accounts.env> \
-        -v forza-accounts-data:/data forza-accounts
+        -v forza-accounts-data:/data \
+        -v <game-server-data>:/game-data:ro -e FORZA_GAME_DATA=/game-data forza-accounts
+
+Build it from the repository's root: the image copies the game server's `forza_live/` package
+for its signed-request check. `<game-server-data>` is the game server's data volume or folder
+(its `--data-dir`); mount it read-only (`:ro`). The container's user (uid 10001) needs to read
+it.
 
 Use no `-p`: only the website's nginx, on the same Docker network, reaches it. At every start
 the image:
@@ -203,7 +273,8 @@ CSP must keep its other directives; the line above shows only what to add.
 It removes:
 - expired sessions;
 - audit events older than 90 days;
-- accounts not used for 30 days (none is linked to a game before M2);
+- accounts not used for 30 days that are not linked to a game;
+- link requests that ended over an hour ago, and the launcher's used nonces past their window;
 - email accounts whose first code was never used, after a day.
 
 Then it copies the database and the pepper to `backups/` (7 days kept). To restore, stop the
@@ -229,7 +300,13 @@ the service answers it only for `FORZA_ADMIN_ALLOW`. Make a staff user with
 - **Sessions:** in the database. A session ends 30 days after its last use (refreshed at most
   once a day), and 90 days after its sign-in; an account keeps at most 20. A sign-in code is
   held in the browser's session for 10 minutes.
-- **Audit events:** sign-ins, sign-outs, account creation; 90 days, with no IP address.
+- **The game link:** the XUID, its public key when it was linked, the gamertag (for the account
+  page), when it was made and moved, and whether it is frozen.
+- **Link requests:** for 10 minutes (deleted an hour later): the XUID, its public key and
+  gamertag, HMACs of the token and the code, and the account that claimed it.
+- **Launcher nonces:** the random nonce of each signed call, for 4 minutes, so none works twice.
+- **Audit events:** sign-ins, sign-outs, account creation, links made, moved and removed; 90
+  days, with no IP address.
 - **Rate-limit counters:** in the cache table. They hold IP addresses and address hashes for an
   hour or a day.
 - Deleting the account removes all of it at once. Backups age out in 7 days.
@@ -240,8 +317,9 @@ the service answers it only for `FORZA_ADMIN_ALLOW`. Make a staff user with
 |-----|-------|
 | per IP | 20 Discord or GitHub sign-in starts an hour; 5 new accounts a day; 5 code mails an hour; 20 wrong codes an hour |
 | per email address | 3 codes an hour, 5 a day; one live code per browser; 5 tries per code; a code lasts 10 minutes |
-| per account | 20 sessions |
-| whole service | `FORZA_ACCOUNTS_EMAIL_DAILY` code mails a day (then email sign-in pauses); 1,000 new accounts a day |
+| per account | 20 sessions; 10 link claims (and link peeks that find nothing) per 10 minutes; one new link a day |
+| per XUID (signed) | 600 calls an hour; 5 link starts an hour; one new link a day |
+| whole service | `FORZA_ACCOUNTS_EMAIL_DAILY` code mails a day (then email sign-in pauses); 1,000 new accounts a day; `FORZA_ACCOUNTS_LINKS_DAILY` new links a day; 100 link codes that find nothing a minute, after which codes stop for 10 minutes (the browser's token still works) |
 
 The limits are allauth rate limits (`ACCOUNT_RATE_LIMITS` in the settings). Over a limit:
 - a Discord or GitHub start goes back to the page with `?error=busy`;
@@ -257,6 +335,21 @@ Differences from the design (community accounts, M1):
   only that codes were already asked for that address, not whether it has an account.
 - **The mail is sent within the request.** Every address that is not over a limit gets a mail,
   so the timing does not depend on whether the account exists.
+
+Differences from the design (M2):
+- **The link page is `account.html`**, not a separate `link.html`: the browser opens
+  `account.html#link=<token>`, and a code is typed on the same page.
+- **Link requests and nonces are in the database**, not in memory: gunicorn runs several
+  workers, and a request started in one must be seen in the others (and a nonce used in one
+  refused in the others). The game server's own nonce cache is checked too.
+- **A key bound only to a raw friends key gets the same 401 as any refused signature** (the
+  design had "update the game"): it has no public key to check a signature with, so the service
+  cannot tell it from someone else's request. The launcher's message covers both.
+- **The once-a-day rule** is a rate limit per XUID and per account (`link_change`), consumed by
+  each new link.
+- `firstSigned` (and `signedDays`, `lastSignedDay`) is written by the game server's Logon2 for a
+  sign-in signed by the player's key (`forza_live.title_services.lsp.signed_logon`, the design's
+  M0 piece, in the same change).
 
 ## Development
 

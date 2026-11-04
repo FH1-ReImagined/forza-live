@@ -1,7 +1,8 @@
 """Request rules for the whole service.
 
 ApiHeaders: every /api/ answer is no-store and nosniff, and carries no CORS header; OPTIONS is
-405. AdminOnlyFromAllowed: the admin (and the API docs, when on) answer only FORZA_ADMIN_ALLOW.
+405; the launcher's calls (/api/game/) also get the server's clock (X-Forza-Time).
+AdminOnlyFromAllowed: the admin (and the API docs, when on) answer only FORZA_ADMIN_ALLOW.
 AuthRoutes: of allauth's routes only the ones the sign-ins use exist (no password, signup or email
 management routes). FetchSiteCheck: a change (POST, PUT, PATCH, DELETE) from a browser that says
 it is not same-origin is refused, on top of Django's CSRF token and Origin checks, and our own
@@ -40,6 +41,8 @@ class ApiHeaders:
             response = JsonResponse({"error": "method not allowed"}, status=405)
         else:
             response = self.get_response(request)
+        if request.path.startswith("/api/game/"):
+            response["X-Forza-Time"] = str(int(time.time()))  # the launcher corrects its clock by it
         if request.path.startswith("/api/"):
             response["Cache-Control"] = "no-store"
             response["X-Content-Type-Options"] = "nosniff"

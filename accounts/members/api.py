@@ -5,6 +5,9 @@
   POST /api/logout-all      ends every session of the account, this one too
   POST /api/account/delete  {"confirm": "<account id>"}; needs a sign-in in the last 10 minutes
 
+and, in members.links, the game link: the launcher's signed calls under /api/game/ and the
+website's /api/link/peek, claim and remove.
+
 Session auth with Django's CSRF check on every change (the page sends X-CSRFToken). Nothing here
 returns an email address, a provider's id or an XUID. The OpenAPI page (/api/docs) exists only
 with FORZA_API_DOCS=1, and answers only FORZA_ADMIN_ALLOW (members.middleware).
@@ -36,6 +39,7 @@ api = NinjaAPI(
 )
 
 Method = Literal["discord", "github", "email"]
+ACCOUNT_ID = r"^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$"
 
 
 class Strict(Schema):
@@ -51,13 +55,22 @@ class EventOut(Strict):
     event: str
 
 
+class LinkOut(Strict):
+    """The linked game: active; frozen (the XUID is bound to another key now, so the operator
+    checks it); waiting (the game server forgot the key after a long time away, and its next
+    sign-in brings it back); or banned. Its gamertag, never its XUID."""
+    state: Literal["active", "frozen", "waiting", "banned"]
+    gamertag: str
+    since: date
+
+
 class MeOut(Strict):
-    id: str = Field(pattern=r"^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$")
+    id: str = Field(pattern=ACCOUNT_ID)
     created: date
     methods: List[Method]
     sessions: int = Field(ge=0)
     recent: bool
-    link: Optional[dict] = None  # M2: the linked game
+    link: Optional[LinkOut] = None
     events: List[EventOut]
 
 
@@ -71,7 +84,7 @@ class LogoutAllOut(Strict):
 
 
 class DeleteIn(Strict):
-    confirm: str = Field(pattern=r"^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$")
+    confirm: str = Field(pattern=ACCOUNT_ID)
 
 
 class DeleteOut(Strict):
@@ -114,6 +127,7 @@ def health(request):
 
 @api.get("/me", response={200: MeOut}, auth=django_auth)
 def me(request):
+    from members import links
     user = request.auth
     return {
         "id": user.public_id,
@@ -121,7 +135,7 @@ def me(request):
         "methods": methods_of(user),
         "sessions": SignIn.objects.filter(user=user).count(),
         "recent": recently_signed_in(request),
-        "link": None,
+        "link": links.summary(user),
         "events": [{"at": e.at, "event": e.event} for e in AuditEvent.objects.filter(user=user)[:20]],
     }
 

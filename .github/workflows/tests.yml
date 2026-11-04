@@ -99,7 +99,7 @@ jobs:
           docker logs forza-live
           python3 -c "import json; json.load(open('status.json'))"
           docker rm -f forza-live
-      - run: docker build -t forza-accounts accounts/
+      - run: docker build -t forza-accounts -f accounts/Dockerfile .
       - name: The accounts image starts and answers on /api/health
         run: |
           docker run -d --name forza-accounts -p 127.0.0.1:8080:8080 -e DJANGO_SECRET_KEY="$(openssl rand -hex 32)" forza-accounts
