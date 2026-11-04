@@ -1,5 +1,5 @@
 """What several test files share: the repository's paths, a fake UDP transport, the server's
-datagrams, a car club roster and a reference PNG decoder."""
+datagrams, a car club roster, a reference PNG decoder and the score tokens' clock."""
 
 import os
 import struct
@@ -7,6 +7,7 @@ import time
 import zlib
 
 from forza_live import server as srv
+from forza_live.competition import score_token
 from forza_live.social import clubs
 
 # The repository's root (forza_live_server.py, the entry point, is there).
@@ -15,6 +16,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # is that repository's server/ submodule, or where FORZA_REPO_TOOLS says (the CI checks the files
 # out).
 GAME_TOOLS = os.environ.get("FORZA_REPO_TOOLS") or os.path.join(ROOT, "..", "tools")
+
+
+class RaceClock:
+    """score_token's clock for a test (made before scores.configure, the server's start):
+    race() lets an event's time pass after its start."""
+
+    def __init__(self, test, now=10000.0):
+        self.now = now
+        test.addCleanup(setattr, score_token, "clock", score_token.clock)
+        score_token.clock = lambda: self.now
+
+    def race(self, seconds=600.0):
+        self.now += seconds
 
 
 class FakeTransport:

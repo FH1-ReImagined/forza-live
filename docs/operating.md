@@ -197,6 +197,10 @@ Filters: `server`, `build` (`none`: the rows from before the tags), `verified` (
 `player` (an XUID in hex), `board` (`3:199:0` or `event-199`), `reason` (part of an unranked
 row's reason), and `state` (`ranked`, `unranked` or `all`, the default). A change needs a
 filter besides `state`, and a browser's cross-origin request (an `Origin` header) is refused.
+An unranked row's reason is `unverified`, `operator`, `ghost: ...` (a Rivals ghost that failed
+its checks) or `start: ...` (a result faster than the time since its event started, or with no
+start: [which results count](website-data.md#which-results-count)); `reason=start` finds the
+last kind.
 To take a bad build off the boards:
 `curl -X POST -H "X-Admin-Token: <token>" "http://host:21201/admin/scores/unrank?build=0.2.1/tu4"`.
 

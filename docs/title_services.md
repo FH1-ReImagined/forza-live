@@ -490,7 +490,7 @@ callers:
 | `SubmitScore(type, data)` / `SubmitScoreEx(type 3, {data, numCarsPassed})` | `82AB9570` / `82AB95E0` | the scoreboard manager `0x82897xxx` (race end), `0x828DF464` |
 | `UploadFile(scoreId, data)` | `82AB9650` | `0x82897918`, after a submission answered `uploadFiles` |
 | `DownloadFile(id, maxSize 256000)` | `82AB90D0` | `0x82897A1C` (a rival's ghost, by `ghostFileId`) |
-| `GetBestScores(scoreType, board, isServerTimeTrial, car, class, drive type)` | `82AB9140` | `0x828976FC`; seen at the start of a Rivals race; the answer is the caller's own best (a time is submitted only when it beats it): the ranked row, and for an unverified caller the better of that and its unranked one (website-data.md, "Which results count"); with none, FLT_MAX for a time (0 for a speed), below |
+| `GetBestScores(scoreType, board, isServerTimeTrial, car, class, drive type)` | `82AB9140` | `0x828976FC` (TU4 `0x82948F1C` in `sub_82948E28`); as an event's race loads (career and Rivals), and it starts the result's score token (below); the answer is the caller's own best (a time is submitted only when it beats it): the ranked row, and for an unverified caller the better of that and its unranked one (website-data.md, "Which results count"); with none, FLT_MAX for a time (0 for a speed), below |
 | `GetRivalAndPersonalBest(board, isServerTimeTrial, rivalXuid)` | `82AB9228` | `sub_8290CD58` ("RivalData: Rival Net Task"): X RIVALS on an event's ticket |
 | `GetRival(board, isServerTimeTrial, rivalXuid)` | `82AB91B8` | `sub_827D09F0` |
 | `GetRows(type, view, board, isServerTimeTrial, isClubBoard, startAt, maxResults)` | `82AB9330` | the leaderboard screen's fetch `sub_82826E88` (50 rows from `startAt`), `0x828C7F1C` (view 5, 200 rows) |
@@ -660,6 +660,53 @@ Unit tests: `tests/competition/test_scores.py` (`python3 -m unittest discover -p
 The thumbprint names the challenge: the Aventador's ONE EIGHTY SKILL sent `carId 1398,
 challengeThumbprint 0xAE6828D3` both times it was completed (the second time after a
 restart had lost the medal: the career must be saved, [`dlc.md`](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/blob/main/docs/dlc.md)).
+
+#### Score tokens (`forza_live/competition/score_token.py`, FH1 #517)
+
+The protocol has no call for an event's start and no field that could carry a token, but the game
+already sends a signed call at each start:
+
+- **`GetBestScores`**, for events and Rivals. The scoreboard manager's race start (TU4
+  `sub_82948E28`, the call at `0x82948F1C`; base `0x828976FC`) sets the player's best to FLT_MAX
+  and asks for it. It is sent as the race loads, before the countdown, or before the START RIVALS
+  menu in Rivals. Its callers are TU4 `sub_82948F50` and `sub_82949C98`.
+- **`GetRows(type 2, view 5, board, 1, 200)`**, for speed zones. This is
+  `CAmbientChallengeLeaderboard`'s fetch (TU4 `sub_82979C60`), made as the car enters the zone.
+  On Rt. 20 (board 105, 1,010 m between the gates), `GetRows` came 31.1 s before
+  `SubmitScore(type 2, 105, 34.137 m/s)`, and 29.6 s is the least that distance takes at that
+  speed. A speed trap's `GetRows` comes with its `SubmitScore`, since a trap measures a single
+  point.
+
+From a signed-in caller, either call starts the player's token on that board. Each result spends
+its claimed seconds from the token: a time's own seconds, or for a zone the distance between its
+gates (`ZONE_METRES`) over the average speed. A result counts if everything the token has paid
+for fits in the time since it started, give or take 2 s and 2%. Otherwise it is kept unranked
+(`start: ...`), and so is a result with no start at all. The game is told success either way,
+with no ghost asked for. A new start replaces the token. Calls that are unverified or forged
+start nothing, so nobody can move another player's start. For 30 minutes after the server
+starts, a result without a token still counts, because tokens are kept in memory.
+
+Seen in the game (TU4, a local server, GoPro Millennia Masters, board 199, laps by
+`tools/autodrive.py`):
+
+- A Rivals attempt sent `GetBestScores` as it loaded, before START RIVALS. Its lap of 138.781 s
+  was submitted 286 s later. It ranked, and its ghost passed.
+- Another attempt submitted a lap of 130.671 s 198 s after its start.
+- **RESTART** on the results screen went back to START RIVALS without a new `GetBestScores`.
+  The restarted lap of 121.009 s was submitted 416 s after the first start, with 130.671 s
+  already paid for. It ranked. This is why a token is not used up by its first result.
+- **RACE AGAIN** on the cash reward screen and a career race (ENTER EVENT, 4 laps against the CPU
+  drivers) each sent a new `GetBestScores`. The race's best lap of 117.355 s was submitted 516 s
+  after its start, and it ranked with its ghost.
+- Results signed with the game's own key but sent by a script went unranked, and each call was
+  still answered as a success:
+  - a lap of 60 s sent 5 s after `GetBestScores`;
+  - a time with no start;
+  - 60 m/s on Rt. 20, sent 3 s after its `GetRows`, where 16.8 s are needed.
+
+  A lap of 61.5 s sent 65 s after its start ranked.
+
+Not yet driven with this code: a speed zone. The Rt. 20 timing above comes from an earlier log.
 
 #### Rivals ghosts (`forza_live/competition/ghost.py`, FH1 #517)
 

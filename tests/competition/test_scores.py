@@ -13,6 +13,7 @@ import unittest
 from forza_live.competition import scores
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
+from tests.support import RaceClock
 
 A_XUID, B_XUID, C_XUID = 0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03
 TAGS = {A_XUID: "DriverA", B_XUID: "DriverB", C_XUID: "DriverC"}
@@ -111,6 +112,7 @@ class BoardsTest(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
+        self.clock = RaceClock(self)
         scores.configure(self.dir.name)
         self.svc = scores.services(lambda xuid: TAGS.get(xuid, "%016X" % xuid))
         # The limit tests run with --trap-limits; the public server keeps every speed.
@@ -170,6 +172,7 @@ class BoardsTest(unittest.TestCase):
             "carId": AVENTADOR, "carClassId": 7, "carDriveTypeId": 1})
         r = results(self.svc[("Scoreboard", "GetBestScores")](xuid, bytes(body)),
                     x.ScoreboardGetBestScores_Results)
+        self.clock.race()   # the race that follows its start
         return round(r["bestScore"]["score"], 3)
 
     def test_best_scores_is_the_callers_own(self):
