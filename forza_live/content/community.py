@@ -12,7 +12,8 @@ photos hands it here (photo_uploaded), and it becomes a community photo if:
 - the upload was signed with the player's own key (auth, X-Forza-Auth): an older game, or
   one carrying a raw friends key, has its big shots refused as before (photos), and its
   smaller uploads stay private files and nothing more;
-- the player is not on the ban list (DATA_DIR/banned_xuids.json, shared with designs) and
+- the player is not on the ban list (DATA_DIR/banned_xuids.json, core/bans.py: a ban from the
+  whole server) and
   has a gamertag on record;
 - the picture is one this module reads, MIN_SIZE to MAX_SIZE pixels: a 24-bit BMP (the big
   shot), published as a PNG halved down to COPY_MAX_WIDTH (bmp_to_png; not when every tile of it

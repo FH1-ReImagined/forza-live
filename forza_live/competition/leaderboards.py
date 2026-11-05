@@ -32,6 +32,7 @@ import threading
 import time
 import urllib.parse
 
+from forza_live.core import bans
 from forza_live.core import limits
 from forza_live.competition import scores
 from forza_live.core import durable
@@ -74,10 +75,14 @@ def configure(data_dir=None):
         _names = (None, {})
 
 
-def forget_answers():
-    """The cached answers go (scores.admin changed the rows)."""
+def forget_answers(*changed):
+    """The cached answers go (scores.admin changed the rows, or the ban list changed:
+    core/bans.py, whose listeners get the XUID and the new state)."""
     with _lock:
         _cache.clear()
+
+
+bans.listen(forget_answers)
 
 
 def salt():
@@ -207,11 +212,12 @@ def boards():
     scores.STORE.load()
     found = []
     for key, board in scores.STORE.boards.items():
-        if not board:
+        shown = len(bans.visible(board.values()))  # banned players' rows are left out
+        if not shown:
             continue
         kind, sbid, stt = (int(p) for p in key.split(":"))
         if (kind, stt) in KINDS:
-            found.append((list(KINDS).index((kind, stt)), sbid, kind, stt, len(board)))
+            found.append((list(KINDS).index((kind, stt)), sbid, kind, stt, shown))
     found.sort()
     return [(k, s, t, n) for _, s, k, t, n in found]
 

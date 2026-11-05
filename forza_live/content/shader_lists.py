@@ -33,6 +33,7 @@ import time
 import urllib.parse
 
 from forza_live.core import auth
+from forza_live.core import bans
 from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
@@ -123,13 +124,19 @@ def authenticate(store, headers, method="POST", path="/shader-lists/upload", bod
     key itself (X-Friends-Key), taken for an XUID still bound to it until --raw-key-cutoff."""
     checked = auth.check_request(store, method, path, headers, body)
     if checked is not None:
-        return checked.xuid if checked.ok else None
-    try:
-        xuid = int(headers.get("x-xuid", ""), 16)
-        key = bytes.fromhex(headers.get("x-friends-key", ""))
-    except ValueError:
+        xuid = checked.xuid if checked.ok else None
+    else:
+        try:
+            xuid = int(headers.get("x-xuid", ""), 16)
+            key = bytes.fromhex(headers.get("x-friends-key", ""))
+        except ValueError:
+            return None
+        xuid = xuid if auth.raw_key_ok(store, xuid, key, "http") else None
+    # A banned XUID (core/bans.py) is nobody here: the shader lists, /coop and
+    # /challenges/progress refuse it as an unknown player.
+    if xuid is not None and bans.refused(xuid, "%s %s" % (method, path.split("?")[0])):
         return None
-    return xuid if auth.raw_key_ok(store, xuid, key, "http") else None
+    return xuid
 
 
 def _uint(v, count):

@@ -28,6 +28,7 @@ import time
 import urllib.parse
 
 from forza_live.core import auth
+from forza_live.core import bans
 from forza_live.competition import challenge
 from forza_live.social import chat
 from forza_live.world import club_world
@@ -285,6 +286,8 @@ class ForzaLive(asyncio.DatagramProtocol):
                                                lambda pid: getattr(self.peers.get(pid), "name", None))
         # Volunteer relays (FH1 #516): off until the operator lists one (core/relays.py)
         self.relays = relay_broker.RelayBroker(self, rate=lambda: RATE_LIMIT)
+        # A ban (core/bans.py) drops the banned player's games at once.
+        bans.listen(self.on_ban)
 
     @staticmethod
     def limit_key(addr):
@@ -339,6 +342,9 @@ class ForzaLive(asyncio.DatagramProtocol):
                 # (rate limited: the sender's address may be forged).
                 if take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP):
                     self.error(addr, 1, "not registered")
+                return
+            if peer.xuid in bans.cached():  # banned while online (core/bans.py): nothing more
+                self.drop(peer, "banned")
                 return
             peer.seen = time.monotonic()
             self.restored.discard(peer.id)
@@ -529,6 +535,13 @@ class ForzaLive(asyncio.DatagramProtocol):
         if self.chat.banned(xuid):  # /admin/kick
             if take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP):
                 self.error(addr, 4, "removed by the server admin")
+            return
+        if bans.banned(xuid):  # the operator's ban list (core/bans.py): no sign-in at all
+            peer = self.by_addr.get(addr)
+            if peer is not None:
+                self.drop(peer, "banned")
+            if take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP):
+                self.error(addr, 4, "banned from this server")
             return
         flow, real = self.flow_public(addr, (token, xuid))  # PROXY protocol: its flow's address
         peer = self.by_addr.get(addr)
@@ -1226,7 +1239,7 @@ class ForzaLive(asyncio.DatagramProtocol):
 
             for d in state["peers"]:
                 addr = (d["addr"][0], d["addr"][1])
-                if d["id"] in self.peers or addr in self.by_addr:
+                if d["id"] in self.peers or addr in self.by_addr or bans.banned(d["xuid"]):
                     continue
                 peer = Peer(d["id"], addr, d["token"], d["xuid"],
                             limits.clean_gamertag(d["name"], d["xuid"]), d["room"],
@@ -1331,8 +1344,25 @@ class ForzaLive(asyncio.DatagramProtocol):
         log.info("leave #%d %r (%s)", peer.id, peer.name, why)
         self.friends.came_or_went(peer.xuid)
 
+    def on_ban(self, xuid, banned):
+        """core/bans.py changed the list: a banned player's games are told and dropped (their
+        sessions, lobbies and chat go with them), and their next HELLO is refused."""
+        if banned:
+            self.drop_banned({xuid})
+
+    def drop_banned(self, xuids=None):
+        """Drops the players on the ban list (or of `xuids`). Returns how many."""
+        xuids = bans.banned_xuids() if xuids is None else xuids
+        found = [p for p in self.peers.values() if p.xuid in xuids]
+        for p in found:
+            if p.features & FEATURE_CHAT:
+                self.chat.notice(p, "The server admin banned you from this server")
+            self.drop(p, "banned")
+        return len(found)
+
     def expire(self):
         now = time.monotonic()
+        self.drop_banned()  # the list edited by hand: read again when it changed (core/bans.py)
         for peer in [p for p in self.peers.values() if now - p.seen > PEER_TIMEOUT]:
             self.drop(peer, "timed out")
         for token in [t for t, (_, _, when) in self.gone.items() if now - when > GONE_KEEP]:

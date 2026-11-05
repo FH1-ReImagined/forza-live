@@ -49,6 +49,7 @@ import time
 import zlib
 
 from forza_live.core import auth
+from forza_live.core import bans
 from forza_live.core import limits
 from forza_live.core import durable
 
@@ -317,9 +318,12 @@ class Friends:
         if not p:
             return []
         rows = []
+        hidden = bans.banned_keys()
         for rel, field in ((FRIEND, "friends"), (INCOMING, "in"), (OUTGOING, "out"),
                            (BLOCKED, "blocked")):
             for k in p[field]:
+                if rel == INCOMING and k.upper() in hidden:
+                    continue  # a banned player's request waits, unseen, until the ban is lifted
                 x = int(k, 16)
                 state, status = 0, ""
                 if rel == FRIEND:
@@ -526,16 +530,17 @@ class Friends:
         """Players whose gamertag contains the query: online ones first."""
         q = query.strip().lower()
         found = {}
+        hidden = bans.banned_xuids()  # banned players are found by nobody (core/bans.py)
         if q:
             for p in self.server.peers.values():
-                if p.xuid != peer.xuid and q in p.name.lower():
+                if p.xuid != peer.xuid and q in p.name.lower() and p.xuid not in hidden:
                     found.setdefault(p.xuid, (p.name, 1))
             if len(q) >= 2 or len(found) < MAX_RESULTS:
                 for k, p in self.store.players.items():
                     x = int(k, 16)
                     # Stored names can predate the ASCII rule: match and send the cleaned one.
                     name = self.store.name(x) if p["name"] else ""
-                    if name and q in name.lower() and x != peer.xuid:
+                    if name and q in name.lower() and x != peer.xuid and x not in hidden:
                         found.setdefault(x, (name, 0))
         rows = sorted(found.items(), key=lambda kv: (kv[1][0].lower() != q, -kv[1][1],
                                                      kv[1][0].lower()))[:MAX_RESULTS]

@@ -337,17 +337,19 @@ RENDER.players = async function (xuid) {
   const reload = () => go("players", p.xuid);
   const banForm = el("form", {class: "row"},
     field("Reason", input("reason", {maxlength: 200, size: 40, required: !p.bans.content})),
-    el("button", {type: "submit", class: p.bans.content ? "" : "danger"}, p.bans.content ? "Lift the content ban" : "Ban (photos and designs)"));
+    el("button", {type: "submit", class: p.bans.content ? "" : "danger"}, p.bans.content ? "Lift the ban" : "Ban from the server"));
   banForm.addEventListener("submit", ev => {
     ev.preventDefault();
     const f = formData(banForm);
     act("bans", {xuid: p.xuid, ban: !p.bans.content, reason: f.reason},
-      p.bans.content ? "Lift the ban of " + p.gamertag + "?" : "Ban " + p.gamertag + "? Their photos and designs are served to nobody until the ban is lifted.", reload);
+      p.bans.content ? "Lift the ban of " + p.gamertag + "? Their scores, photos, designs and challenge progress are shown again." : "Ban " + p.gamertag + " from the server? They are dropped at once, cannot sign in or write anything, and their scores, photos, designs and challenge progress are hidden (not deleted) until the ban is lifted.", reload);
   });
   const timedForm = chatForm(p.xuid, reload);
   setView(
     card("Find a player", form, results),
-    card(p.gamertag || p.xuid, view({
+    card(p.gamertag || p.xuid,
+      p.banned ? el("p", {}, el("span", {class: "tag off", text: "Banned"}), " from this server: no sign-in, no writes, nothing of theirs listed.") : null,
+      view({
       xuid: p.xuid, gamertag: p.gamertag, key: p.key.text + (p.key.public_key ? " (" + p.key.public_key + ")" : ""),
       "signed sign-ins": p.signed_logons.days + " days" + (p.signed_logons.first ? ", the first " + when(p.signed_logons.first) : ""),
       last_seen: p.last_seen, last_logon: p.last_logon, logons: p.logons, "career level": p.career_level,
@@ -356,7 +358,7 @@ RENDER.players = async function (xuid) {
       club: p.club ? "[" + p.club.tag + "] " + p.club.name + " (role " + p.club.role + ")" : "none",
       online: p.online.length ? p.online.map(o => o.room + ", " + duration(o.online_for)).join("; ") : "no"}),
       p.accounts_admin ? el("p", {}, el("a", {href: p.accounts_admin, target: "_blank", rel: "noopener noreferrer"}, "Find this XUID in the website accounts admin")) : null),
-    card("Bans", view({"content ban": p.bans.content ? "yes" + (p.bans.content_reason ? ": " + p.bans.content_reason : "") : "no",
+    card("Bans", view({"banned": p.bans.content ? "yes" + (p.bans.content_reason ? ": " + p.bans.content_reason : "") : "no",
       "sign-in ban until": p.bans.signin_until, "chat mute until": p.bans.muted_until}), banForm,
       el("h3", {text: "Timed sign-in ban or chat mute"}), timedForm),
     card("Gift", giftForm(p.xuid, reload)),
@@ -402,7 +404,7 @@ RENDER.bans = async function () {
     act("bans", {xuid: f.xuid, ban: true, reason: f.reason}, "Ban " + f.xuid + "?", RENDER.bans);
   });
   setView(
-    card("Content bans (banned_xuids.json)", hint("A banned player's new photos and designs are not published, and the ones they have are served to nobody until the ban is lifted."),
+    card("Bans (banned_xuids.json)", hint("A banned player is dropped at once and cannot sign in. Nothing they send is taken (scores, ghosts, stats, challenges, co-op results, chat, friend requests, auctions, gifts, photos, designs), and their scores, photos, designs, challenge progress and auctions are listed to nobody. Nothing is deleted: lifting the ban shows it all again."),
       table(b.content, [[r => playerLink(r.xuid, r.xuid), "xuid"], "gamertag", "reason"], r => [
         button("Lift", () => act("bans", {xuid: r.xuid, ban: false}, "Lift the ban of " + r.xuid + "?", RENDER.bans), "small")]),
       banForm),

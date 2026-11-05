@@ -37,6 +37,7 @@ import os
 import struct
 import time
 
+from forza_live.core import bans
 from forza_live.core import limits
 from forza_live.core import durable
 
@@ -217,6 +218,8 @@ def write(xuid, gamertag, body, allowed=None, now=None, verified=True):
     if allowed is not None and target not in allowed:
         log.info("stats: %016X wrote for %016X, not in its room: ignored", xuid, target)
         return
+    if bans.refused(xuid, "stats write") or bans.refused(target, "stats written for it"):
+        return  # core/bans.py
     tag = gamertag(target) if callable(gamertag) else gamertag
     for view, props in views:
         view = stored_view(view)
@@ -333,7 +336,10 @@ def ranking(view):
     """XUID hex -> (rank, rating) of everyone with the view, and how many they are."""
     STORE.load()
     rated = []
+    hidden = bans.banned_keys()  # banned players hold no rank (core/bans.py)
     for key, p in STORE.players.items():
+        if key in hidden:
+            continue
         v = p["views"].get(str(view))
         if v is None:
             continue

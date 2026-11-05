@@ -45,6 +45,7 @@ import uuid
 
 from forza_live.competition import ghost as ghostfile
 from forza_live.competition import score_token
+from forza_live.core import bans
 from forza_live.core import limits
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
@@ -218,8 +219,9 @@ class Store:
         return self.boards[key] if create else self.boards.get(key, {})
 
     def ranked(self, kind, sbid, stt):
-        """The board's entries, best first."""
-        entries = list(self.board(kind, sbid, stt).values())
+        """The board's entries, best first, without banned players' rows (core/bans.py: kept,
+        shown again when the ban is lifted)."""
+        entries = bans.visible(self.board(kind, sbid, stt).values())
         bigger = kind in BIGGER_IS_BETTER
         entries.sort(key=lambda e: (-e["score"] if bigger else e["score"], e["submitted"]))
         return entries, bigger
@@ -415,6 +417,8 @@ def submit(xuid, gamertag, kind, data, extra=None):
              " passed %d" % extra if extra is not None else "",
              (" build %s" % build if build else "") + ("" if trusted else " (unverified)"))
     nothing = x.reply(x.ScoreboardSubmitScore_Results, {"scoreId": score_id, "uploadFiles": False})
+    if bans.refused(xuid, "score"):  # core/bans.py (lsp.service_call refuses the call first)
+        return nothing
     if implausible_speed(xuid, kind, sbid, score):
         return nothing
     # Online races submit board -1 (type 4, the XP of the game): not kept.
@@ -514,6 +518,8 @@ def upload_file(xuid, body):
     sid = params["scoreId"].hex()
     data = params["data"]
     found = STORE.ghosts.get(sid)
+    if bans.refused(xuid, "ghost"):
+        return x.reply()
     if not found or found[1] != "%016X" % xuid:
         log.info("title: UploadFile %016X: unknown score %s (%d bytes)", xuid, sid, len(data))
         return x.reply()
@@ -626,6 +632,8 @@ def challenge_completed(gamertag_of):
         p, _ = x.decode(A.ForzaChallengeChallengeCompleted_Params, body)
         car, thumb = p["carId"], p["challengeThumbprint"]
         trusted, build = source()
+        if bans.refused(xuid, "1000 Club medal"):
+            return x.reply()
         if not trusted:  # the board is for players signed in here
             log.info("title: 1000 Club %016X: challenge %08X in car %d from an unverified caller: "
                      "not counted", xuid, thumb, car)
@@ -661,7 +669,7 @@ def club_entries():
     first on a tie)."""
     STORE.load()
     out = []
-    for e in STORE.club.values():
+    for e in bans.visible(STORE.club.values()):
         medals = club_medals(e)
         if medals:
             out.append({"xuid": e["xuid"], "gamertag": e.get("gamertag", e["xuid"]),
@@ -788,7 +796,7 @@ def rollup_entries(event_type, pivot):
     for key, board in STORE.boards.items():
         if not in_rollup(key, event_type, pivot):
             continue
-        for e in board.values():
+        for e in bans.visible(board.values()):
             p = players.setdefault(e["xuid"], dict(e, score=0.0, boards=0))
             p["boards"] += 1
             p["score"] += e["score"]
@@ -802,9 +810,12 @@ def online_xp_entries():
     """Every player by online XP (their profile's onlineXP, kept from UpdateAll)."""
     folder = os.path.join(DATA_DIR, "players")
     out = []
+    hidden = bans.banned_keys()
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
         if not name.endswith(".json"):
             continue  # .bak copies (durable) and leftovers
+        if name[:16].upper() in hidden:
+            continue
         try:
             record = durable.load(os.path.join(folder, name))
         except (OSError, ValueError):

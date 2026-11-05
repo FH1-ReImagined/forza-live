@@ -33,9 +33,9 @@ Rules of this server:
   that did not succeed. Downloads, lists and searches are open.
 - At most SLOTS files per player and kind (the storefront's SLOTS AVAILABLE), PER_DAY uploads a
   day per player, PER_HOUR uploads an hour on the whole server. A banned XUID
-  (DATA_DIR/banned_xuids.json, a list of hex XUIDs the operator edits, read again when it
-  changes; community's /admin/photos/ban writes it too) uploads nothing, and its files are
-  listed to nobody but itself. The payload must have the kind's magic and at most MAX_PAYLOAD
+  (DATA_DIR/banned_xuids.json, core/bans.py: a ban from the whole server, read again when it
+  changes; community's /admin/photos/ban writes it) uploads nothing, and its files are
+  listed to nobody (its own calls fail too: lsp.service_call). The payload must have the kind's magic and at most MAX_PAYLOAD
   bytes, the preview must be a cxds texture of at most MAX_PREVIEW bytes.
 - Free: Price is stored and answered as 0, Quantity as -1 (no limit), whatever the player chose.
 - A rating (1-5) and a download count once per player (a later rating replaces the earlier one),
@@ -69,6 +69,7 @@ import secrets
 import time
 
 from forza_live.social import clubs
+from forza_live.core import bans
 from forza_live.core import durable
 from forza_live.core import limits
 from forza_live.content import photos
@@ -106,7 +107,6 @@ PAGES = {spec[3]: kind for kind, spec in KINDS.items()}
 INDEX = {"nextId": FIRST_ID, "files": {}, "uploads": {}, "serverUploads": []}
 _loaded = [False]
 _version = [0]  # counts the saves: design_feed builds its feed again after one
-_bans = {"mtime": None, "xuids": frozenset()}
 # Who is calling (lsp): proven(), the request is signed by the caller's own key;
 # trusted(), signed or carrying the caller's raw friends key (games before signed requests).
 _caller = {"proven": lambda: False, "trusted": lambda: False}
@@ -119,7 +119,7 @@ def configure(data_dir, proven=None, trusted=None):
     INDEX.update({"nextId": FIRST_ID, "files": {}, "uploads": {}, "serverUploads": []})
     _loaded[0] = False
     _version[0] += 1
-    _bans.update({"mtime": None, "xuids": frozenset()})
+    bans.configure(data_dir)
     _caller["proven"] = proven or (lambda: False)
     _caller["trusted"] = trusted or (lambda: False)
 
@@ -190,59 +190,17 @@ def is_design(fid):
 
 
 def banned_xuids():
-    """The operator's ban list, DATA_DIR/banned_xuids.json (a JSON list of hex XUIDs), read again
-    when it changes."""
-    path = os.path.join(DATA_DIR, "banned_xuids.json")
-    try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        mtime = None
-    if mtime != _bans["mtime"]:
-        xuids = set()
-        if mtime is not None:
-            try:
-                with open(path) as f:
-                    xuids = {int(str(v), 16) for v in json.load(f)}
-            except (OSError, ValueError, TypeError):
-                log.warning("designs: %s is not a JSON list of hex XUIDs: no bans", path)
-        _bans.update({"mtime": mtime, "xuids": frozenset(xuids)})
-    return _bans["xuids"]
+    """The operator's ban list (core/bans.py: a ban covers the whole server)."""
+    return bans.banned_xuids()
 
 
 def banned(xuid):
-    return xuid in banned_xuids()
+    return bans.banned(xuid)
 
 
 def set_ban(xuid, ban=True):
-    """Puts the XUID on the ban list (or takes it off), keeping the rest of the file as the
-    operator wrote it. True when the list changed; ValueError when the file is not a JSON list
-    (it is left alone)."""
-    path = os.path.join(DATA_DIR, "banned_xuids.json")
-    try:
-        with open(path) as f:
-            entries = json.load(f)
-    except FileNotFoundError:
-        entries = []
-    except (OSError, ValueError) as e:
-        raise ValueError("%s cannot be read (%s): fix it by hand" % (path, e)) from None
-    if not isinstance(entries, list):
-        raise ValueError("%s is not a JSON list: fix it by hand" % path)
-
-    def same(v):
-        try:
-            return int(str(v), 16) == xuid
-        except ValueError:
-            return False
-    if any(same(v) for v in entries) == ban:
-        return False
-    kept = [v for v in entries if not same(v)] + ([hx(xuid)] if ban else [])
-    os.makedirs(DATA_DIR, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(kept, f, indent=1)
-    durable.replace(tmp, path)
-    _bans["mtime"] = None  # read again at once, whatever the file system's clock resolution
-    return True
+    """bans.set_ban: True when the list changed; ValueError when the file is not a JSON list."""
+    return bans.set_ban(xuid, ban)
 
 
 def hold_new(xuid, kind, meta):
