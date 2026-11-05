@@ -52,6 +52,7 @@ import time
 import urllib.parse
 
 from forza_live.core import auth
+from forza_live.core import bans
 from forza_live.world import campaign
 from forza_live.social import clubs
 from forza_live.content import community
@@ -236,6 +237,7 @@ def configure(args):
                      for xml in load_playground_rounds()}
         PLAYGROUND_ROUNDS[:] = [by_preset[p] for p in wanted if p in by_preset]
     os.makedirs(DATA_DIR, exist_ok=True)
+    bans.configure(DATA_DIR)
     limits.configure(DATA_DIR)
     scores.configure(DATA_DIR, args.server_id)
     score_token.configure(args.score_tokens)   # a bad FORZA_SCORE_TOKENS stops the start
@@ -341,6 +343,8 @@ def user_logon2(xuid, body):
     params, _ = x.decode(x.UserLogon2_Params, body)
     login = params["loginData"]
     xuid = login["qwXuid"] or xuid
+    if bans.refused(xuid, "sign-in (Logon2)"):  # the body's XUID: an X-UserId may be another's
+        return x.failure(5, BANNED)
     login["wzGamerTag"] = limits.clean_gamertag(login["wzGamerTag"], xuid)
     record = load_player(xuid)
     now = int(time.time())
@@ -688,6 +692,7 @@ TRUSTED, UNVERIFIED, FORGED = "trusted", "unverified", "forged"
 _caller = contextvars.ContextVar("lsp_caller", default=UNVERIFIED)
 _signed = contextvars.ContextVar("lsp_signed", default=False)
 READ_PREFIXES = ("Get", "Search", "Download")
+BANNED = "banned from this server"
 # Reads by name that change state: the session host's next round (a world's event).
 STATE_CHANGING = {("Hopper", "GetGameOptions")}
 UNVERIFIED_LOG_SECONDS = 600
@@ -753,6 +758,10 @@ def service_call(headers, body, server=None, http_method="POST", path="/Services
     fn = SERVICES.get((short, method))
     if (short, method) == ("Hopper", "GetGameOptions"):  # needs the server's world sessions
         fn = lambda xuid, body: hopper_get_game_options(server, xuid, body)  # noqa: E731
+    if bans.refused(xuid, "%s.%s" % (short or cls, method)):
+        # The operator's ban list (core/bans.py): no sign-in, read or write of any kind. Logon2
+        # fails as a forged one does, which the game shows as a server it cannot sign in to.
+        return x.failure(5, BANNED)
     state = verify_caller(server, xuid, headers, http_method, path, body)
     if state == FORGED and changes_state(short, method):
         log.warning("title: %s.%s for %016X %s: refused", cls, method, xuid,

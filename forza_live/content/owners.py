@@ -22,8 +22,12 @@ Rules:
 The token can do nothing else: it cannot hide, release, ban, read held items or reach the
 operator's other routes.
 
+A banned owner (core/bans.py) deletes nothing: its items stay, hidden, for the operator to
+review, and come back if the ban is lifted.
+
 Answers: 200 {"deleted": "<id>"}; 400 a body that is not {"owner": <16 hex>}; 403 a browser,
-a proxy or the wrong token; 404 off, unknown, or another player's; 405 not a POST.
+a proxy, the wrong token or a banned owner; 404 off, unknown, or another player's; 405 not a
+POST.
 """
 
 import hmac
@@ -36,6 +40,7 @@ import urllib.parse
 from forza_live.content import community
 from forza_live.content import design_feed
 from forza_live.content import designs
+from forza_live.core import bans
 
 log = logging.getLogger("forza-live")
 
@@ -79,6 +84,8 @@ def handle(method, path, headers, body, proxied):
     if not isinstance(owner, str) or not OWNER_RE.fullmatch(owner):
         return reply(400, {"error": "a JSON object, {\"owner\": \"<16 hex digits>\"}"})
     xuid = int(owner, 16)
+    if bans.refused(xuid, "website delete"):  # a banned player's items stay for the operator
+        return reply(403, {"error": "banned from this server"})
     kind, item = m.groups()
     if kind == "photos":
         return delete_photo(item, xuid)

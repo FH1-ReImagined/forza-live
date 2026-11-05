@@ -48,6 +48,7 @@ import os
 import threading
 import time
 import urllib.parse
+from forza_live.core import bans
 from forza_live.core import durable
 
 log = logging.getLogger("forza-live")
@@ -182,7 +183,9 @@ class Ledger:
                 "id": rid, "sid": sid.hex(), "event": event.id, "code": event.code,
                 "cars": event.drivers + 1, "street": bool(getattr(event, "street", False)),
                 "by": hx(by_xuid), "by_name": by_name,
-                "members": {hx(x): n for x, n in members.items()}, "started": now, "open": True,
+                # a banned player (core/bans.py) is no member: it earns nothing here
+                "members": {hx(x): n for x, n in members.items() if not bans.banned(x)},
+                "started": now, "open": True,
                 "results": {}, "host": {}, "applied": [], "dropped": []}
             self.expire(now)
             self.dirty = True
@@ -228,6 +231,8 @@ class Ledger:
         The first one counts. Returns the round id or None."""
         now = time.time() if now is None else now
         x = hx(xuid)
+        if bans.refused(x, "co-op result"):
+            return None
         with self.lock:
             r = self.open_round(session)
             if r is None or x not in r["members"] or now - r["started"] > OPEN_LIMIT:
@@ -248,6 +253,8 @@ class Ledger:
         own writes count, and the first after the round's start: the game writes again for the
         world's session when its next free roam ends (scores of the humans only)."""
         now = time.time() if now is None else now
+        if bans.refused(writer, "co-op host score") or bans.banned(target):
+            return
         with self.lock:
             r = next((r for r in self.rounds.values() if r["open"]
                       and int(r["sid"], 16) == session), None)
@@ -284,6 +291,8 @@ class Ledger:
     def pending(self, xuid):
         x = hx(xuid)
         out = []
+        if bans.refused(x, "co-op results"):  # kept for when the ban is lifted
+            return out
         with self.lock:
             for r in self.rounds.values():
                 if x not in r["members"] or x in r["applied"] or x in r["dropped"]:
@@ -303,6 +312,8 @@ class Ledger:
     def applied(self, xuid, ids):
         x = hx(xuid)
         n = 0
+        if bans.refused(x, "co-op results applied"):
+            return n
         with self.lock:
             for rid in ids[:MAX_IDS]:
                 r = self.rounds.get(rid) if isinstance(rid, str) else None

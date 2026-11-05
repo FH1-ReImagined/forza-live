@@ -319,7 +319,8 @@ class UploadTest(Base):
         self.assertIsNotNone(self.create_livery(BOB))
         self.assertEqual(self.featured(CAROL), [])  # a banned player's files are not listed
         self.assertIsNone(self.purchase(CAROL, fid))
-        self.assertEqual(self.file_list(ALICE, ALICE, 1)["totalFiles"], 1)
+        self.assertIsNone(self.file_list(ALICE, ALICE, 1))  # every call of hers fails (core/bans)
+        self.assertEqual(self.file_list(BOB, ALICE, 1)["totalFiles"], 0)
         with open(path, "w") as f:
             f.write("not json")
         os.utime(path, (time.time() + 10, time.time() + 10))

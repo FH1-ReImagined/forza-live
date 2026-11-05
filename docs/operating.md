@@ -60,10 +60,12 @@ The tabs:
 - **Players**: search by gamertag or XUID. A player's page shows their key (signed, a friends key
   or none), signed sign-ins, last seen, build, friends, club, scores (with unrank, rank and
   delete), photos and designs, challenge progress, gifts and bans, with ban, sign-in ban, mute and
-  gift forms. With `FORZA_ACCOUNTS_ADMIN_URL` set, it links to the player in the website accounts
-  service's admin (accounts are managed there: suspend, unlink, void likes).
-- **Bans and chat**: the content bans (`banned_xuids.json`, with the reason given in the panel),
-  timed sign-in bans and chat mutes (`moderation.json`), and the recent chat.
+  gift forms; a banned player's page says "Banned" at the top. With `FORZA_ACCOUNTS_ADMIN_URL`
+  set, it links to the player in the website accounts service's admin (accounts are managed
+  there: suspend, unlink, void likes).
+- **Bans and chat**: the [bans from the server](#banning-a-player) (`banned_xuids.json`, with the
+  reason given in the panel), timed sign-in bans and chat mutes (`moderation.json`), and the
+  recent chat.
 - **Scores**: `/admin/scores` with its filters, shortcuts for held ghosts, failed start checks,
   unverified rows and rows before the tags, and the score token counts per board.
 - **Photos** and **Designs**: the moderation queues and every state, with the image or preview
@@ -102,7 +104,7 @@ Every operator endpoint and command, and where it is in the panel:
 | `GET /admin/scores?..`, `POST /admin/scores/unrank\|rank\|delete?..` | leaderboard rows by source | Scores; a player's page |
 | `GET /admin/photos[?status=..]`, `/queue`, `/img/<id>` | the community photos | Photos |
 | `POST /admin/photos/<id>/hide\|unhide\|hold\|release\|delete\|ban` | moderate a photo | Photos; a player's page |
-| `POST /admin/photos/ban/<XUID>`, `unban/<XUID>` | the ban list | Bans and chat; a player's page |
+| `POST /admin/photos/ban/<XUID>`, `unban/<XUID>` | [ban a player from the server](#banning-a-player), or lift it | Bans and chat; a player's page |
 | `GET /admin/designs[?state=..]`, `/queue`, `/img/<id>.png` | the community designs | Designs |
 | `POST /admin/designs/<id>/release\|hold\|hide\|unhide\|delete\|ban` | moderate a design | Designs; a player's page |
 | `GET/POST /admin/events...` and `tools/event_admin.py` | community events | Events |
@@ -176,6 +178,45 @@ Chat moderation uses operator endpoints, with the same rules as `/gift`:
 Mutes and bans are kept in `moderation.json` in the data folder until they run out. Example:
 `curl -H "X-Admin-Token: <token>" "http://host:21201/admin/mute?who=Name&minutes=30"`.
 
+### Banning a player
+
+A ban (`banned_xuids.json` in the data folder, a JSON list of hex XUIDs) bans the player from the
+whole server until it is lifted. Ban from the panel (Bans and chat, or the player's page, which
+then says "Banned"), from the Photos and Designs tabs (ban the owner), with
+`POST /admin/photos/ban/<XUID>` (`unban/<XUID>` lifts it; [below](#community-photos)), or by
+editing the file. The list is read again when it changes: no restart. The panel writes each ban
+and unban, with its reason, to the audit log.
+
+What a banned XUID gets:
+
+- **No sign-in.** Its HELLO is refused with error 4 (the game shows "server error 4: banned from
+  this server"), and its title server sign-in (`Logon2`) fails, so the game shows the Horizon
+  server as unavailable. A player who is online when banned is dropped at once (within 5 s when
+  the file was edited by hand): out of the player list and the status page, its sessions and
+  lobbies gone from matchmaking and Horizon World placement, out of chat, and its game's next
+  HELLO is refused. It is not restored from `live_state.json` after a restart.
+- **No writes.** Every title service call with its XUID fails, whatever the method and whether
+  it is signed (scores, ghosts, score token starts, the 1000 Club, race stats, the online
+  profile, auctions, bids, car gifts, clubs, the Message Center, photos, designs). Every UDP
+  message of a game signed in as it is dropped (stats, friends requests, chat, invites,
+  challenges, community events, matchmaking). The signed HTTP routes take it for an unknown
+  player (shader list uploads, `/coop/results`, `/challenges/progress`), and the website cannot
+  delete its photos or designs (`/owner/`). Behind those checks the stores refuse it as well:
+  scoreboards, stats (its own and a host's writes for it), daily and weekly challenge progress
+  and their gifts, and the co-op ledger (no place in a round, no results handed out).
+- **Nothing listed.** Its leaderboard rows (the game's boards, Rivals, rollups, online XP, the
+  1000 Club and the website's `/leaderboards`), stats ranks, challenge completions (the counts on
+  `/challenges`, the launcher and the Discord status), auctions, friend requests waiting for
+  others and friends searches, community photos and storefront designs (the game's, the gallery
+  and the website's) are left out of every answer.
+
+Nothing is deleted: rows, progress, photos, designs and co-op results stay in their files, and
+the operator still sees them (the panel's player page, `/admin/scores`). Lifting the ban shows
+them again. Not covered: what the player already sent to others (gifts, Message Center messages,
+friendships, an auction's top bid) stays, and a game already in a session with others keeps its
+direct connections to them until that session ends (the server no longer relays or lists it).
+A timed sign-in ban (`/admin/kick`) is separate: it only refuses the sign-in, for N minutes.
+
 ## Community photos and designs
 
 Photos and designs players share can appear on a website ([what is published](website-data.md#community-photos)). Moderating them has stricter rules than the other operator endpoints, and the [screening worker](#automatic-screening) can do the first pass.
@@ -204,9 +245,10 @@ curl -H "$T" -X POST $S/admin/photos/<id>/ban    # bans the photo's owner
 curl -H "$T" -X POST $S/admin/photos/ban/<XUID>  # or by XUID; unban/<XUID> lifts it
 ```
 
-A ban goes into `banned_xuids.json` in the data folder (the list the design storefront uses
-too, a JSON list of hex XUIDs that can also be edited by hand): the player's new uploads are not
-published and their photos are served to nobody until the ban is lifted. For a screening worker
+A ban goes into `banned_xuids.json` in the data folder (a JSON list of hex XUIDs that can also be
+edited by hand) and bans the player from the whole server ([banning a player](#banning-a-player)):
+among the rest, their uploads are refused and their photos and designs are served to nobody until
+the ban is lifted. For a screening worker
 (a separate container with the token, at an address that is not a trusted proxy):
 `GET /admin/photos/queue` lists the held photos, oldest first; `POST /admin/photos/<id>/hold`
 takes a live photo back to the queue, `POST .../release` publishes a held one (a photo the

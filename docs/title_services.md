@@ -72,6 +72,13 @@ be found (FH1 #517). Addresses can't do this job: behind a tunnel ([`configurati
 every HTTP connection and UDP datagram arrive from the tunnel agent's address, and a
 connection's TCP port says nothing about the player's UDP one.
 
+**Banned players.** A call whose `X-UserId` is on the operator's ban list
+(`DATA_DIR/banned_xuids.json`, `forza_live/core/bans.py`; [operating](operating.md#banning-a-player))
+fails before anything else is looked at, signed or not and whatever its method (reads too):
+failure 5 "banned from this server", the answer a call that is not the player's own gets. So
+does a `Logon2` whose `loginData.qwXuid` is banned, whatever its `X-UserId`. The game takes the
+failed sign-in as a Horizon server it cannot reach, as with any other failed `Logon2`.
+
 The call itself is `sub_82AABAC0(client, class, method, params, results member list,
 &results, ...)`; each service method has a small stub that passes its class and method
 names (`Logon2` calls it at `0x82ABC0A8` with class string `0x820E242C`, method
@@ -922,7 +929,7 @@ with the player's own key (`X-Forza-Auth`), at most 60 started an hour on the wh
 one unfinished per player; an older game's big shot fails as before. Once it has arrived it is
 handed to `forza_live/content/community.py` and forgotten: big shots are not kept as private files.
 `forza_live/content/community.py` publishes it when the upload was signed (its Create and the call that
-completed it), the player is not banned (`DATA_DIR/banned_xuids.json`) and has a gamertag, the
+completed it), the player is not banned (`DATA_DIR/banned_xuids.json`, a ban from the whole server) and has a gamertag, the
 caps allow it (10 a day and 200 in all per player, 60 an hour on the server) and the picture
 reads as a BMP of 640x360 to 7680x4320 (aspect at most 3:1). The published copy is made by the
 server with the standard library: the BMP halved down to at most 1920 pixels wide
@@ -984,7 +991,8 @@ player's own key; an unsigned call, or one with a raw friends key, gets failure 
 lists and searches are open. 25 files per player and kind, 10 uploads a day per player, 120 an
 hour on the whole server, a payload with its kind's magic of at most 1 MiB, a `cxds` preview of
 at most 153,600 bytes, and nothing from an XUID in `DATA_DIR/banned_xuids.json` (a JSON list of
-hex XUIDs, read again when it changes; a banned player's files are listed to nobody else).
+hex XUIDs, read again when it changes: a ban from the whole server, whose every call fails; its
+files are listed to nobody).
 Everything is free (Price 0, Quantity -1, whatever the player chose). One download count and
 one rating per player, never the owner's, only from proven callers; three distinct reporters
 hide a file at once. Each file has a six-character share code: typed into a search's gamertag
@@ -1054,8 +1062,9 @@ server, which checks again:
 Both need the `X-Owner-Token` header to be `FORZA_OWNER_TOKEN` (a token of its own, not the admin
 token; without it set the routes answer 404), and refuse any request that came through the
 tunnel or a reverse proxy (as the photo moderation routes do) or has an `Origin` header (403).
-An item that is not the named owner's answers 404, as one that does not exist. The token can do
-nothing else. Answers: 200 `{"deleted": "<id>"}`, 400 a bad body, 403, 404, 405 not a POST.
+An item that is not the named owner's answers 404, as one that does not exist. A banned owner's
+items are not deleted (403): they stay, hidden, for the operator. The token can do nothing else.
+Answers: 200 `{"deleted": "<id>"}`, 400 a bad body, 403, 404, 405 not a POST.
 
 ### Notifications (Message Center) (`forza_live/social/notifications.py`)
 

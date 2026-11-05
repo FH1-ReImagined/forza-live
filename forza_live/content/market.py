@@ -31,6 +31,7 @@ import os
 import time
 import uuid
 
+from forza_live.core import bans
 from forza_live.social import notifications
 from forza_live.core import limits
 from forza_live.network import xtsw as x
@@ -265,6 +266,8 @@ def get_global_config(xuid, body):
 def create(gamertag_of):
     def handler(xuid, body):
         p, _ = x.decode(A.ForzaAuctionCreate_Params, body)
+        if bans.refused(xuid, "auction"):  # core/bans.py (lsp.service_call refuses it first)
+            return x.failure(5, "banned from this server")
         MARKET.load()
         if sum(1 for o in MARKET.auctions.values() if o["seller"] == key(xuid)
                and not o.get("removed") and not o.get("cancelled")
@@ -338,8 +341,9 @@ def matches(a, owner, sp):
 def search(xuid, body):
     p, _ = x.decode(A.ForzaAuctionSearchForAuction_Params, body)
     sp = p["searchParams"]
+    hidden = bans.banned_keys()  # a banned seller's auctions are listed to nobody
     found = [a for a in all_auctions().values()
-             if not ended(a) and not a.get("cancelled") and
+             if not ended(a) and not a.get("cancelled") and a["seller"] not in hidden and
              (p["xuidOwner"] or a["seller"] != key(xuid)) and matches(a, p["xuidOwner"], sp)]
     found.sort(key=lambda a: a["closes"])
     ids = [a["id"] for a in found][:p["maxResultIds"]]
@@ -409,7 +413,9 @@ def place_bid(gamertag_of):
         a = all_auctions().get(p["auctionId"])
         me = key(xuid)
         amount = p["amount"]
-        if not a or a["seller"] == me:
+        if bans.refused(xuid, "bid"):
+            return x.failure(5, "banned from this server")
+        if not a or a["seller"] == me or bans.banned(a["seller"]):  # a banned seller's is hidden
             return x.failure(1, "no such auction")
         if ended(a) or a.get("cancelled"):
             log.info("title: bid %d on auction %d by %016X: closed", amount, a["id"], xuid)
@@ -544,6 +550,8 @@ def remove(xuid, body):
 def send_car_gift(gamertag_of):
     def handler(xuid, body):
         p, _ = x.decode(A.ForzaGiftingSendCarGift_Params, body)
+        if bans.refused(xuid, "car gift"):
+            return x.failure(5, "banned from this server")
         MARKET.load()
         if sum(1 for o in MARKET.gifts.values() if o["sender"] == key(xuid)
                and not o.get("retrieved")) >= limits.PER_PLAYER["gifts"]:

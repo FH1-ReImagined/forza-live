@@ -58,6 +58,7 @@ import time
 import urllib.parse
 
 from forza_live.competition import scores
+from forza_live.core import bans
 from forza_live.core import durable
 from forza_live.core import limits
 
@@ -283,8 +284,10 @@ def step(xuid, type_, match, now=None):
     trusted, build = scores.source()
     if not trusted:
         return False
-    now = time.time() if now is None else now
     key = hx(xuid)
+    if bans.refused(key, "challenge progress"):  # core/bans.py: no progress, so no gift either
+        return False
+    now = time.time() if now is None else now
     changed = False
     finished_ranked = []
     with STORE.lock:
@@ -437,6 +440,7 @@ def document(xuid=None, now=None):
     """The current sets (with the player's progress when `xuid` is given)."""
     now = time.time() if now is None else now
     key = hx(xuid) if xuid is not None else None
+    banned = bans.banned_keys()
     sets = []
     with STORE.lock:
         STORE.load()
@@ -444,10 +448,13 @@ def document(xuid=None, now=None):
         for kind in KINDS:
             pid, rec = STORE.current(kind, now)
             mine = rec["players"].get(key, {}) if key else {}
+            # Banned players' finishes are kept but not counted (core/bans.py)
+            hidden = [p for k, p in rec["players"].items() if k in banned]
             objectives = []
             for i, obj in enumerate(rec["objectives"]):
+                done = rec["completed"][i] - sum(1 for p in hidden if (p.get(str(i)) or {}).get("done"))
                 o = {"id": "%s.%d" % (pid, i), "type": obj["type"], "title": obj["title"],
-                     "target": obj["target"], "completed": rec["completed"][i]}
+                     "target": obj["target"], "completed": max(0, done)}
                 if key:
                     prog = mine.get(str(i)) or {}
                     o.update(progress=min(prog.get("n", 0), obj["target"]), done=prog.get("done"))

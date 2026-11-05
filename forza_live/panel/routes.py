@@ -568,6 +568,7 @@ def player(server, query):
         doc = objectives.document(x)
         challenges = {"sets": doc["sets"], "player": doc.get("player", {})}
     out = {"xuid": k, "gamertag": (p or {}).get("name") or rec.get("gamertag", ""),
+           "banned": x in bans,  # from the whole server (core/bans.py)
            "key": key_state(p),
            "signed_logons": {"first": rec.get("firstSigned"), "days": rec.get("signedDays", 0)},
            "last_seen": int((p or {}).get("seen", 0)) or None, "last_logon": rec.get("lastLogon"),
