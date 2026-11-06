@@ -7,6 +7,8 @@ from django.urls import include, path
 
 from members import likes  # noqa: F401  (likes and the player's own items, on members.api.api)
 from members import links  # noqa: F401  (the game link's routes, on members.api.api)
+from members import hub  # noqa: F401  (the mods and texture packs hub, off unless FORZA_HUB=1)
+from members import potm  # noqa: F401  (Photo of the Month's public standings and winners)
 from members import views
 from members.api import api
 

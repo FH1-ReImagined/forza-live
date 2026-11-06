@@ -166,5 +166,7 @@ def delete_account(request, body: DeleteIn):
         link = GameLink.objects.filter(user=user).first()
         if link is not None:
             Like.objects.filter(xuid=link.xuid).delete()  # the linked key's likes go too
+            from members import hub
+            hub.take_down_all(link.xuid)  # and its mods and texture packs
         user.delete()  # identities, email stand-in, sessions, link and audit go with it (CASCADE)
     return {"ok": True, "deleted": True}

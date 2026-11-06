@@ -24,7 +24,7 @@ readers, and uses them on the game server's data folder, mounted read-only.
 |------|------|
 | `fh_accounts/settings.py` | every setting; the environment variables are below |
 | `fh_accounts/urls.py` | the routes |
-| `members/models.py` | the account (`User`, whose username is the public id such as `K7Q2-XM4P`), `SignIn` (sessions per account), `AuditEvent`, `GameLink`, `LinkRequest`, `SignedNonce`, `Like` |
+| `members/models.py` | the account (`User`, whose username is the public id such as `K7Q2-XM4P`), `SignIn` (sessions per account), `AuditEvent`, `GameLink`, `LinkRequest`, `SignedNonce`, `Like`, `MissingItem`, `MonthWinner` (a confirmed Photo of the Month), `Disqualified`, `HubItem` (a mod or texture pack), `HubReport` |
 | `members/adapters.py` | allauth's rules: the allowed return pages, no passwords, no profile data, the sign-in mail |
 | `members/views.py` | allauth's code request, code confirm and provider redirect views, with the limits and the email stand-in |
 | `members/api.py` | the django-ninja endpoints and their schemas |
@@ -33,10 +33,12 @@ readers, and uses them on the game server's data folder, mounted read-only.
 | `members/items.py` | the game server's photos and designs, read-only, with its own rules for which are public |
 | `members/game.py` | the game server's data, read-only (keys, players, bans), the signed-request check, and which keys' likes count |
 | `members/moderation.py` | the operator's tools (void likes, suspend, sign out, unlink, stats) and the purge of likes whose item is gone |
-| `members/admin.py` | the Django admin: accounts, game links, likes, audit events (see "Moderation") |
+| `members/hub.py` | the mods and texture packs hub (off unless `FORZA_HUB=1`): drafts, streamed uploads, the scanning worker's results, the review, publishing to the download host, reports and takedowns (the worker and the download host: [`hub/`](../hub/README.md)) |
+| `members/potm.py` | Photo of the Month: the months (UTC), which likes are votes, the standings and their tie-break, the operator's confirm, withdraw and disqualify, and the public standings and winners |
+| `members/admin.py` | the Django admin: accounts, game links, likes, audit events (see "Moderation"), and Photo of the Month's review |
 | `members/middleware.py` | answer headers, the allauth routes that exist, Sec-Fetch-Site, the admin allow list, session lifetime |
 | `members/identity.py` | the email stand-in: an HMAC of the address |
-| `members/management/commands/` | `checkdb` (integrity check), `nightly` (purge and backup), and the operator's `void_likes`, `purge_likes`, `stats`, `backup` and `restore` |
+| `members/management/commands/` | `checkdb` (integrity check), `nightly` (purge and backup), and the operator's `void_likes`, `purge_likes`, `stats`, `backup`, `restore`, `potm` and `hub` |
 | `members/tests/` | the tests (Django's test client, a fake OAuth provider, a fake `smtplib.SMTP`) |
 | `requirements.in`, `requirements.txt` | pinned dependencies; the `.txt` has hashes |
 | `Dockerfile`, `docker-entrypoint.sh` | the image: a digest-pinned `python:3.12-slim`, a user without privileges, gunicorn |
@@ -143,6 +145,108 @@ form's `csrfmiddlewaretoken`), an `Origin` of exactly `FORZA_ACCOUNTS_ORIGIN`, a
 browser sends `Sec-Fetch-Site`, `same-origin`. `OPTIONS` is 405, and no answer carries a CORS
 header. Every `/api/` answer is `Cache-Control: no-store` and `nosniff`.
 
+## Photo of the Month
+
+The first community event (website #4): every calendar month, in UTC, the community photo with
+the most **votes** wins, once the operator has checked and confirmed it. It is off until
+`FORZA_POTM_FROM` names the first contest month. The website's `photo-of-the-month.html` shows the
+standings live and the past winners, `photo-of-the-month-rules.html` the rules, and the home page
+the newest winner (from `data/photo-of-the-month.json`, which the website's build writes from the
+routes below; the launcher may use the same file for its background).
+
+| Route | Answer |
+|-------|--------|
+| `GET /api/potm/standings[?month=YYYY-MM]` | anyone, no session: `{"version": 1, "month", "start", "end", "state", "accountDays", "generated", "entries", "top": [{"rank", "id", "title", "gamertag", "votes", "likes", "reached"}], "winner"}`. Default: this month (before the first contest month, that month, `upcoming`). `state`: `upcoming`, `open`, `verifying` (over, not confirmed yet), `confirmed` or `no winner` (over, no votes). `top`: the first 20 entries that have a vote; `likes` is the photo's public total, votes or not; `reached` when it reached its votes (unix). `winner`: as in `winners`, once confirmed. Only contest months (`FORZA_POTM_FROM` to this month), else 404 `no such month` |
+| `GET /api/potm/winners` | anyone: `{"version": 1, "generated", "from", "winners": [{"month", "id", "title", "gamertag", "votes", "reached", "confirmed"}]}`, newest first |
+
+Both answer 404 `not running` without `FORZA_POTM_FROM`, carry `Cache-Control: public, max-age=60`,
+and are counted again at most once a minute in each worker. They name no voter, account or XUID.
+
+**The rules** (`members.potm`):
+- **Entries:** the photos in the public gallery (live, the owner not banned, in the feed) that
+  were uploaded during the month, from 00:00 UTC on the 1st to 00:00 UTC on the 1st of the next
+  month, and that the operator did not disqualify for that month.
+- **Votes:** a like is a vote when it was given during the month, not by the photo's owner, by a
+  key whose likes count in the public totals now (see "Likes": active and pinned link, account not
+  suspended, XUID not banned, signed sign-ins 72 hours old on 2 days), and when the account linked
+  to that key now was at least `FORZA_POTM_ACCOUNT_DAYS` (14) days old at the time of the like.
+  Every other like still counts in the public totals; it is just not a vote. A like taken back is
+  no vote. Moving a link to a newer account makes the key's earlier likes too new.
+- **Order:** the most votes; then the entry that reached its count first (the time of its latest
+  vote); then the earlier upload; then the photo id.
+- **Verification:** once the month is over its state is `verifying`. The operator looks at the
+  standings and the leader's likes, removes what is not fair (void likes, suspend accounts, ban
+  keys, disqualify the entry), and confirms the leader. A confirmed winner (`MonthWinner`) keeps
+  its photo id, title, gamertag, votes and the time it reached them, whatever happens to the photo
+  or its likes later. It can be withdrawn.
+
+**The operator's review:** the admin's *Photos of the Month* > *Review a month* opens the newest
+month that is over and has no winner (or this month): the standings with why each entry's other
+likes are not votes, the likes of the leader (or of any entry) one by one, with the account, its
+age when it liked, when it was linked, the key's first signed sign-in and signed days and how many
+photos the key liked that month, and the steps:
+- **Disqualify** an entry (with a note) or put it back. It stays in the gallery.
+- **Confirm** the leader once the month is over. The form sends the vote count the page showed, so
+  standings that changed meanwhile (a like voided or given back) are refused and shown again.
+- Deleting a winner from the list withdraws it; deleting a disqualification puts the entry back.
+
+The same from the command line:
+
+    docker exec forza-accounts python manage.py potm standings [2026-11] [--json]
+    docker exec forza-accounts python manage.py potm voters 2026-11 <photo id>
+    docker exec forza-accounts python manage.py potm disqualify 2026-11 <photo id> --note "why"
+    docker exec forza-accounts python manage.py potm requalify 2026-11 <photo id>
+    docker exec forza-accounts python manage.py potm confirm 2026-11 <photo id> --votes <N> [--note ...]
+    docker exec forza-accounts python manage.py potm withdraw 2026-11
+
+Every step writes a log line with the photo id and the operator's user name. No prize is handled
+here: the rules page says what the winner gets.
+
+## Mods and texture packs hub
+
+Off unless `FORZA_HUB=1`: then every `/api/hub/` route answers 404 `not available`. How an upload
+is checked, scanned and served, and the containers that do it, are in
+[`hub/README.md`](../hub/README.md). This service takes the uploads, never opens them, reads the
+scanning worker's results, and copies what a maintainer approved to the download host's folder.
+
+| Route | Answer |
+|-------|--------|
+| `GET /api/hub/items[?kind=mod\|pack]` | anyone: `{"version": 1, "generated", "downloads", "items": [{"id", "kind", "title", "description", "version", "author", "created", "published", "size", "files", "sha256", "folder", "download", "likes"}]}`, the live items, newest first. `author` is the uploader's gamertag; `download` is `<FORZA_HUB_DOWNLOADS>/<sha256>/<folder>.zip`. A public cache of 60 s |
+| `GET /api/hub/items/<id>` | anyone: one live item, as above; 404 otherwise |
+| `POST /api/hub/items` | `{"kind": "mod"\|"pack", "title", "description", "version", "own_work": true}` -> `{"id", "state": "draft", "upload", "max_bytes"}`. 400 `only your own work`, `give it a title`; 409 `wait until your other uploads are checked` (3 waiting per key); 429 over the limits; 503 `the queue is full` |
+| `PUT /api/hub/items/<id>/file` | the zip itself as the body (`Content-Type: application/zip`, a `Content-Length`), the draft's owner only -> `{"ok": true, "state": "queued"}`. 413 over `FORZA_HUB_MAX_MB`, 415 not a zip, 409 it has its file, 503 no room (`FORZA_HUB_QUOTA_GB`) |
+| `GET /api/hub/mine` | `{"items": [{"id", "kind", "title", "version", "state", "reason", "created", "size", "sha256", "likes"}], "max_bytes"}`: the key's items in every state but removed. `state`: `draft`, `uploading`, `queued` (waiting for the scan), `refused` (`reason` says why), `review` (waiting for a maintainer), `live`, `hidden` |
+| `POST /api/hub/items/<id>/delete` | `{}` -> `{"ok": true}`: takes it down (files and likes); needs a sign-in in the past 10 minutes |
+| `POST /api/hub/reports` | `{"item", "reason": "malware"\|"not-own-work"\|"game-files"\|"broken"\|"offensive"\|"other", "note"}` -> `{"ok": true}`; one per key and item, not one's own; 20 a day |
+
+Everything but the two public routes needs a signed-in account linked to its game, with the
+link usable, as likes do. Every change needs the CSRF token, the Origin and JSON, except the
+upload's `PUT`, whose body is the zip (its type is checked). Likes on mods and packs are
+`/api/likes` with `"kind": "mod"` or `"pack"`, under the same rules as photos.
+
+The upload is streamed to `FORZA_HUB_INCOMING/<id>.part` in chunks of 1 MB, with its SHA-256,
+then renamed to `<id>.zip`, and the job `<id>.json` is written last. Only its size, its first
+four bytes (a zip's) and the quota are checked here. A report of malware from a key whose likes
+count, or three reports from such keys, hide a live item (its public copy is deleted) until a maintainer looks.
+Deleting an account takes its items down.
+
+**The admin's Hub items:** the uploads in every state, with the worker's findings (files, the
+manifest, both SHA-256s, the scanner). On an item's page, **Download the clean zip** (an
+attachment, only from `FORZA_ADMIN_ALLOW`). The actions:
+- **Approve:** copies the clean zip to `FORZA_HUB_PUBLIC/<sha256>/<folder>.zip`, checking its
+  SHA-256 first.
+- **Hide** and **Show again:** delete or restore the public copy.
+- **Refuse:** the uploader sees "a maintainer did not approve it".
+- **Take down:** deletes the files and the likes; the record stays.
+
+Hub reports are read-only. The same from the command line:
+`python manage.py hub list|collect|approve|hide|unhide|refuse|take-down`. `nightly` deletes drafts
+with no file after a day, sends uploads that never finished back to draft after an hour, collects
+the results, deletes files no item needs any more, and warns when an upload has waited a day for
+the worker. A clean zip that is already on the hub (the same SHA-256) is refused, and a public
+copy is deleted only when no other live item is served from it. Files the worker wrote are opened
+only when they are plain files, never through a link.
+
 ## The game link
 
 Both sides approve every link, so a token, code or address that leaks is useless alone:
@@ -206,6 +310,12 @@ file (mode 600) that only this container reads. Never commit it.
 | `FORZA_SMTP_USER`, `FORZA_SMTP_PASSWORD` (`_FILE`) | none | the relay's SMTP credentials (often a user name and an API key) |
 | `FORZA_SMTP_FROM` | `signin@<site host>` | the sender |
 | `FORZA_ACCOUNTS_EMAIL_DAILY` | `200` | code mails a day in all; then email sign-in pauses until the day has passed. Keep it under the relay's own daily cap |
+| `FORZA_POTM_FROM` | none | the first Photo of the Month, `YYYY-MM` (UTC). Without it there is no contest and its routes answer 404 |
+| `FORZA_POTM_ACCOUNT_DAYS` | `14` | how old an account must have been when it liked for the like to be a vote |
+| `FORZA_HUB` | off | `1` turns the mods and texture packs hub on |
+| `FORZA_HUB_DOWNLOADS` | none | the download host's origin (`https://...`), another host name than the site's; required with `FORZA_HUB=1` |
+| `FORZA_HUB_INCOMING`, `FORZA_HUB_CHECKED`, `FORZA_HUB_PUBLIC` | `$FORZA_ACCOUNTS_DATA/hub/...` | the folders shared with the scanning worker and the download host (`hub/README.md`) |
+| `FORZA_HUB_MAX_MB`, `FORZA_HUB_QUOTA_GB` | `512`, `50` | one upload at most; everything the hub keeps at most |
 | `FORZA_ACCOUNTS_WORKERS`, `FORZA_ACCOUNTS_BIND` | `2`, `0.0.0.0:8080` | gunicorn |
 
 ## What the owner registers before going live
@@ -400,6 +510,14 @@ a day when the past day's new links reach half of `FORZA_ACCOUNTS_LINKS_DAILY`.
   7 days after it went, and deleting the account deletes its key's likes.
 - **Missing items:** the id of each liked photo or design the nightly purge no longer finds, and
   since when; until it comes back or its likes go.
+- **Photo of the Month:** each confirmed winner's month, photo id, title, gamertag, votes and when
+  it reached them (public), its owner's XUID and the operator's user name and note (not public);
+  each disqualified entry's month, photo id, note and operator. Kept as the contest's record.
+- **Hub items:** the uploading key's XUID, the account that uploaded (until it is deleted), the
+  title, description and version, the sizes and SHA-256s, the worker's findings, the state and
+  its reason, who reviewed it; the files while it is waiting, live or hidden. A taken-down item
+  keeps its record without its files. **Hub reports:** the reporting key's XUID, the reason, the
+  note and when.
 - **Audit events:** sign-ins, sign-outs, account creation, links made, moved and removed, items
   deleted (with their title); 90 days, with no IP address.
 - **Rate-limit counters:** in the cache table. They hold IP addresses and address hashes for an
@@ -412,7 +530,7 @@ a day when the past day's new links reach half of `FORZA_ACCOUNTS_LINKS_DAILY`.
 |-----|-------|
 | per IP | 20 Discord or GitHub sign-in starts an hour; 5 new accounts a day; 5 code mails an hour; 20 wrong codes an hour |
 | per email address | 3 codes an hour, 5 a day; one live code per browser; 5 tries per code; a code lasts 10 minutes |
-| per account | 20 sessions; 10 link claims (and link peeks that find nothing) per 10 minutes; one new link a day; 120 likes an hour and 500 a day (given or taken back); 20 items deleted a day |
+| per account | 5 new hub items a day (20 per address), 3 waiting per key, 20 hub reports a day; 20 sessions; 10 link claims (and link peeks that find nothing) per 10 minutes; one new link a day; 120 likes an hour and 500 a day (given or taken back); 20 items deleted a day |
 | per XUID (signed) | 600 calls an hour; 5 link starts an hour; one new link a day |
 | whole service | `FORZA_ACCOUNTS_EMAIL_DAILY` code mails a day (then email sign-in pauses); 1,000 new accounts a day; `FORZA_ACCOUNTS_LINKS_DAILY` new links a day; 100 link codes that find nothing a minute, after which codes stop for 10 minutes (the browser's token still works) |
 

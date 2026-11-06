@@ -9,16 +9,31 @@ members.moderation, which writes the audit event the player sees and a log line.
 - Likes: read-only, filtered by kind, item, key (XUID) and account, each with the most liked or
   most liking first; void the selected likes, or every like of their keys.
 - Audit events and sign-ins: read-only lists.
+- Photos of the Month: the confirmed winners, and the review of a month (members.potm): its
+  standings with why each entry's other likes are not votes, the leader's likes one by one
+  (account, account age, the key's signed sign-ins, likes given that month), and the steps:
+  disqualify an entry or put it back, confirm the leader once the month is over. Deleting a
+  winner withdraws it; deleting a disqualification puts the entry back.
+- Hub items (members.hub): the uploads with the worker's findings (files, manifest, SHA-256s),
+  the clean zip to download and look at (as an attachment), and the steps: approve (publish to
+  the download host), hide, show again, refuse, take down. Hub reports: read-only.
 """
 
-from django.contrib import admin
+from django.conf import settings
+from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
+from django.core.exceptions import PermissionDenied
 from django.db.models import Count, OuterRef, Subquery
-from django.urls import reverse
+from django.http import FileResponse, Http404
+from django.shortcuts import redirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
+from django.utils import timezone
 from django.utils.html import format_html
 
-from members import game, items, moderation
-from members.models import AuditEvent, GameLink, Like, MissingItem, SignIn, User
+from members import game, hub, items, moderation, potm
+from members.models import (AuditEvent, Disqualified, GameLink, HubItem, HubReport, Like, MissingItem, MonthWinner,
+                            SignIn, User)
 from members.moderation import account_key
 
 TOP = 20  # choices shown in each like filter
@@ -323,3 +338,210 @@ class SignInAdmin(ReadOnly, admin.ModelAdmin):
     list_display = ("created", "user")
     search_fields = ("user__username",)
     exclude = ("session_key",)
+
+
+# ---- Photo of the Month ----
+
+@admin.register(MonthWinner)
+class MonthWinnerAdmin(ReadOnly, admin.ModelAdmin):
+    """The confirmed winners. A winner is confirmed from the month's review (the link above the
+    list); deleting one withdraws it."""
+    list_display = ("month", "photo", "gamertag", "title", "votes", "reached", "confirmed_at", "confirmed_by")
+    search_fields = ("month", "photo", "gamertag")
+    change_list_template = "admin/members/monthwinner/change_list.html"
+
+    def get_urls(self):
+        view = self.admin_site.admin_view
+        return [path("review/", view(self.review), name="members_potm_review_now"),
+                path("review/<str:month>/", view(self.review), name="members_potm_review")] + super().get_urls()
+
+    def delete_model(self, request, obj):
+        potm.withdraw(obj.month, request.user.get_username())
+
+    def delete_queryset(self, request, queryset):
+        for obj in queryset:
+            potm.withdraw(obj.month, request.user.get_username())
+
+    def review(self, request, month=None):
+        if not self.has_view_permission(request):
+            raise PermissionDenied
+        if not potm.running():
+            self.message_user(request, "Photo of the Month is off: set FORZA_POTM_FROM", messages.WARNING)
+            return redirect("admin:members_monthwinner_changelist")
+        now = timezone.now()
+        if month is None:  # the newest month that is over and has no winner, else this month
+            month = potm.current(now)
+            before = potm.previous(month)
+            if potm.contest_month(before, now) and not MonthWinner.objects.filter(month=before).exists():
+                month = before
+            return redirect("admin:members_potm_review", month=month)
+        if not potm.contest_month(month, now) or not game.available():
+            raise Http404("not a contest month")
+        if request.method == "POST":
+            self.step(request, month)
+            return redirect("admin:members_potm_review", month=month)
+        s = potm.standings(month, now, fresh=True)
+        winner = MonthWinner.objects.filter(month=month).first()
+        lead = s.entries[0] if s.entries and s.entries[0].votes else None
+        shown = request.GET.get("photo") or (lead.id if lead else None)
+        rows = [{"rank": n, "e": e, "gamertag": game.gamertag(int(e.owner, 16)) or "",
+                 "not_counted": sorted(e.not_counted.items())} for n, e in enumerate(s.entries[:50], 1)]
+        months, m = [], potm.current(now)
+        while m >= settings.POTM_FROM and len(months) < 24:
+            months.append(m)
+            m = potm.previous(m)
+        context = dict(
+            self.admin_site.each_context(request), title="Photo of the Month %s" % month, month=month,
+            months=months, standings=s, rows=rows, entries=len(s.entries), winner=winner, lead=lead,
+            state=potm.state_of(s, winner, now), account_days=settings.POTM_ACCOUNT_DAYS,
+            shown=shown, voters=potm.voters(month, shown, now) if shown else [],
+            disqualified=Disqualified.objects.filter(month=month),
+            can_confirm=request.user.has_perm("members.add_monthwinner"),
+            can_disqualify=request.user.has_perm("members.add_disqualified"), opts=self.model._meta)
+        return TemplateResponse(request, "admin/members/potm_review.html", context)
+
+    def step(self, request, month):
+        by, form = request.user.get_username(), request.POST
+        try:
+            if form.get("step") == "confirm":
+                if not request.user.has_perm("members.add_monthwinner"):
+                    raise PermissionDenied
+                votes = form.get("votes", "")
+                w = potm.confirm(month, form.get("photo", ""), by,
+                                 expect_votes=int(votes) if votes.isdigit() else -1, note=form.get("note", ""))
+                self.message_user(request, "%s is the Photo of the Month %s (%d votes)" % (w.photo, month, w.votes))
+            elif form.get("step") in ("disqualify", "requalify"):
+                if not request.user.has_perm("members.add_disqualified" if form["step"] == "disqualify"
+                                             else "members.delete_disqualified"):
+                    raise PermissionDenied
+                if form["step"] == "disqualify":
+                    potm.disqualify(month, form.get("photo", ""), form.get("note", ""), by)
+                    self.message_user(request, "%s is out of %s" % (form.get("photo"), month))
+                else:
+                    potm.requalify(month, form.get("photo", ""), by)
+                    self.message_user(request, "%s is back in %s" % (form.get("photo"), month))
+            else:
+                self.message_user(request, "unknown step", messages.ERROR)
+        except potm.PotmError as e:
+            self.message_user(request, str(e), messages.ERROR)
+
+
+@admin.register(Disqualified)
+class DisqualifiedAdmin(ReadOnly, admin.ModelAdmin):
+    """Entries out of a month's contest (from the month's review). Deleting one puts it back."""
+    list_display = ("month", "photo", "note", "at", "by")
+    list_filter = ("month",)
+    search_fields = ("photo",)
+
+    def delete_model(self, request, obj):
+        potm.requalify(obj.month, obj.photo, request.user.get_username())
+
+    def delete_queryset(self, request, queryset):
+        for obj in queryset:
+            potm.requalify(obj.month, obj.photo, request.user.get_username())
+
+
+# ---- The mods and texture packs hub ----
+
+class HubReportInline(ReadOnly, admin.TabularInline):
+    model = HubReport
+    can_delete = False
+    fields = readonly_fields = ("at", "reason", "note", "xuid")
+
+
+@admin.register(HubItem)
+class HubItemAdmin(ReadOnly, admin.ModelAdmin):
+    """Approve only after looking at the clean zip ("Download the clean zip" on the item's page)."""
+    list_display = ("id", "kind", "title", "state", "uploaded_by", "file_size", "files", "reports", "created")
+    list_filter = ("state", "kind")
+    search_fields = ("id", "title", "owner", "uploader__username")
+    readonly_fields = ("id", "kind", "state", "title", "version", "description", "uploaded_by", "owner", "created",
+                       "updated", "upload_size", "upload_sha256", "file_size", "sha256", "files", "unpacked",
+                       "folder", "manifest", "names", "reason", "scanner", "reviewed_by", "published", "reports",
+                       "clean_zip")
+    exclude = ("uploader",)
+    inlines = (HubReportInline,)
+    actions = ("approve", "hide", "unhide", "refuse", "take_down")
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # take down instead: it deletes the files and the likes
+
+    def get_urls(self):
+        return [path("<str:item_id>/file/", self.admin_site.admin_view(self.clean_file),
+                     name="members_hubitem_file")] + super().get_urls()
+
+    @admin.display(description="uploaded by")
+    def uploaded_by(self, item):
+        return item.uploader.public_id if item.uploader else "(account deleted)"
+
+    @admin.display(description="clean zip")
+    def clean_zip(self, item):
+        if hub.checked_path(item) is None:
+            return "-"
+        return format_html('<a href="{}">Download the clean zip</a> (look at it before approving)',
+                           reverse("admin:members_hubitem_file", args=[item.id]))
+
+    def clean_file(self, request, item_id):
+        if not self.has_view_permission(request):
+            raise PermissionDenied
+        item = HubItem.objects.filter(pk=item_id).first()
+        found = hub.checked_path(item) if item else None
+        if found is None:
+            raise Http404("no clean zip")
+        try:
+            handle = hub.open_plain(found)
+        except (OSError, hub.HubError):
+            raise Http404("no clean zip") from None
+        response = FileResponse(handle, as_attachment=True, filename=item.id + ".zip",
+                                content_type="application/octet-stream")
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return response
+
+    def _each(self, request, queryset, step, done_text):
+        done = 0
+        for item in queryset:
+            try:
+                if step(item) is not False:
+                    done += 1
+            except hub.HubError as e:
+                self.message_user(request, str(e), messages.ERROR)
+        self.message_user(request, done_text % done)
+
+    @admin.action(description="Approve: publish on the download host", permissions=["change_hub"])
+    def approve(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.approve(i, request.user.get_username()), "%d item(s) published")
+
+    @admin.action(description="Hide (stop downloads until it is shown again)", permissions=["change_hub"])
+    def hide(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.hide(i, "hidden by a maintainer"), "%d item(s) hidden")
+
+    @admin.action(description="Show again", permissions=["change_hub"])
+    def unhide(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.unhide(i, request.user.get_username()), "%d item(s) shown again")
+
+    @admin.action(description="Refuse (the uploader sees: a maintainer did not approve it)", permissions=["change_hub"])
+    def refuse(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.refuse(i, request.user.get_username()), "%d item(s) refused")
+
+    @admin.action(description="Take down: delete its files and likes (a takedown request, a rule broken)",
+                  permissions=["change_hub"])
+    def take_down(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.take_down(i, "a maintainer"), "%d item(s) taken down")
+
+    def has_change_hub_permission(self, request):
+        return request.user.has_perm("members.change_hubitem")
+
+    def get_queryset(self, request):
+        hub.collect(force=True)
+        return super().get_queryset(request).select_related("uploader")
+
+
+@admin.register(HubReport)
+class HubReportAdmin(ReadOnly, admin.ModelAdmin):
+    list_display = ("at", "item", "reason", "note")
+    list_filter = ("reason",)
+    search_fields = ("item__id", "item__title")
+
+    def has_delete_permission(self, request, obj=None):
+        return False

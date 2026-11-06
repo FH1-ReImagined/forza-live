@@ -2,7 +2,8 @@
 are not linked to a game (suspended ones stay), email accounts whose code was never used after a
 day, link requests and launcher nonces that are over, the likes of photos and designs gone from
 the game server for LIKES_PURGE_GRACE_DAYS (members.moderation, also the purge_likes command),
-then a dated backup of the database and the email pepper (7 kept)."""
+the hub's upkeep (members.hub.upkeep: old drafts, unfinished uploads, the worker's results), then
+a dated backup of the database and the email pepper (7 kept)."""
 
 import datetime
 import os
@@ -73,6 +74,9 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         gone = purge()
         likes = moderation.purge_missing_likes()
+        from members import hub
+        hub_upkeep = hub.upkeep()
         dest = backup()
-        self.stdout.write("deleted %d unused accounts; likes: %s; backup %s" % (
-            gone, summary(likes) if likes else "no game data", dest))
+        self.stdout.write("deleted %d unused accounts; likes: %s;%s backup %s" % (
+            gone, summary(likes) if likes else "no game data",
+            " hub: %s;" % ", ".join("%s %d" % kv for kv in hub_upkeep.items()) if hub_upkeep else "", dest))
