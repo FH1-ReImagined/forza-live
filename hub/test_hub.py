@@ -260,6 +260,22 @@ class Bombs(Base):
         r = self.check(bytes(data))
         self.assertFalse(r.ok)
 
+    def test_a_directory_bigger_than_the_limits_is_refused_before_it_is_read(self):
+        data = bytearray(make_zip(MOD))
+        i = data.rfind(b"PK\x05\x06")
+        struct.pack_into("<HH", data, i + 8, 60000, 60000)  # says 60,000 entries
+        self.refused(bytes(data), "entries, more than")
+        data = bytearray(make_zip(MOD))
+        struct.pack_into("<I", data, i + 12, 1 << 31)       # a directory of 2 GB
+        self.refused(bytes(data), "list of files is too big")
+
+    def test_a_damaged_header_offset(self):
+        data = bytearray(make_zip(MOD, zipfile.ZIP_STORED))
+        i = data.rfind(b"PK\x05\x06")
+        struct.pack_into("<I", data, i + 16, 0)             # the directory starts at 0: offsets go wrong
+        r = self.check(bytes(data))
+        self.assertFalse(r.ok)
+
     def test_not_zips(self):
         for data in (b"", b"MZ" + b"\x00" * 100, b"PK\x03\x04" + os.urandom(100), make_zip({}), os.urandom(5000)):
             self.assertFalse(self.check(data).ok)
@@ -347,6 +363,27 @@ class Worker(Base):
         self.job("EEEEEEEEEEEE", make_zip(MOD))
         self.run_once()
         self.assertEqual(self.result("EEEEEEEEEEEE")["error"], True)
+
+    def test_a_job_that_crashes_the_checker_does_not_stop_the_queue(self):
+        self.job("LLLLLLLLLLLL", make_zip(MOD))
+        self.job("MMMMMMMMMMMM", make_zip(MOD))
+        real = hub_worker.process
+
+        def crash(job, *a):
+            if job["id"] == "LLLLLLLLLLLL":
+                raise OSError(22, "Invalid argument")
+            return real(job, *a)
+        hub_worker.process = crash
+        try:
+            self.run_once()
+        finally:
+            hub_worker.process = real
+        self.assertEqual((self.result("LLLLLLLLLLLL")["ok"], self.result("MMMMMMMMMMMM")["ok"]), (False, True))
+        # A job that was killed twice (out of memory) is refused the third time.
+        self.job("NNNNNNNNNNNN", make_zip(MOD))
+        (self.root / "work" / "NNNNNNNNNNNN.attempts").write_text("2")
+        self.run_once()
+        self.assertIn("stopped the checker", self.result("NNNNNNNNNNNN")["reason"])
 
     def test_jobs_that_do_not_match_their_upload(self):
         self.job("FFFFFFFFFFFF", make_zip(MOD), sha256="0" * 64)

@@ -293,6 +293,54 @@ class Moderation(HubTest):
         self.assertIn("deleted the mod %s" % item_id, AuditEvent.objects.filter(user=self.user_b).values_list("event", flat=True))
         self.assertEqual(self.like(c, item_id, kind="mod").status_code, 404)
 
+    def test_the_same_file_again_is_refused_and_cannot_take_the_first_down(self):
+        first = self.live()
+        c, _ = self.linked("333", SEED_C, XUID_C)
+        clean = next((self.dirs / "public").rglob("*.zip")).read_bytes()  # the download itself
+        again = self.upload(clean, browser=c, title="Copy")
+        self.scan()
+        item = HubItem.objects.get(pk=again)
+        self.assertEqual(item.state, "refused")
+        self.assertIn("the same file is on the hub already", item.reason)
+        c.post_json("/api/hub/items/%s/delete" % again, {})
+        self.assertEqual(len(list((self.dirs / "public").rglob("*.zip"))), 1)  # the first is still served
+        self.assertEqual(HubItem.objects.get(pk=first).state, "live")
+
+    def test_a_malware_report_from_a_new_key_does_not_hide(self):
+        item_id = self.live()
+        c, _ = self.linked("333", SEED_C, XUID_C)
+        self.age(XUID_C, days=0.5)  # its likes do not count yet
+        self.assertEqual(c.post_json("/api/hub/reports", {"item": item_id, "reason": "malware"}).status_code, 200)
+        self.assertEqual(HubItem.objects.get(pk=item_id).state, "live")
+        self.assertEqual(HubItem.objects.get(pk=item_id).reports, 1)
+
+    def test_links_from_the_worker_are_not_followed(self):
+        item_id = self.upload(make_zip(MOD))
+        self.scan()
+        target = self.dirs / "secret.txt"
+        target.write_text("the accounts service's own file")
+        zip_path = self.dirs / "checked" / (item_id + ".zip")
+        zip_path.unlink()
+        zip_path.symlink_to(target)
+        self.assertIsNone(hub.checked_path(HubItem.objects.get(pk=item_id)))
+        with self.assertRaises((OSError, hub.HubError)):
+            hub.approve(HubItem.objects.get(pk=item_id), "op")
+        self.assertEqual(list((self.dirs / "public").rglob("*.zip")), [])
+
+    def test_upkeep_removes_files_no_item_needs(self):
+        import os as _os
+        import time as _time
+        item_id = self.upload(make_zip(MOD))
+        self.b.post_json("/api/hub/items/%s/delete" % item_id, {})   # deleted while the worker has it
+        for name in (item_id + ".zip", item_id + ".json"):             # which writes its result after that
+            (self.dirs / "checked" / name).write_bytes(b"x")
+        (self.dirs / "public" / ("c" * 64)).mkdir()                     # a copy no live item serves
+        old = _time.time() - 7200
+        for p in list((self.dirs / "checked").iterdir()) + list((self.dirs / "incoming").iterdir()):
+            _os.utime(p, (old, old))
+        self.assertGreaterEqual(hub.upkeep()["orphans_deleted"], 3)
+        self.assertEqual(list((self.dirs / "checked").iterdir()) + list((self.dirs / "public").iterdir()), [])
+
     def test_deleting_the_account_takes_its_uploads_down(self):
         item_id = self.live()
         r = self.b.post_json("/api/account/delete", {"confirm": self.user_b.public_id})

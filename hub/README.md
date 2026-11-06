@@ -51,7 +51,7 @@ The accounts service's side (the routes, the admin, the settings) is in
    - **Zip slip:** absolute paths, drive letters, `..`, `.` or empty parts, backslashes.
    - **Special entries:** links, devices and other special files, encrypted entries, and any
      compression but stored and deflated.
-   - **Zip bombs:** an entry that unpacks to more than 200 times its packed size (above 1 MB);
+   - **Zip bombs:** an entry that unpacks to more than 100 times its packed size (above 1 MB);
      more than 4 GB unpacked in all, 1 GB in one file, or 20,000 entries.
    - **Names** the game cannot use (plain printable ASCII without `:*?"<>|`, at most 255
      bytes), and names that differ only in case. A name that is both a file and a folder.
@@ -71,13 +71,18 @@ The accounts service's side (the routes, the admin, the settings) is in
 4. **The scan.** ClamAV (`clamscan`) scans the decompressed files with the signatures the
    updater keeps fresh. A finding refuses the upload and names the signature to its uploader.
    A scan that fails, or no signatures yet, never passes an upload: the jobs wait for
-   signatures, and a failed scan says "send it again later".
+   signatures, and a failed scan says "send it again later". An upload that crashes the
+   checker is refused, and one that stops it twice (killed for its memory, say) is refused the
+   third time, so no upload can stop the queue. The zip's own list of files is measured before
+   it is read (at most 20,000 entries, and their names), so it cannot exhaust the memory.
 5. **The clean zip.** Only the checked files, in one folder named after the item (letters,
    digits, `-` and `_`; the launcher uses it as the mod's or pack's folder name). Fixed times,
    no comments, no extra fields, plain permissions. The worker writes `checked/<id>.zip`, then
    the result `checked/<id>.json` last.
 6. **The review.** The accounts service reads the result. A refused upload shows its reason on
-   the uploader's account page, and its files are deleted. A clean one waits for a maintainer
+   the uploader's account page, and its files are deleted. So does a clean zip that is already
+   on the hub (the same SHA-256 as another item): nobody can take over, or take down, someone
+   else's download by uploading it again. A clean one waits for a maintainer
    (state `review`), who downloads the clean zip from the admin (an attachment), looks at it,
    and approves it. The approval copies it, checking its SHA-256 again, to
    `public/<sha256>/<folder>.zip`.
@@ -87,8 +92,8 @@ The accounts service's side (the routes, the admin, the settings) is in
    the SHA-256, so the launcher (and anyone) can check the file.
 
 **Reports.** A signed-in, linked account reports an item once, with a reason. A "malware or a
-harmful file" report hides it at once (its public copy is deleted). Three reports from keys whose
-likes count hide it too. A maintainer checks it, then shows it again (Show again) or takes it
+harmful file" report from a key whose likes count hides it at once (its public copy is deleted).
+Three reports from such keys, for any reason, hide it too. A maintainer checks it, then shows it again (Show again) or takes it
 down.
 
 **Takedowns.** The uploader deletes their item from their account page, and a maintainer takes
@@ -162,6 +167,9 @@ sees only `public`.
 
 5. On the website, add "Mods and Textures" to the navbar next to Leaderboards and take the
    `noindex` off `mods.html` (website, `README.md`).
+
+`nightly` also deletes files in the three folders that no item needs any more (an upload deleted
+while the worker had it, a public copy no live item is served from).
 
 The hub's admin is the accounts service's (`/admin/`, Hub items): approve, hide, show again,
 refuse and take down. The same steps from the command line: `python manage.py hub list`,

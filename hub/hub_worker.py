@@ -166,6 +166,32 @@ def process(job, args, version):
         shutil.rmtree(work, ignore_errors=True)
 
 
+MAX_ATTEMPTS = 2
+
+
+def attempt(job, args, version):
+    """process(), never raising, and at most MAX_ATTEMPTS times per job: a job that crashed or
+    was killed (out of memory) twice is refused, so one upload can never stop the queue."""
+    marker = Path(args.work) / (job["id"] + ".attempts")
+    try:
+        tries = int(marker.read_text() or "0")
+    except (OSError, ValueError):
+        tries = 0
+    base = {"version": 1, "id": job["id"], "scanner": version}
+    if tries >= MAX_ATTEMPTS:
+        marker.unlink(missing_ok=True)
+        log.warning("hub: %s refused after %d attempts that did not finish", job["id"], tries)
+        return dict(base, ok=False, error=False, reason="it could not be checked (it stopped the checker)")
+    write_atomic(marker, str(tries + 1).encode())
+    try:
+        return process(job, args, version)
+    except Exception as e:  # noqa: BLE001: whatever a hostile file does, the queue goes on
+        log.warning("hub: %s failed: %s", job["id"], type(e).__name__)
+        return dict(base, ok=False, error=False, reason="it could not be read (%s)" % type(e).__name__)
+    finally:
+        marker.unlink(missing_ok=True)
+
+
 SIGNATURES = (".cvd", ".cld", ".cud", ".ndb", ".hdb", ".hsb", ".ldb", ".yar", ".yara")
 
 
@@ -195,7 +221,7 @@ def once(args, version):
         if job is None:
             continue
         started = time.monotonic()
-        result = process(job, args, version)
+        result = attempt(job, args, version)
         write_atomic(checked / path.name, json.dumps(result, separators=(",", ":")).encode())
         log.info("hub: %s (%s) %s in %.1f s%s", job["id"], job["kind"], "passed" if result["ok"] else "refused",
                  time.monotonic() - started, "" if result["ok"] else ": " + result["reason"])

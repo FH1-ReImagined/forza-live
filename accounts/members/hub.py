@@ -38,9 +38,11 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import threading
 import time
 from datetime import timedelta
+from pathlib import Path
 from typing import List, Literal, Optional
 
 from django.conf import settings
@@ -371,10 +373,12 @@ def write_atomic(path, data):
 def read_result(path, item_id):
     """The worker's result for an item, checked, or None."""
     try:
-        if path.stat().st_size > RESULT_MAX:
+        with open_plain(path) as f:
+            data = f.read(RESULT_MAX + 1)
+        if len(data) > RESULT_MAX:
             raise ValueError("too big")
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        doc = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, HubError) as e:
         log.warning("accounts: hub result %s unreadable: %s", item_id, e)
         return None
     if not (isinstance(doc, dict) and doc.get("version") == 1 and doc.get("id") == item_id
@@ -407,6 +411,9 @@ def collect(force=False):
         doc = read_result(path, item.id)
         if doc is None:
             continue
+        if doc["ok"] and HubItem.objects.filter(sha256=doc["sha256"]).exclude(pk=item.pk).exclude(
+                state__in=(HubItem.REMOVED, HubItem.REFUSED)).exists():
+            doc = dict(doc, ok=False, error=False, reason="the same file is on the hub already")
         with transaction.atomic():
             if doc["ok"]:
                 manifest = doc.get("manifest") if isinstance(doc.get("manifest"), dict) else {}
@@ -502,7 +509,9 @@ def hub_report(request, body: ReportIn):
                                               user__is_active=True).values_list("xuid", "pub"))
     weight = sum(1 for x in counted if x in pins and game.counted(x, pins[x]))
     HubItem.objects.filter(pk=item.pk).update(reports=len(counted))
-    if body.reason == HubReport.MALWARE or weight >= settings.HUB_REPORTS_HIDE:
+    # A malware report hides it at once, but only from a key whose likes count (not a new one).
+    trusted = link.xuid in pins and game.counted(link.xuid, pins[link.xuid])
+    if (body.reason == HubReport.MALWARE and trusted) or weight >= settings.HUB_REPORTS_HIDE:
         hide(item, "held after a report: a maintainer will check it")
         log.warning("accounts: hub item %s is hidden after a report (%s)", item.id, body.reason)
     log.info("accounts: account %s reported hub item %s (%s)", user.public_id, item.id, body.reason)
@@ -516,7 +525,7 @@ def copy_checked(src, dest, sha256):
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     h = hashlib.sha256()
-    with open(src, "rb") as f, open(tmp, "wb") as out:
+    with open_plain(src) as f, open(tmp, "wb") as out:
         for chunk in iter(lambda: f.read(CHUNK), b""):
             h.update(chunk)
             out.write(chunk)
@@ -542,8 +551,12 @@ def publish(item):
 
 
 def unpublish(item):
-    if item.sha256 and SHA_RE.fullmatch(item.sha256):
-        shutil.rmtree(settings.HUB_PUBLIC / item.sha256, ignore_errors=True)
+    """Deletes the item's public copy, unless another live item is served from the same file."""
+    if not (item.sha256 and SHA_RE.fullmatch(item.sha256)):
+        return
+    if HubItem.objects.filter(sha256=item.sha256, state=HubItem.LIVE).exclude(pk=item.pk).exists():
+        return
+    shutil.rmtree(settings.HUB_PUBLIC / item.sha256, ignore_errors=True)
 
 
 def approve(item, by):
@@ -622,12 +635,49 @@ def upkeep(now=None):
         (settings.HUB_INCOMING / (item.id + ".part")).unlink(missing_ok=True)
     reset = stale.update(state=HubItem.DRAFT, upload_size=0)
     drafts = HubItem.objects.filter(state=HubItem.DRAFT, updated__lt=now - timedelta(hours=DRAFT_HOURS)).delete()[0]
+    orphans = remove_orphans()
     waiting = HubItem.objects.filter(state=HubItem.QUEUED, updated__lt=now - timedelta(days=1)).count()
     if waiting:
         log.warning("accounts: %d hub upload(s) waited over a day for the scanning worker: is it running?", waiting)
-    return {"collected": collect(force=True), "drafts_deleted": drafts, "uploads_reset": reset, "waiting": waiting}
+    return {"collected": collect(force=True), "drafts_deleted": drafts, "uploads_reset": reset, "waiting": waiting,
+            "orphans_deleted": orphans}
+
+
+def remove_orphans():
+    """Files in incoming/ and checked/ whose item no longer needs them (deleted while the worker
+    had it, refused, or gone), and public copies no live item is served from. The number."""
+    keep_in = set(HubItem.objects.filter(state__in=(HubItem.UPLOADING, HubItem.QUEUED)).values_list("pk", flat=True))
+    keep_checked = set(HubItem.objects.filter(state__in=(HubItem.QUEUED, HubItem.REVIEW, HubItem.LIVE, HubItem.HIDDEN))
+                       .values_list("pk", flat=True))
+    live = set(HubItem.objects.filter(state=HubItem.LIVE).values_list("sha256", flat=True))
+    gone = 0
+    for folder, keep in ((settings.HUB_INCOMING, keep_in), (settings.HUB_CHECKED, keep_checked)):
+        for p in folder.iterdir() if folder.is_dir() else []:
+            if p.name.split(".", 1)[0] not in keep and time.time() - p.lstat().st_mtime > 3600:
+                p.unlink(missing_ok=True)
+                gone += 1
+    for p in settings.HUB_PUBLIC.iterdir() if settings.HUB_PUBLIC.is_dir() else []:
+        if p.name not in live:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+            gone += 1
+    return gone
+
+
+def open_plain(path):
+    """A file the worker wrote, opened only when it is a plain file (never through a link)."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise HubError("%s is not a plain file" % Path(path).name)
+    return os.fdopen(fd, "rb")
 
 
 def checked_path(item):
     p = settings.HUB_CHECKED / (item.id + ".zip")
-    return p if ID_RE.fullmatch(item.id) and p.is_file() else None
+    try:
+        return p if ID_RE.fullmatch(item.id) and stat.S_ISREG(os.lstat(p).st_mode) else None
+    except OSError:
+        return None

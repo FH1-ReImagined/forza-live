@@ -226,8 +226,8 @@ upload's `PUT`, whose body is the zip (its type is checked). Likes on mods and p
 
 The upload is streamed to `FORZA_HUB_INCOMING/<id>.part` in chunks of 1 MB, with its SHA-256,
 then renamed to `<id>.zip`, and the job `<id>.json` is written last. Only its size, its first
-four bytes (a zip's) and the quota are checked here. A report of malware, or three reports from
-keys whose likes count, hide a live item (its public copy is deleted) until a maintainer looks.
+four bytes (a zip's) and the quota are checked here. A report of malware from a key whose likes
+count, or three reports from such keys, hide a live item (its public copy is deleted) until a maintainer looks.
 Deleting an account takes its items down.
 
 **The admin's Hub items:** the uploads in every state, with the worker's findings (files, the
@@ -242,7 +242,10 @@ attachment, only from `FORZA_ADMIN_ALLOW`). The actions:
 Hub reports are read-only. The same from the command line:
 `python manage.py hub list|collect|approve|hide|unhide|refuse|take-down`. `nightly` deletes drafts
 with no file after a day, sends uploads that never finished back to draft after an hour, collects
-the results, and warns when an upload has waited a day for the worker.
+the results, deletes files no item needs any more, and warns when an upload has waited a day for
+the worker. A clean zip that is already on the hub (the same SHA-256) is refused, and a public
+copy is deleted only when no other live item is served from it. Files the worker wrote are opened
+only when they are plain files, never through a link.
 
 ## The game link
 

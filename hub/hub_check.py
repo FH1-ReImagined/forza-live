@@ -91,7 +91,7 @@ class Limits:
     max_entries: int = 20_000
     max_unpacked: int = 4 << 30
     max_file: int = 1 << 30
-    max_ratio: int = 200          # an entry that unpacks to more than this times its packed size
+    max_ratio: int = 100          # an entry that unpacks to more than this times its packed size
     ratio_floor: int = 1 << 20    # entries smaller than this unpacked are not judged by ratio
 
 
@@ -178,21 +178,62 @@ def read_entry(z, info, limits, budget, out):
                 if len(head) < HEAD:
                     head += chunk[:HEAD - len(head)]
                 out.write(chunk)
-    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError) as e:
+    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError, ValueError, OSError,
+            struct.error) as e:
         refuse('"%s" could not be read (%s)' % (_shown(info.filename), type(e).__name__))
     budget[0] -= n
     return head, n
 
 
+CD_ENTRY_MAX = 46 + MAX_NAME + 64   # a central directory entry: its name and a zip64 extra field
+
+
+def directory_size(path, limits):
+    """Refused when the zip's end record (or its zip64 form) says it has more entries, or a
+    bigger central directory, than the limits allow: zipfile reads the whole directory into
+    memory before anything else can be checked."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - (65535 + 22)))
+        tail = f.read()
+        i = tail.rfind(b"PK\x05\x06")
+        if i < 0 or len(tail) - i < 22:
+            refuse("it is not a zip file that can be read (no end record)")
+        count, cd_size = struct.unpack_from("<H", tail, i + 10)[0], struct.unpack_from("<I", tail, i + 12)[0]
+        j = tail.rfind(b"PK\x06\x07", 0, i)  # the zip64 end record's locator
+        if j >= 0 and i - j == 20:
+            offset = struct.unpack_from("<Q", tail, j + 8)[0]
+            if offset > size - 56:
+                refuse("it is not a zip file that can be read (bad zip64 record)")
+            f.seek(offset)
+            rec = f.read(56)
+            if rec[:4] != b"PK\x06\x06" or len(rec) < 56:
+                refuse("it is not a zip file that can be read (bad zip64 record)")
+            count, cd_size = struct.unpack_from("<Q", rec, 32)[0], struct.unpack_from("<Q", rec, 40)[0]
+    if count > limits.max_entries:
+        refuse("it holds %d entries, more than %d" % (count, limits.max_entries))
+    if cd_size > limits.max_entries * CD_ENTRY_MAX or cd_size > size:
+        refuse("its list of files is too big")
+
+
 def entries(path, limits):
     """The zip's file entries [(name, info)], checked: names, types of entry, count."""
     try:
+        directory_size(path, limits)
         z = zipfile.ZipFile(path)
     except (zipfile.BadZipFile, OSError, ValueError, EOFError, struct.error) as e:
         refuse("it is not a zip file that can be read (%s)" % type(e).__name__)
+    try:
+        return z, _entries(z, limits)
+    except Refused:
+        z.close()
+        raise
+
+
+def _entries(z, limits):
     infos = z.infolist()
     if len(infos) > limits.max_entries:
-        z.close()
         refuse("it holds %d entries, more than %d" % (len(infos), limits.max_entries))
     files, seen, folders = [], {}, set()
     for info in infos:
@@ -223,7 +264,7 @@ def entries(path, limits):
             if prefix in seen:
                 refuse('"%s" is both a file and a folder' % _shown(seen[prefix]))
             prefix += "/"
-    return z, files
+    return files
 
 
 def root_of(names, kind):
@@ -423,7 +464,8 @@ def check(path, kind, work, limits=None):
                            textures=textures)
     except Refused as e:
         return Checked(False, str(e))
-    except (zipfile.BadZipFile, zlib.error, EOFError, ValueError, RuntimeError, struct.error) as e:
+    except (zipfile.BadZipFile, zlib.error, EOFError, ValueError, RuntimeError, struct.error, OSError,
+            MemoryError, OverflowError) as e:
         return Checked(False, "it could not be read (%s)" % type(e).__name__)
 
 

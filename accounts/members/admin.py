@@ -488,7 +488,11 @@ class HubItemAdmin(ReadOnly, admin.ModelAdmin):
         found = hub.checked_path(item) if item else None
         if found is None:
             raise Http404("no clean zip")
-        response = FileResponse(open(found, "rb"), as_attachment=True, filename=item.id + ".zip",
+        try:
+            handle = hub.open_plain(found)
+        except (OSError, hub.HubError):
+            raise Http404("no clean zip") from None
+        response = FileResponse(handle, as_attachment=True, filename=item.id + ".zip",
                                 content_type="application/octet-stream")
         response["X-Content-Type-Options"] = "nosniff"
         response["Content-Security-Policy"] = "default-src 'none'; sandbox"
