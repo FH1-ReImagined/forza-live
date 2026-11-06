@@ -151,7 +151,7 @@ sees only `public`.
    service:
 
    ```nginx
-   location ~ ^/api/hub/items/[A-Z2-7]{12}/file$ {
+   location ~ "^/api/hub/items/[A-Z2-7]{12}/file$" {   # quoted: nginx reads {12} as a block otherwise
        limit_req  zone=accounts burst=5 nodelay;
        limit_conn accounts_conn 2;
        client_max_body_size 512m;

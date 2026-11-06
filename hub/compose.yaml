@@ -73,7 +73,7 @@ services:
     image: forza-hub-scanner:latest
     build: .
     user: "10002:10002"
-    entrypoint: ["freshclam", "--config-file=/app/freshclam.conf", "--daemon", "--foreground"]
+    entrypoint: ["freshclam", "--config-file=/app/freshclam.conf", "--daemon", "--foreground", "--stdout"]
     pids_limit: 32
     mem_limit: 1g
     tmpfs:
