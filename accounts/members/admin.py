@@ -14,6 +14,9 @@ members.moderation, which writes the audit event the player sees and a log line.
   (account, account age, the key's signed sign-ins, likes given that month), and the steps:
   disqualify an entry or put it back, confirm the leader once the month is over. Deleting a
   winner withdraws it; deleting a disqualification puts the entry back.
+- Hub items (members.hub): the uploads with the worker's findings (files, manifest, SHA-256s),
+  the clean zip to download and look at (as an attachment), and the steps: approve (publish to
+  the download host), hide, show again, refuse, take down. Hub reports: read-only.
 """
 
 from django.conf import settings
@@ -21,15 +24,16 @@ from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
 from django.core.exceptions import PermissionDenied
 from django.db.models import Count, OuterRef, Subquery
-from django.http import Http404
+from django.http import FileResponse, Http404
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
 
-from members import game, items, moderation, potm
-from members.models import AuditEvent, Disqualified, GameLink, Like, MissingItem, MonthWinner, SignIn, User
+from members import game, hub, items, moderation, potm
+from members.models import (AuditEvent, Disqualified, GameLink, HubItem, HubReport, Like, MissingItem, MonthWinner,
+                            SignIn, User)
 from members.moderation import account_key
 
 TOP = 20  # choices shown in each like filter
@@ -435,3 +439,105 @@ class DisqualifiedAdmin(ReadOnly, admin.ModelAdmin):
     def delete_queryset(self, request, queryset):
         for obj in queryset:
             potm.requalify(obj.month, obj.photo, request.user.get_username())
+
+
+# ---- The mods and texture packs hub ----
+
+class HubReportInline(ReadOnly, admin.TabularInline):
+    model = HubReport
+    can_delete = False
+    fields = readonly_fields = ("at", "reason", "note", "xuid")
+
+
+@admin.register(HubItem)
+class HubItemAdmin(ReadOnly, admin.ModelAdmin):
+    """Approve only after looking at the clean zip ("Download the clean zip" on the item's page)."""
+    list_display = ("id", "kind", "title", "state", "uploaded_by", "file_size", "files", "reports", "created")
+    list_filter = ("state", "kind")
+    search_fields = ("id", "title", "owner", "uploader__username")
+    readonly_fields = ("id", "kind", "state", "title", "version", "description", "uploaded_by", "owner", "created",
+                       "updated", "upload_size", "upload_sha256", "file_size", "sha256", "files", "unpacked",
+                       "folder", "manifest", "names", "reason", "scanner", "reviewed_by", "published", "reports",
+                       "clean_zip")
+    exclude = ("uploader",)
+    inlines = (HubReportInline,)
+    actions = ("approve", "hide", "unhide", "refuse", "take_down")
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # take down instead: it deletes the files and the likes
+
+    def get_urls(self):
+        return [path("<str:item_id>/file/", self.admin_site.admin_view(self.clean_file),
+                     name="members_hubitem_file")] + super().get_urls()
+
+    @admin.display(description="uploaded by")
+    def uploaded_by(self, item):
+        return item.uploader.public_id if item.uploader else "(account deleted)"
+
+    @admin.display(description="clean zip")
+    def clean_zip(self, item):
+        if hub.checked_path(item) is None:
+            return "-"
+        return format_html('<a href="{}">Download the clean zip</a> (look at it before approving)',
+                           reverse("admin:members_hubitem_file", args=[item.id]))
+
+    def clean_file(self, request, item_id):
+        if not self.has_view_permission(request):
+            raise PermissionDenied
+        item = HubItem.objects.filter(pk=item_id).first()
+        found = hub.checked_path(item) if item else None
+        if found is None:
+            raise Http404("no clean zip")
+        response = FileResponse(open(found, "rb"), as_attachment=True, filename=item.id + ".zip",
+                                content_type="application/octet-stream")
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return response
+
+    def _each(self, request, queryset, step, done_text):
+        done = 0
+        for item in queryset:
+            try:
+                if step(item) is not False:
+                    done += 1
+            except hub.HubError as e:
+                self.message_user(request, str(e), messages.ERROR)
+        self.message_user(request, done_text % done)
+
+    @admin.action(description="Approve: publish on the download host", permissions=["change_hub"])
+    def approve(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.approve(i, request.user.get_username()), "%d item(s) published")
+
+    @admin.action(description="Hide (stop downloads until it is shown again)", permissions=["change_hub"])
+    def hide(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.hide(i, "hidden by a maintainer"), "%d item(s) hidden")
+
+    @admin.action(description="Show again", permissions=["change_hub"])
+    def unhide(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.unhide(i, request.user.get_username()), "%d item(s) shown again")
+
+    @admin.action(description="Refuse (the uploader sees: a maintainer did not approve it)", permissions=["change_hub"])
+    def refuse(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.refuse(i, request.user.get_username()), "%d item(s) refused")
+
+    @admin.action(description="Take down: delete its files and likes (a takedown request, a rule broken)",
+                  permissions=["change_hub"])
+    def take_down(self, request, queryset):
+        self._each(request, queryset, lambda i: hub.take_down(i, "a maintainer"), "%d item(s) taken down")
+
+    def has_change_hub_permission(self, request):
+        return request.user.has_perm("members.change_hubitem")
+
+    def get_queryset(self, request):
+        hub.collect(force=True)
+        return super().get_queryset(request).select_related("uploader")
+
+
+@admin.register(HubReport)
+class HubReportAdmin(ReadOnly, admin.ModelAdmin):
+    list_display = ("at", "item", "reason", "note")
+    list_filter = ("reason",)
+    search_fields = ("item__id", "item__title")
+
+    def has_delete_permission(self, request, obj=None):
+        return False

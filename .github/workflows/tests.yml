@@ -72,6 +72,33 @@ jobs:
           FORZA_ACCOUNTS_TESTING=1 python manage.py makemigrations --check --dry-run
           python manage.py test members -v 2
 
+  # The mods and texture packs hub's checks and scanning worker (hub/), and the clean zips it
+  # writes added with the launcher's own Add mod and Add pack code from the game's repository.
+  hub:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: FH1-ReImagined/ForzaHorizon1-ReImagined
+          path: .game-repo
+          sparse-checkout: |
+            launcher/forza_launcher/__init__.py
+            launcher/forza_launcher/_version.py
+            launcher/forza_launcher/mods.py
+            launcher/forza_launcher/texture_packs.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Hub tests
+        env:
+          FORZA_GAME_REPO: ${{ github.workspace }}/.game-repo
+        run: python -m unittest discover -s hub -p 'test_*.py' -v
+      - name: The worker's image, with the real ClamAV and no network
+        run: hub/test_image.sh
+
   # The launcher runs this server on players' Windows PCs ("This PC" online): saves must work there
   # too (Windows' fsync needs a writable handle, which the Linux jobs cannot catch).
   windows:

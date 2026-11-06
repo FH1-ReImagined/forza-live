@@ -22,6 +22,10 @@ its likes go once it has been missing for LIKES_PURGE_GRACE_DAYS.
 MonthWinner is a Photo of the Month the operator confirmed (members.potm), with what the
 standings said when they did: it stays when the photo or its likes go later. Disqualified is a
 photo the operator took out of one month's contest (it stays in the gallery).
+
+HubItem is a mod or texture pack on the mods and texture packs hub (members.hub), in every state
+from its upload to its takedown; it belongs to the game key that uploaded it, like a like.
+HubReport is a player's report of one (one per key and item).
 """
 
 import secrets
@@ -106,8 +110,8 @@ class SignedNonce(models.Model):
 
 
 class Like(models.Model):
-    PHOTO, DESIGN = "photo", "design"
-    KINDS = [(PHOTO, "photo"), (DESIGN, "design")]
+    PHOTO, DESIGN, MOD, PACK = "photo", "design", "mod", "pack"
+    KINDS = [(PHOTO, "photo"), (DESIGN, "design"), (MOD, "mod"), (PACK, "texture pack")]
 
     xuid = models.CharField(max_length=16)  # the game key's XUID (16 upper-case hex digits)
     kind = models.CharField(max_length=6, choices=KINDS)
@@ -164,3 +168,63 @@ class Disqualified(models.Model):
         ordering = ["-month", "-at"]
         verbose_name = "disqualified entry"
         verbose_name_plural = "disqualified entries"
+
+
+class HubItem(models.Model):
+    """A mod or texture pack (members.hub). Its id is 12 characters of the photos' alphabet."""
+    MOD, PACK = "mod", "pack"
+    KINDS = [(MOD, "mod"), (PACK, "texture pack")]
+    DRAFT, UPLOADING, QUEUED, REFUSED, REVIEW, LIVE, HIDDEN, REMOVED = (
+        "draft", "uploading", "queued", "refused", "review", "live", "hidden", "removed")
+    STATES = [(s, s) for s in (DRAFT, UPLOADING, QUEUED, REFUSED, REVIEW, LIVE, HIDDEN, REMOVED)]
+
+    id = models.CharField(max_length=12, primary_key=True)
+    kind = models.CharField(max_length=4, choices=KINDS)
+    state = models.CharField(max_length=9, choices=STATES, default=DRAFT, db_index=True)
+    owner = models.CharField(max_length=16, db_index=True)  # the uploading key's XUID (never public)
+    uploader = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+                                 related_name="hub_items")
+    title = models.CharField(max_length=60)
+    description = models.TextField(max_length=1000, blank=True)
+    version = models.CharField(max_length=20, blank=True)
+    created = models.DateTimeField()
+    updated = models.DateTimeField()
+    upload_size = models.BigIntegerField(default=0)       # the upload as it came
+    upload_sha256 = models.CharField(max_length=64, blank=True)
+    file_size = models.BigIntegerField(default=0)         # the clean zip the worker wrote (what is served)
+    sha256 = models.CharField(max_length=64, blank=True)  # its SHA-256, shown on the page
+    files = models.PositiveIntegerField(default=0)
+    unpacked = models.BigIntegerField(default=0)
+    folder = models.CharField(max_length=40, blank=True)  # the download's name, and the folder in it
+    names = models.TextField(blank=True)                  # its first paths, for the moderator (JSON)
+    manifest = models.TextField(blank=True)               # mod.toml or pack.toml, cleaned (JSON)
+    reason = models.CharField(max_length=300, blank=True)  # why it was refused or hidden (the uploader sees it)
+    scanner = models.CharField(max_length=80, blank=True)
+    reviewed_by = models.CharField(max_length=150, blank=True)
+    published = models.DateTimeField(null=True, blank=True)
+    reports = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-created"]
+        verbose_name = "hub item"
+
+    def __str__(self):
+        return "%s %s (%s)" % (self.kind, self.id, self.state)
+
+
+class HubReport(models.Model):
+    MALWARE, NOT_OWN, GAME_FILES, BROKEN, OFFENSIVE, OTHER = (
+        "malware", "not-own-work", "game-files", "broken", "offensive", "other")
+    REASONS = [(MALWARE, "malware or a harmful file"), (NOT_OWN, "not the uploader's own work"),
+               (GAME_FILES, "the game's original files"), (BROKEN, "does not work"),
+               (OFFENSIVE, "offensive"), (OTHER, "something else")]
+
+    item = models.ForeignKey(HubItem, on_delete=models.CASCADE, related_name="report_set")
+    xuid = models.CharField(max_length=16)  # the reporting key
+    reason = models.CharField(max_length=12, choices=REASONS)
+    note = models.CharField(max_length=500, blank=True)
+    at = models.DateTimeField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["item", "xuid"], name="one_report_per_key")]
+        ordering = ["-at"]

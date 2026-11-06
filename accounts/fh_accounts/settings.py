@@ -231,6 +231,9 @@ ACCOUNT_RATE_LIMITS = {
     # Likes and the player's own items (members.likes). "key" is the account.
     "like": "120/h/key,500/d/key",     # likes given or taken back
     "item_delete": "20/d/key",         # photos and designs deleted from the account page
+    # The hub (members.hub). "key" is the account.
+    "hub_upload": "5/d/key,20/d/ip",   # new mods and packs
+    "hub_report": "20/d/key",          # reports
     # allauth's password and signup forms are not routed (no passwords); closed all the same.
     "login": "20/h/ip",
     "signup": "5/d/ip",
@@ -314,6 +317,31 @@ if POTM_FROM and not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", POTM_FROM):
 POTM_ACCOUNT_DAYS = int(env("FORZA_POTM_ACCOUNT_DAYS", "14"))
 POTM_TOP = 20             # entries in the public standings
 POTM_SECONDS = 60         # the standings are counted again at most this often (per worker)
+
+# ---- The mods and texture packs hub (members.hub; hub/ beside forza_live/ for its worker) ----
+
+# Off unless FORZA_HUB=1: every /api/hub/ route answers 404 and no upload is taken.
+HUB = env_flag("FORZA_HUB")
+# The folders the hub shares with its scanning worker and its download host (hub/README.md):
+# incoming (this service writes uploads and jobs; the worker reads them), checked (the worker
+# writes clean zips and results; this service reads and removes them) and public (this service
+# copies approved zips there; the download host serves it read-only). Never inside a web root.
+HUB_DIR = Path(env("FORZA_HUB_DIR", str(DATA_DIR / "hub")))
+HUB_INCOMING = Path(env("FORZA_HUB_INCOMING", str(HUB_DIR / "incoming")))
+HUB_CHECKED = Path(env("FORZA_HUB_CHECKED", str(HUB_DIR / "checked")))
+HUB_PUBLIC = Path(env("FORZA_HUB_PUBLIC", str(HUB_DIR / "public")))
+# The download host's origin, another host name than the site's: https://downloads.example
+HUB_DOWNLOADS = env("FORZA_HUB_DOWNLOADS").rstrip("/")
+if HUB and not HUB_DOWNLOADS.startswith("https://") and not (DEBUG or TESTING):
+    raise RuntimeError("FORZA_HUB=1 needs FORZA_HUB_DOWNLOADS, the download host (https://...)")
+if HUB and urlsplit(HUB_DOWNLOADS).hostname == SITE_HOST:
+    raise RuntimeError("FORZA_HUB_DOWNLOADS must be another host name than the site's")
+HUB_MAX_BYTES = int(env("FORZA_HUB_MAX_MB", "512")) << 20   # one upload
+HUB_QUOTA_BYTES = int(env("FORZA_HUB_QUOTA_GB", "50")) << 30  # everything the hub keeps on disk
+HUB_QUEUE_MAX = 100       # uploads waiting for the worker or a maintainer, in all
+HUB_OPEN_MAX = 3          # an account's items waiting (draft, uploading, queued or in review)
+HUB_REPORTS_HIDE = 3      # reports from keys that count that hide a live item until it is checked
+HUB_SECONDS = 60          # the public list is made again at most this often (per worker)
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

@@ -8,7 +8,8 @@ AdminOnlyFromAllowed: the admin (and the API docs, when on) answer only FORZA_AD
 AuthRoutes: of allauth's routes only the ones the sign-ins use exist (no password, signup or email
 management routes). FetchSiteCheck: a change (POST, PUT, PATCH, DELETE) from a browser that says
 it is not same-origin is refused, on top of Django's CSRF token and Origin checks, and our own
-API's changes must be JSON (allauth's sign-in button is a plain form, which its CSRF token guards).
+API's changes must be JSON (allauth's sign-in button is a plain form, which its CSRF token guards),
+but for a hub upload's PUT of the zip itself (members.hub checks its type).
 SessionLifetime: a session ends 30 days after its last use (refreshed at most once a day) and 90
 days after its sign-in.
 """
@@ -32,7 +33,9 @@ HEADLESS_ROUTES = {
     "auth/provider/redirect": ("POST",),
 }
 CALLBACK = re.compile(r"/api/auth/(discord|github)/login/callback/")
-PUBLIC_CACHE = ("/api/likes/counts", "/api/potm/standings", "/api/potm/winners")
+PUBLIC_CACHE = ("/api/likes/counts", "/api/potm/standings", "/api/potm/winners", "/api/hub/items")
+PUBLIC_ITEM = re.compile(r"/api/hub/items/[A-Z2-7]{12}")   # one hub item (members.hub)
+UPLOAD = re.compile(r"/api/hub/items/[A-Z2-7]{12}/file")    # a hub upload: the zip itself, not JSON
 
 
 class ApiHeaders:
@@ -47,7 +50,8 @@ class ApiHeaders:
         if request.path.startswith("/api/game/"):
             response["X-Forza-Time"] = str(int(time.time()))  # the launcher corrects its clock by it
         if request.path.startswith("/api/"):
-            if not (request.path in PUBLIC_CACHE and response.status_code in (200, 304)
+            if not ((request.path in PUBLIC_CACHE or PUBLIC_ITEM.fullmatch(request.path))
+                    and response.status_code in (200, 304)
                     and response.get("Cache-Control", "").startswith("public,")):
                 response["Cache-Control"] = "no-store"
             response["X-Content-Type-Options"] = "nosniff"
@@ -94,7 +98,8 @@ class FetchSiteCheck:
         if request.method in UNSAFE and site is not None and site != "same-origin":
             return JsonResponse({"error": "refused"}, status=403)
         if (request.method in UNSAFE and request.path.startswith("/api/") and not request.path.startswith("/api/auth/")
-                and request.content_type != "application/json"):
+                and request.content_type != "application/json"
+                and not (request.method == "PUT" and UPLOAD.fullmatch(request.path))):
             return JsonResponse({"error": "send JSON"}, status=415)
         return self.get_response(request)
 

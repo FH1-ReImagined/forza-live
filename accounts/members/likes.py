@@ -46,7 +46,9 @@ from members.models import AuditEvent, GameLink, Like
 
 log = logging.getLogger("members")
 
-Kind = Literal["photo", "design"]
+Kind = Literal["photo", "design", "mod", "pack"]  # mods and texture packs: members.hub
+ItemKind = Literal["photo", "design"]
+HUB_KINDS = ("mod", "pack")
 State = Literal["live", "pending", "held", "hidden"]
 COUNTS_MAX_AGE = 30  # Cache-Control of the public totals
 
@@ -76,7 +78,7 @@ class MineOut(Strict):
 
 
 class ItemOut(Strict):
-    kind: Kind
+    kind: ItemKind
     id: str
     title: str
     state: State
@@ -91,7 +93,7 @@ class ItemsOut(Strict):
 
 
 class ItemIn(Strict):
-    kind: Kind
+    kind: ItemKind
     id: str = Field(pattern=items.ITEM_ID)
 
 
@@ -120,14 +122,29 @@ def usable_link(user):
     return link
 
 
+def find(kind, item_id):
+    """The photo, design, mod or texture pack (members.items.Item), or None."""
+    from members import hub
+    return hub.find(kind, item_id) if kind in HUB_KINDS else items.find(kind, item_id)
+
+
+def table(kind):
+    """A lookup of the items of a kind that may be counted: get(item id) -> Item or None."""
+    from members import hub
+    if kind in HUB_KINDS:
+        return hub.live_items(kind).get
+    index = items.index().items
+    return lambda item: index.get((kind, item))
+
+
 def counts_of(kind, now=None):
     """{item id: likes that count} of the public items of a kind."""
-    index = items.index()
+    lookup = table(kind)
     # A suspended account's key (members.moderation) is left out.
     pins = dict(GameLink.objects.filter(state=GameLink.ACTIVE, user__is_active=True).values_list("xuid", "pub"))
     keys, totals = {}, Counter()
     for xuid, item in Like.objects.filter(kind=kind).values_list("xuid", "item").iterator(chunk_size=10000):
-        found = index.items.get((kind, item))
+        found = lookup(item)
         if found is None or not found.public or found.owner == xuid:
             continue
         ok = keys.get(xuid)
@@ -182,7 +199,7 @@ def like_counts(request, kind: Kind):
 def like(request, body: LikeIn):
     user = request.auth
     link = usable_link(user)
-    found = items.find(body.kind, body.item)
+    found = find(body.kind, body.item)
     if body.on:
         if found is None or not found.public:
             raise Refused(404, "not found")
@@ -205,7 +222,11 @@ def like(request, body: LikeIn):
 def likes_mine(request, kind: Kind):
     link = usable_link(request.auth)
     liked = sorted(Like.objects.filter(xuid=link.xuid, kind=kind).values_list("item", flat=True))
-    own = [i.id for i in items.index().by_owner.get(link.xuid, []) if i.kind == kind and i.public]
+    if kind in HUB_KINDS:
+        from members import hub
+        own = sorted(hub.owned(link.xuid, kind))
+    else:
+        own = [i.id for i in items.index().by_owner.get(link.xuid, []) if i.kind == kind and i.public]
     return {"kind": kind, "liked": liked, "own": own, "counted": counted(link)}
 
 
