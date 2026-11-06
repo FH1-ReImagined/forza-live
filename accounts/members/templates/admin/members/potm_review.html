@@ -1,0 +1,107 @@
+{% extends "admin/base_site.html" %}
+{% comment %}The review of a Photo of the Month month (members.admin.MonthWinnerAdmin.review):
+the standings, why likes are not votes, one entry's likes one by one, and the operator's steps.
+Every value is escaped by the template; titles and gamertags are the players' own text.{% endcomment %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a> &rsaquo;
+  <a href="{% url 'admin:members_monthwinner_changelist' %}">Photos of the Month</a> &rsaquo; {{ month }}
+</div>
+{% endblock %}
+{% block content %}
+<div id="content-main">
+  <p>Months:
+    {% for m in months %}{% if m == month %}<strong>{{ m }}</strong>{% else %}<a href="{% url 'admin:members_potm_review' month=m %}">{{ m }}</a>{% endif %}{% if not forloop.last %} &middot; {% endif %}{% endfor %}
+  </p>
+  <p><strong>{{ month }}</strong>: {{ standings.start|date:"Y-m-d H:i" }} to {{ standings.end|date:"Y-m-d H:i" }} UTC.
+    State: <strong>{{ state }}</strong>. {{ entries }} entr{{ entries|pluralize:"y,ies" }}.
+    A like is a vote when its key counts in public and its account was {{ account_days }}+ days old when it liked.</p>
+
+  {% if winner %}
+  <p>Confirmed winner: <strong>{{ winner.photo }}</strong> ({{ winner.title|default:"no title" }}, {{ winner.gamertag }}),
+    {{ winner.votes }} vote{{ winner.votes|pluralize }}, reached {{ winner.reached|date:"Y-m-d H:i:s" }} UTC;
+    confirmed by {{ winner.confirmed_by }} at {{ winner.confirmed_at|date:"Y-m-d H:i" }}.
+    To undo it, delete it from the list of Photos of the Month.</p>
+  {% elif state == "verifying" and lead %}
+    {% if can_confirm %}
+    <form method="post">{% csrf_token %}
+      <input type="hidden" name="step" value="confirm">
+      <input type="hidden" name="photo" value="{{ lead.id }}">
+      <input type="hidden" name="votes" value="{{ lead.votes }}">
+      <p>Check the leader's likes below first: void farmed likes (Likes), suspend accounts or disqualify the entry, then reload this page.</p>
+      <p><label>Note (optional): <input type="text" name="note" maxlength="200" size="60"></label>
+        <input type="submit" class="default" value="Confirm {{ lead.id }} as the Photo of the Month {{ month }} ({{ lead.votes }} vote{{ lead.votes|pluralize }})"></p>
+    </form>
+    {% else %}<p>You may not confirm winners.</p>{% endif %}
+  {% elif state == "open" or state == "upcoming" %}
+  <p>The month is not over: the winner can be confirmed from {{ standings.end|date:"Y-m-d H:i" }} UTC.</p>
+  {% endif %}
+
+  <h2>Standings</h2>
+  <table>
+    <thead><tr><th>#</th><th>Photo</th><th>Title</th><th>Gamertag</th><th>Votes</th><th>Reached (UTC)</th><th>Likes this month</th><th>Not votes</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.rank }}</td>
+        <td><a href="?photo={{ r.e.id }}">{{ r.e.id }}</a></td>
+        <td>{{ r.e.title }}</td>
+        <td>{{ r.gamertag }}</td>
+        <td>{{ r.e.votes }}</td>
+        <td>{{ r.e.reached|date:"Y-m-d H:i:s"|default:"-" }}</td>
+        <td>{{ r.e.likes }}</td>
+        <td>{% for why, n in r.not_counted %}{{ n }}: {{ why }}{% if not forloop.last %}<br>{% endif %}{% empty %}-{% endfor %}</td>
+        <td>{% if can_disqualify and not winner %}
+          <form method="post">{% csrf_token %}
+            <input type="hidden" name="step" value="disqualify"><input type="hidden" name="photo" value="{{ r.e.id }}">
+            <input type="text" name="note" maxlength="200" placeholder="why" required>
+            <input type="submit" value="Disqualify">
+          </form>{% endif %}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="9">No entries.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if disqualified %}
+  <h2>Disqualified</h2>
+  <table>
+    <thead><tr><th>Photo</th><th>Why</th><th>When</th><th>By</th><th></th></tr></thead>
+    <tbody>
+    {% for d in disqualified %}
+      <tr><td>{{ d.photo }}</td><td>{{ d.note }}</td><td>{{ d.at|date:"Y-m-d H:i" }}</td><td>{{ d.by }}</td>
+        <td>{% if can_disqualify and not winner %}<form method="post">{% csrf_token %}
+          <input type="hidden" name="step" value="requalify"><input type="hidden" name="photo" value="{{ d.photo }}">
+          <input type="submit" value="Put back"></form>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if shown %}
+  <h2>The likes of {{ shown }} during {{ month }}</h2>
+  <p>Many new accounts, accounts linked just before liking, keys with few signed days or keys that liked little else are worth a closer look (Likes, Accounts).</p>
+  <table>
+    <thead><tr><th>Liked (UTC)</th><th>Vote</th><th>Account</th><th>Account age then (days)</th><th>Linked</th><th>Key (XUID)</th><th>First signed sign-in</th><th>Signed days</th><th>Photo likes that month</th></tr></thead>
+    <tbody>
+    {% for v in voters %}
+      <tr>
+        <td>{{ v.at|date:"Y-m-d H:i:s" }}</td>
+        <td>{% if v.vote %}yes{% else %}no: {{ v.why }}{% endif %}</td>
+        <td>{{ v.account|default:"not linked" }}</td>
+        <td>{{ v.account_days|default_if_none:"-" }}</td>
+        <td>{{ v.linked_at|date:"Y-m-d"|default:"-" }}</td>
+        <td><a href="{% url 'admin:members_like_changelist' %}?key={{ v.key }}">{{ v.key }}</a></td>
+        <td>{{ v.first_signed|date:"Y-m-d H:i"|default:"-" }}</td>
+        <td>{{ v.signed_days|default_if_none:"-" }}</td>
+        <td>{{ v.likes_this_month }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="9">No likes during the month.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

@@ -11,6 +11,7 @@ game server's own code (forza_live.core.auth), imported from the repository (or 
 import atexit
 import ipaddress
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -301,6 +302,18 @@ LIKES_PURGE_GRACE_DAYS = 7
 GAME_URL = env("FORZA_GAME_URL").rstrip("/") or None
 OWNER_TOKEN = env("FORZA_OWNER_TOKEN")
 GAME_TIMEOUT = 10
+
+# ---- Photo of the Month (members.potm) ----
+
+# The first contest month, YYYY-MM (UTC). Unset: no contest, and its routes answer 404.
+POTM_FROM = env("FORZA_POTM_FROM")
+if POTM_FROM and not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", POTM_FROM):
+    raise RuntimeError("FORZA_POTM_FROM is a month, YYYY-MM (README.md, Photo of the Month)")
+# A like counts for the contest only when the account linked to its key was at least this many
+# days old when the like was given (on top of the public totals' rules).
+POTM_ACCOUNT_DAYS = int(env("FORZA_POTM_ACCOUNT_DAYS", "14"))
+POTM_TOP = 20             # entries in the public standings
+POTM_SECONDS = 60         # the standings are counted again at most this often (per worker)
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

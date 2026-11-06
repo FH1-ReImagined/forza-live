@@ -2,8 +2,8 @@
 
 ApiHeaders: every /api/ answer is no-store and nosniff, and carries no CORS header; OPTIONS is
 405; the launcher's calls (/api/game/) also get the server's clock (X-Forza-Time). The public
-like totals (/api/likes/counts, the same for everybody) keep the short public cache their view
-sets.
+like totals (/api/likes/counts) and Photo of the Month's standings and winners (/api/potm/...),
+the same for everybody, keep the short public cache their views set.
 AdminOnlyFromAllowed: the admin (and the API docs, when on) answer only FORZA_ADMIN_ALLOW.
 AuthRoutes: of allauth's routes only the ones the sign-ins use exist (no password, signup or email
 management routes). FetchSiteCheck: a change (POST, PUT, PATCH, DELETE) from a browser that says
@@ -32,7 +32,7 @@ HEADLESS_ROUTES = {
     "auth/provider/redirect": ("POST",),
 }
 CALLBACK = re.compile(r"/api/auth/(discord|github)/login/callback/")
-PUBLIC_CACHE = ("/api/likes/counts",)
+PUBLIC_CACHE = ("/api/likes/counts", "/api/potm/standings", "/api/potm/winners")
 
 
 class ApiHeaders:

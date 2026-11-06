@@ -18,6 +18,10 @@ Like is a thumbs-up for a community photo or design (members.likes). It belongs 
 liked what is never shown; only the totals are public. MissingItem is a liked item that the
 nightly purge (members.moderation) no longer found in the game server's files, and since when:
 its likes go once it has been missing for LIKES_PURGE_GRACE_DAYS.
+
+MonthWinner is a Photo of the Month the operator confirmed (members.potm), with what the
+standings said when they did: it stays when the photo or its likes go later. Disqualified is a
+photo the operator took out of one month's contest (it stays in the gallery).
 """
 
 import secrets
@@ -112,7 +116,8 @@ class Like(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["xuid", "kind", "item"], name="one_like_per_key")]
-        indexes = [models.Index(fields=["kind", "item"], name="likes_of_an_item")]
+        indexes = [models.Index(fields=["kind", "item"], name="likes_of_an_item"),
+                   models.Index(fields=["kind", "at"], name="likes_by_time")]  # a month's (members.potm)
 
 
 class MissingItem(models.Model):
@@ -122,3 +127,40 @@ class MissingItem(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["kind", "item"], name="one_missing_row_per_item")]
+
+
+class MonthWinner(models.Model):
+    """A confirmed Photo of the Month. Its month is "YYYY-MM" (UTC)."""
+    month = models.CharField(max_length=7, unique=True)
+    photo = models.CharField(max_length=12)
+    votes = models.PositiveIntegerField()  # the likes that counted for the contest
+    reached = models.DateTimeField()       # when the photo reached that count (the tie-break)
+    title = models.CharField(max_length=40, blank=True)
+    gamertag = models.CharField(max_length=15)
+    owner = models.CharField(max_length=16)  # the owner's XUID, for the operator only
+    confirmed_at = models.DateTimeField()
+    confirmed_by = models.CharField(max_length=150)  # the operator's username
+    note = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["-month"]
+        verbose_name = "Photo of the Month"
+        verbose_name_plural = "Photos of the Month"
+
+    def __str__(self):
+        return "%s: %s" % (self.month, self.photo)
+
+
+class Disqualified(models.Model):
+    """A photo out of a month's contest (vote manipulation, not the player's own, the rules)."""
+    month = models.CharField(max_length=7)
+    photo = models.CharField(max_length=12)
+    note = models.CharField(max_length=200)
+    at = models.DateTimeField()
+    by = models.CharField(max_length=150)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["month", "photo"], name="one_disqualification_per_entry")]
+        ordering = ["-month", "-at"]
+        verbose_name = "disqualified entry"
+        verbose_name_plural = "disqualified entries"
