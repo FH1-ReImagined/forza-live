@@ -16,8 +16,8 @@ photos and designs. One Python 3 program, standard library only.
 - **TCP 21201**: the title services the game asks Turn 10's servers for, a JSON status page at
   `/status`, and the community photos and designs the website shows.
 
-The launcher's default is the public server; its **This PC** mode runs this server on the
-player's own machine, and **My own server** connects to one you host.
+The launcher's default is the public server; in its **Online > Servers**, **This PC** runs this
+server on the player's own machine, and a server added by its address connects to one you host.
 
 ## Layout
 
