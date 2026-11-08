@@ -251,7 +251,7 @@ only when they are plain files, never through a link.
 
 Both sides approve every link, so a token, code or address that leaks is useless alone:
 
-1. In the launcher, Settings > Online > Website account > **Link**. The launcher signs
+1. In the launcher, Online > Online > Website account > **Link**. The launcher signs
    `game/link/start`. The service checks the signature with the key `friends.json` binds the
    XUID to (`forza_live.core.auth.check_request`: the server name `forza.dyotson.dev` only, the
    120-second clock window, the nonce used once in every worker), that the XUID is not banned,

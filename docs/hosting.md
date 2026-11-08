@@ -100,8 +100,8 @@ publishes are in the pages listed under [Going further](#going-further).
    Both lines should say PASS. (It checks the TCP port one above the UDP port: give it the
    UDP tunnel's address only when the TCP tunnel's port is that one plus 1.)
 
-8. Players connect in the launcher: **Settings**, **Online**, **My own server**, then type
-   your server's address (`host`, or `host:port` when it is not 21200). Optional: list the
+8. Players connect in the launcher: **Online > Servers**, **Add a server** with your server's
+   address (`host`, or `host:port` when it is not 21200), then select it and **Use this server**. Optional: list the
    names players type in `.env` (`FORZA_SERVER_NAMES=your.domain.example`, comma separated,
    without the port), so the server refuses signatures made for other servers.
 
