@@ -365,8 +365,9 @@ class GiftTest(Base):
         note, = notifications.pending(A_XUID)
         self.assertEqual((note["type"], note["params"]["Amount"]),
                          (notifications.GIFT_CREDITS, ob.GIFT_CREDITS))
-        status, ctype, body, extra = ob.handle(None, "GET", "/challenges/progress", {}, b"",
-                                               lambda *a: A_XUID)
+        with mock.patch("time.time", return_value=WED):   # the week the races were in
+            status, ctype, body, extra = ob.handle(None, "GET", "/challenges/progress", {}, b"",
+                                                   lambda *a: A_XUID)
         doc = json.loads(body)
         self.assertEqual(doc["gift"], {"credits": 10000, "after": 3})
         self.assertEqual(doc["player"]["gift"]["finished"], 3)
