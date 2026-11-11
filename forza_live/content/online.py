@@ -16,7 +16,9 @@ Public route, on the title services port (no side effects):
            count, social/discord_status.py); Co-op Festival worlds (friends only) are not in it
   racing   the players in a race or match: in a Races or Playground Games lobby, a custom
            game other than Free Roam (public or private), or a world whose event round is
-           running (world.WORLDS.racing); at most `players`
+           running (world.WORLDS.racing); each player once (a set of the sessions'
+           members, whichever sessions it published), plus the filled slots a host's record
+           has beyond its known members; at most `players`
 
 Counts only: never a gamertag, XUID, player id, session id or address. Counted from the
 server's memory (ForzaLive.lobby_rooms, the same lobby view as the Discord message and the
@@ -52,13 +54,15 @@ def counts(status, racing_worlds, world_playlists):
     enough). racing_worlds: the session ids (hex) of the worlds whose event round runs;
     world_playlists: the world playlists' keys (lsp.WORLD_HOPPERS)."""
     players = discord_status.visible_players(status)
-    worlds = racing = 0
-    for (_, sid), s in discord_status.sessions(status).items():
+    worlds = unnamed = 0
+    racers = set()  # each player once: its match record and a standby record can be two sessions
+    for (room, sid), s in discord_status.sessions(status).items():
         if s["name"] == discord_status.FIND_GAME[3]:
             worlds += 1
         if sid in racing_worlds or not free_roam(s["playlist"], s["game_type"], world_playlists):
-            racing += discord_status.session_players(s)
-    return players, worlds, min(racing, players)
+            racers.update((room, member) for member in s["members"])
+            unnamed += discord_status.session_players(s) - len(s["members"])  # host's slots only
+    return players, worlds, min(len(racers) + unnamed, players)
 
 
 def feed(server, world_playlists, now=None):
@@ -75,6 +79,12 @@ def feed(server, world_playlists, now=None):
                        "worlds": worlds, "racing": racing}, separators=(",", ":")).encode()
     _memo.update(server=server, at=now, body=body)
     return body
+
+
+def quiet(path, status):
+    """Whether the request log skips this answer: the feed is polled through the website's
+    cache, so only its errors (status 400 and up) are logged."""
+    return status < 400 and path.split("?", 1)[0] == PATH
 
 
 def handle(server, method, world_playlists):

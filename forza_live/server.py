@@ -38,6 +38,7 @@ from forza_live.social import discord_status
 from forza_live.social import friends
 from forza_live.competition import events
 from forza_live.core import limits
+from forza_live.content import online
 from forza_live.title_services import lsp
 from forza_live.network import proxy
 from forza_live.panel import routes as panel
@@ -1648,8 +1649,9 @@ async def http_handler(server, reader, writer):
                     answer = 500, "text/plain", b"error"
                 status, content_type, data = answer[:3]
                 extra = tuple(answer[3]) if len(answer) > 3 else ()  # e.g. ETag, Cache-Control
-                log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, path, status,
-                         len(data))
+                if not online.quiet(path, status):  # the polled players-online feed: errors only
+                    log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, path, status,
+                             len(data))
                 reply = response(status, data, content_type, conn + extra)
             writer.write(reply)
             await writer.drain()

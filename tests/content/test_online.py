@@ -134,6 +134,30 @@ class OnlineFeedTest(unittest.TestCase):
         self.host(a, b"races001", RACES, filled=8)  # its record says 8, one game is here
         self.assertEqual(self.feed(), (1, 0, 1))
 
+    def test_a_player_in_two_racing_sessions_counts_once(self):
+        a, b, c = (self.player(n) for n in "ABC")
+        self.host(a, b"races001", RACES, filled=2)  # a hosts a race b is in
+        self.join(b, b"races001", RACES)
+        self.host(b, b"races002", RACES)  # b's match record: a lobby of its own
+        self.assertEqual(self.feed(), (3, 0, 2))  # a and b, b once (c: single player)
+        d, e = self.player("D"), self.player("E")
+        self.host(d, b"world001", lsp.WORLD_HOPPER, filled=2)  # d's world, e in it
+        self.join(e, b"world001", lsp.WORLD_HOPPER)
+        self.host(e, b"races003", RACES)  # e's match record: a race lobby
+        self.assertEqual(self.feed(), (5, 1, 3))  # a, b, e
+        world.WORLDS.racing.add(b"world001")  # its event round: d and e race there
+        self.assertEqual(self.feed(), (5, 1, 4))  # a, b, d, e: e once
+
+    def test_the_feed_is_not_in_the_request_log(self):
+        with self.assertNoLogs("forza-live", "INFO"):
+            self.http("GET")
+            self.http("GET", online.PATH + "?t=1")
+        self.assertTrue(online.quiet(online.PATH, 200))
+        self.assertFalse(online.quiet(online.PATH, 405))  # errors are logged
+        self.assertFalse(online.quiet("/community/gallery.json", 200))
+        with self.assertLogs("forza-live", "INFO"):
+            self.http("GET", "/community/gallery.json")
+
     def test_no_player_data_in_the_feed(self):
         a = self.player("SecretTag", proxied=True)
         self.host(a, b"world001", lsp.WORLD_HOPPER)

@@ -941,6 +941,8 @@ def handle(server, method, path, headers, body, peer):
         log.info("LSP %s.%s (%d bytes)", headers.get("x-classname", "?").split(",")[0],
                  headers.get("x-method", "?"), len(body))
         return 200, "bin/xtsw", service_call(headers, body, server, method, path)
+    if url.path == online.PATH:  # players online now, for the website (online.py): polled,
+        return online.handle(server, method, WORLD_HOPPERS)  # so not in the request log
     log.info("LSP request %s %s (%d bytes)", method, path, len(body))
     if url.path.startswith("/shader-lists"):  # players' shader lists (shader_lists.py)
         answer = shader_lists.handle(server, method, path, headers, body)
@@ -965,8 +967,6 @@ def handle(server, method, path, headers, body, peer):
     if design_feed.handles(url.path):  # designs on the website (design_feed.py)
         return design_feed.handle(method, path, headers, body,
                                   lambda: is_local_admin(peer, headers))
-    if url.path == online.PATH:  # players online now, for the website (online.py)
-        return online.handle(server, method, WORLD_HOPPERS)
     if community.handles(url.path):  # community photos (community.py)
         return community.handle(method, path, headers, body,
                                 lambda: is_local_admin(peer, headers))
