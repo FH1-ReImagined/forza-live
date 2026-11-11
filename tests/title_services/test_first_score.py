@@ -1,6 +1,6 @@
 """firstScore in players/<XUID>.json: when the player first had a result on this server's boards.
-The website accounts service links a website account only to a key whose record has it (and a
-signed sign-in, firstSigned). A result from a call carrying the player's own key sets it (a speed
+The website accounts service links a website account only to a key whose record has it, and
+counts that key's likes. A result from a call carrying the player's own key sets it (a speed
 trap, speed zone, event time or 1000 Club medal, a best or not); an unverified caller's does not.
 Players who had results before the server kept it get it at the start, from the rows the boards
 already rank and the unranked rows of games from before signed requests ("unverified"), not the
@@ -84,7 +84,7 @@ class Live(tli.Base):
             self.submit(A_XUID, 45.0, board=TRAP, kind=scores.SPEED_TRAP, trusted=False)
         self.assertEqual(self.record(), {"gamertag": "DriverA", "logons": 1})
         # Its unranked row is a game's from before signed requests: counted at the next start (a
-        # link still needs a sign-in signed by the bound key, firstSigned, and the key's signature).
+        # link still needs a request signed by the key the XUID is bound to).
         self.assertEqual(scores.first_results(), {"%016X" % A_XUID: 1_800_000_000})
         self.assertEqual(lsp.backfill_first_scores(), 1)
         self.assertEqual(self.record()["firstScore"], 1_800_000_000)

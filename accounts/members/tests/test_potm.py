@@ -1,8 +1,9 @@
 """Photo of the Month (members.potm), against the game server's data folder that test_likes makes.
 
 Eligibility: a like is a vote only when it was given during the month, by a key whose likes count
-in public (linked, active, pinned, not suspended, not banned, signed sign-ins old enough), whose
-linked account was POTM_ACCOUNT_DAYS old when it liked, and not the owner's; the other likes stay
+in public (linked, active, pinned, not suspended, not banned, a result on the boards), whose
+linked account was POTM_ACCOUNT_DAYS old when it liked when that is set (0 by default: these tests
+set 14), and not the owner's; the other likes stay
 in the public totals. Entries: public photos uploaded during the month (UTC), not disqualified.
 Month boundaries in UTC (the first second is in, the end is out, December to January, February
 in a leap year). The tie-break: the earliest to reach the final count, then the earlier upload,
@@ -96,6 +97,16 @@ class Eligibility(PotmTest):
         e = {x.id: x for x in s.entries}[P1]
         self.assertEqual((e.votes, e.likes), (2, 3))
         self.assertEqual(e.not_counted, {potm.TOO_NEW: 1})
+
+    def test_no_account_age_by_default(self):
+        from fh_accounts import settings as defaults
+        self.assertEqual(defaults.POTM_ACCOUNT_DAYS, 0)
+        at = NOV_START + timedelta(days=10)
+        new = self.voter(joined=at - timedelta(seconds=30))  # linked half a minute before it liked
+        self.vote(new, P1, at)
+        with override_settings(POTM_ACCOUNT_DAYS=defaults.POTM_ACCOUNT_DAYS):
+            e = {x.id: x for x in self.count().entries}[P1]
+        self.assertEqual((e.votes, e.likes, e.not_counted), (1, 1, {}))
 
     def test_the_account_s_age_is_taken_when_it_liked_not_now(self):
         at = NOV_START + timedelta(days=5)

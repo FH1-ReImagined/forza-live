@@ -290,8 +290,8 @@ LINK_CODES_OFF_MINUTES = 10  # codes stop this long after too many wrong ones (l
 # ---- Likes and the player's own items (members.likes, members.items) ----
 
 # The photos and designs are read from FORZA_GAME_DATA too (community.json, designs.json). A
-# key's likes count in public as soon as it qualifies for its link (a signed sign-in and a result
-# on the boards: members.game.played). A wait can be added: its first sign-in signed by its key
+# key's likes count in public as soon as it qualifies for its link (a result on the boards at any
+# time, a speed trap is enough: members.game.played). A wait can be added: its first sign-in signed by its key
 # LIKES_AFTER_HOURS old and signed sign-ins on LIKES_SIGNED_DAYS days (the game server's
 # firstSigned and signedDays). Both 0, no wait, by default.
 LIKES_AFTER_HOURS = int(env("FORZA_LIKES_AFTER_HOURS", "0"))
@@ -315,8 +315,8 @@ POTM_FROM = env("FORZA_POTM_FROM")
 if POTM_FROM and not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", POTM_FROM):
     raise RuntimeError("FORZA_POTM_FROM is a month, YYYY-MM (README.md, Photo of the Month)")
 # A like counts for the contest only when the account linked to its key was at least this many
-# days old when the like was given (on top of the public totals' rules).
-POTM_ACCOUNT_DAYS = int(env("FORZA_POTM_ACCOUNT_DAYS", "14"))
+# days old when the like was given (on top of the public totals' rules). 0, no age rule, by default.
+POTM_ACCOUNT_DAYS = int(env("FORZA_POTM_ACCOUNT_DAYS", "0"))
 POTM_TOP = 20             # entries in the public standings
 POTM_SECONDS = 60         # the standings are counted again at most this often (per worker)
 

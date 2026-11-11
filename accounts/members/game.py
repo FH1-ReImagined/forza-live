@@ -4,9 +4,10 @@ The game server (forza_live/) keeps its data in FORZA_GAME_DATA, which this serv
 read-only. It reads, with the game server's own code:
 - friends.json (forza_live.social.friends.Store): the public key each XUID is bound to, read
   again whenever the file changes;
-- players/<XUID>.json (forza_live.core.durable): the gamertag, the signed sign-ins (firstSigned,
-  signedDays: forza_live.title_services.lsp.signed_logon) and the first result on the boards
-  (firstScore: lsp.first_score, and lsp.backfill_first_scores for results from before it);
+- players/<XUID>.json (forza_live.core.durable): the gamertag, the first result on the boards
+  (firstScore: lsp.first_score, and lsp.backfill_first_scores for results from before it) and,
+  for the optional likes wait only, the signed sign-ins (firstSigned, signedDays:
+  forza_live.title_services.lsp.signed_logon);
 - banned_xuids.json (forza_live.content.designs.banned_xuids);
 - community.json and designs.json, the photos and designs (members.items).
 
@@ -110,20 +111,22 @@ def stamp(record, field):
 
 
 def played(record):
-    """The player's record qualifies its key for a link, and its link's likes to count: a sign-in
-    signed by its key (firstSigned) and a result on the boards (firstScore: a speed trap, speed
-    zone, event time or 1000 Club medal from its own key, or one kept before the game server
-    noted it). Only the game server writes them."""
-    return stamp(record, "firstSigned") is not None and stamp(record, "firstScore") is not None
+    """The player's record qualifies its key for a link, and its link's likes to count: a result
+    on the boards (firstScore: a speed trap, speed zone, event time or 1000 Club medal, from
+    before the game server noted them too, lsp.backfill_first_scores). Only the game server
+    writes it. The key itself is proven by the signed request and its binding: the game server
+    binds an XUID to a public key only on a HELLO that key signed (forza_live.core.auth.hello),
+    and every call here is signed by the key the XUID is bound to now."""
+    return stamp(record, "firstScore") is not None
 
 
 def counted(xuid_hex, pinned_pub, now=None):
     """The key's likes count in public: it is still bound to the public key its link pinned, it
-    is not banned, and its record is played(). With LIKES_AFTER_HOURS or LIKES_SIGNED_DAYS set
-    (both 0 by default: no wait), its first sign-in signed by its key (firstSigned) is also that
-    many hours old, with signed sign-ins on that many days (signedDays). Only the game server
-    writes those, and only for a sign-in its key signed, so nobody can age a key before binding
-    it."""
+    is not banned, and its record is played() (the caller leaves out suspended accounts). With
+    LIKES_AFTER_HOURS or LIKES_SIGNED_DAYS set (both 0 by default: no wait), its first sign-in
+    signed by its key (firstSigned) must also be that many hours old, with signed sign-ins on
+    that many days (signedDays). Only the game server writes those, and only for a sign-in its
+    key signed, so nobody can age a key before binding it."""
     xuid = int(xuid_hex, 16)
     pub = bound_pub(xuid)
     if pub is None or not hmac.compare_digest(pub, pinned_pub) or banned(xuid):
@@ -131,9 +134,14 @@ def counted(xuid_hex, pinned_pub, now=None):
     record = player(xuid)
     if not played(record):
         return False
+    if not settings.LIKES_AFTER_HOURS and not settings.LIKES_SIGNED_DAYS:
+        return True
+    first = stamp(record, "firstSigned")
+    if first is None:
+        return False
     now = time.time() if now is None else now
     days = stamp(record, "signedDays") or 0
-    return now - record["firstSigned"] >= settings.LIKES_AFTER_HOURS * 3600 and days >= settings.LIKES_SIGNED_DAYS
+    return now - first >= settings.LIKES_AFTER_HOURS * 3600 and days >= settings.LIKES_SIGNED_DAYS
 
 
 def hex_xuid(xuid):

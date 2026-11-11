@@ -56,7 +56,7 @@ readers, and uses them on the game server's data folder, mounted read-only.
   signed with the player's key (`X-Forza-Auth`).
 - This service reads the game server's data folder (`FORZA_GAME_DATA`, mounted read-only):
   `friends.json` for the public key each XUID is bound to, `players/<XUID>.json` for the gamertag,
-  the signed sign-ins and the first result on the boards, `banned_xuids.json`, and `community.json` and `designs.json` for the
+  the first result on the boards (and the signed sign-ins, for the optional likes wait), `banned_xuids.json`, and `community.json` and `designs.json` for the
   photos and designs and who owns them.
 - It calls the game server for one thing only: deleting a player's own photo or design, through
   the game server's owner-only route (`forza_live/content/owners.py`, `FORZA_GAME_URL`,
@@ -98,7 +98,7 @@ the reason, so the launcher can correct its clock and try once more.
 
 | Route | Answer |
 |-------|--------|
-| `POST /api/game/link/start` | `{"v": 1}` -> `{"id", "url", "code", "expires"}`: `url` is `https://forza.dyotson.dev/account.html#link=<token>` for the browser, `code` (`K7M2-QXPA`) for another device. 403 `not available` (banned), 409 `play online first` (no gamertag, signed sign-in or result on the boards on the game server yet: see "The game link"; the answer's `message` says what to do: "Upload one speed trap first: in game, with the Public server picked, drive through any speed trap camera, then try again."), 429 `changed in the past day` or `too many requests` |
+| `POST /api/game/link/start` | `{"v": 1}` -> `{"id", "url", "code", "expires"}`: `url` is `https://forza.dyotson.dev/account.html#link=<token>` for the browser, `code` (`K7M2-QXPA`) for another device. 403 `not available` (banned), 409 `play online first` (no gamertag or result on the boards on the game server yet: see "The game link"; the answer's `message` says what to do: "Upload one speed trap first: in game, with the Public server picked, drive through any speed trap camera, then try again."), 429 `changed in the past day` or `too many requests` |
 | `GET /api/game/link/<id>` | `{"state", "account", "replaces"}`: `pending`, `claimed` (with `account: {"id", "method", "created"}` and `replaces`, the account the key is linked to now), `linked`, `declined`, `cancelled` or `expired` |
 | `POST /api/game/link/<id>/confirm` | `{"account": "K7Q2-XM4P"}`, the account the player was shown -> `{"ok": true, "state": "linked"}`; 409 when it is not that request's claimer |
 | `POST /api/game/link/<id>/cancel` | `{}` -> `{"ok": true, "state": "declined"}` ("Not me") |
@@ -123,11 +123,12 @@ away; its `message` asks the player to play on the Public server again).
 
 Which likes count in the public totals (`members.game.counted`): those of a key whose link is
 active, whose account is not suspended, whose XUID is still bound to the pinned key and not banned, and
-whose record qualifies it for its link (`members.game.played`: a signed sign-in, `firstSigned`,
-and a result on the boards, `firstScore`, both written by the game server). They count as soon as
-it links: there is no wait by default. The operator can add one with `FORZA_LIKES_AFTER_HOURS`
-(the first sign-in signed by the key that many hours old) and `FORZA_LIKES_SIGNED_DAYS` (signed
-sign-ins on that many days). A key that does not qualify yet keeps its likes, which count once it
+whose record qualifies it for its link (`members.game.played`: a result on the boards at any
+time, `firstScore`, written by the game server, also for results from before this rule). Nothing
+else is needed: they count as soon as it links, with no wait by default. The operator can add one with `FORZA_LIKES_AFTER_HOURS`
+(the first sign-in signed by the key, `firstSigned`, that many hours old) and
+`FORZA_LIKES_SIGNED_DAYS` (signed sign-ins on that many days); with either set, a key with no
+signed sign-in waits too. A key that does not qualify yet keeps its likes, which count once it
 does. A frozen, banned or unlinked key's likes are kept but not counted; deleting the account
 deletes them. Self-likes are refused, and only items in the public feeds are counted (the same
 rules as the game server's feeds: `community.public`, `design_feed.on_site`, and their caps).
@@ -171,10 +172,12 @@ and are counted again at most once a minute in each worker. They name no voter, 
   month, and that the operator did not disqualify for that month.
 - **Votes:** a like is a vote when it was given during the month, not by the photo's owner, by a
   key whose likes count in the public totals now (see "Likes": active and pinned link, account not
-  suspended, XUID not banned, a signed sign-in and a result on the boards), and when the account linked
-  to that key now was at least `FORZA_POTM_ACCOUNT_DAYS` (14) days old at the time of the like.
+  suspended, XUID not banned, a result on the boards). Nothing else by default; with
+  `FORZA_POTM_ACCOUNT_DAYS` set (`0`, off, by default) the account linked to that key now must
+  also have been that many days old at the time of the like.
   Every other like still counts in the public totals; it is just not a vote. A like taken back is
-  no vote. Moving a link to a newer account makes the key's earlier likes too new.
+  no vote. With an account age set, moving a link to a newer account makes the key's earlier
+  likes too new.
 - **Order:** the most votes; then the entry that reached its count first (the time of its latest
   vote); then the earlier upload; then the photo id.
 - **Verification:** once the month is over its state is `verifying`. The operator looks at the
@@ -258,9 +261,8 @@ Both sides approve every link, so a token, code or address that leaks is useless
    `game/link/start`. The service checks the signature with the key `friends.json` binds the
    XUID to (`forza_live.core.auth.check_request`: the server name `forza.dyotson.dev` only, the
    120-second clock window, the nonce used once in every worker), that the XUID is not banned,
-   and that `players/<XUID>.json` has a gamertag, a signed sign-in (`firstSigned`, which the
-   game server writes only for a sign-in signed by the player's key) and a result on the boards
-   (`firstScore`: one speed trap is enough; see "Who can link" below). It makes a request for 10
+   and that `players/<XUID>.json` has a gamertag and a result on the boards (`firstScore`: one
+   speed trap is enough, also one from before this rule; see "Who can link" below). It makes a request for 10
    minutes, with a token (256 bits) and a code (8 characters); it keeps only their HMACs.
 2. The launcher opens `account.html#link=<token>` in the browser (or shows the code, to type at
    `account.html` on another device). The page moves the token out of the address, has the
@@ -289,21 +291,24 @@ Rules:
 ### Who can link
 
 The key must be bound to its XUID on the game server with a public key (the launcher's sign-in),
-not banned, and `players/<XUID>.json` must have a gamertag, `firstSigned` and `firstScore`
+not banned, and `players/<XUID>.json` must have a gamertag and `firstScore`
 (`members.game.played`). The game server writes `firstScore` the first time it takes a result
 from a call that carries the player's own key: a speed trap, a speed zone, an event time or Rivals
-lap, or a 1000 Club medal, a best or not (`forza_live.title_services.lsp.first_score`). The game
-signs in to the title services (Logon2, which writes `firstSigned`) the first time it uses them,
-so for a new player one speed trap with the Public server picked does both.
+lap, or a 1000 Club medal, a best or not (`forza_live.title_services.lsp.first_score`). For a new
+player one speed trap with the Public server picked is enough.
+
+A signed sign-in (`firstSigned`) is not needed: it would prove only what the link request
+already does. The game server binds an XUID to a public key only on a HELLO signed by that key
+(`forza_live.core.auth.hello`: the first one, or an upgrade that also carries the old friends
+key), and every link call must be signed by the key the XUID is bound to now.
 
 Players who had results before this rule need no new upload: at every start the game server
 gives `firstScore` to each player record that lacks it and whose XUID has a row on a board or a
 1000 Club medal (`lsp.backfill_first_scores`, the time of the earliest row). The unranked rows of
 unverified callers (games from before signed requests) count too; rows kept off for a too-fast
 time or a refused ghost do not, and an XUID without a record gets none. An XUID with results
-but no signed sign-in yet (its game before signed requests) gets `firstScore` but cannot link
-until its game signs in once (an up-to-date launcher and game, the Public server picked): no new
-score is needed then. An XUID bound only to a raw friends key cannot link at all (401, as any
+but no signed sign-in (its game before signed requests) links as soon as its key is bound (an
+up-to-date launcher and game): no new score is needed. An XUID bound only to a raw friends key cannot link at all (401, as any
 refused signature) until the game binds its public key. A result never lets anyone link an XUID:
 every link call is signed by the key the XUID is bound to, and the link pins that key.
 
@@ -342,7 +347,7 @@ file (mode 600) that only this container reads. Never commit it.
 | `FORZA_SMTP_FROM` | `signin@<site host>` | the sender |
 | `FORZA_ACCOUNTS_EMAIL_DAILY` | `200` | code mails a day in all; then email sign-in pauses until the day has passed. Keep it under the relay's own daily cap |
 | `FORZA_POTM_FROM` | none | the first Photo of the Month, `YYYY-MM` (UTC). Without it there is no contest and its routes answer 404 |
-| `FORZA_POTM_ACCOUNT_DAYS` | `14` | how old an account must have been when it liked for the like to be a vote |
+| `FORZA_POTM_ACCOUNT_DAYS` | `0` | how old an account must have been when it liked for the like to be a vote (`0`: no age rule) |
 | `FORZA_HUB` | off | `1` turns the mods and texture packs hub on |
 | `FORZA_HUB_DOWNLOADS` | none | the download host's origin (`https://...`), another host name than the site's; required with `FORZA_HUB=1` |
 | `FORZA_HUB_INCOMING`, `FORZA_HUB_CHECKED`, `FORZA_HUB_PUBLIC` | `$FORZA_ACCOUNTS_DATA/hub/...` | the folders shared with the scanning worker and the download host (`hub/README.md`) |
@@ -593,11 +598,13 @@ Differences from the design (M2):
   each new link.
 - `firstSigned` (and `signedDays`, `lastSignedDay`) is written by the game server's Logon2 for a
   sign-in signed by the player's key (`forza_live.title_services.lsp.signed_logon`, the design's
-  M0 piece, in the same change).
-- **A link also needs a result on the boards** (`firstScore`, 2026-11): the player must have
-  uploaded at least one speed trap (or any other score) to the public server, not only signed in.
-  Playing online in a lobby is not needed. Likes and the rest count as soon as the link is made
-  (the 72-hour, 2-day wait is off by default; see `FORZA_LIKES_AFTER_HOURS`).
+  M0 piece, in the same change). Since 2026-11 only the optional likes wait reads it.
+- **A link needs a result on the boards, and nothing more** (`firstScore`, 2026-11): the player
+  must have uploaded at least one speed trap (or any other score) to the public server at any
+  time, before this rule too, and no signed sign-in. Playing online in a lobby is not needed.
+  Likes, Photo of the Month votes and hub reports count as soon as the link is made (the 72-hour,
+  2-day wait and the 14-day account age are off by default; see `FORZA_LIKES_AFTER_HOURS` and
+  `FORZA_POTM_ACCOUNT_DAYS`).
 
 Differences from the design (M3):
 - **The items that can be liked come from the game server's data files**, not from fetching its

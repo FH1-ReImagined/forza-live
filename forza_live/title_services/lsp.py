@@ -335,8 +335,9 @@ PERMISSIONS = [{"MethodId": i, "Tier": 0, "IsEnabled": True, "Access": 0} for i 
 def signed_logon(record, now):
     """A sign-in signed by the player's own key: firstSigned (its time), signedDays (the UTC days
     with one) and lastSignedDay. The website accounts service (accounts/, website #4) reads them
-    to link a website account only to a key that has signed in here. An unsigned or forged
-    sign-in adds nothing, so nobody can age an XUID before its key is bound."""
+    only for its optional likes wait (FORZA_LIKES_AFTER_HOURS, FORZA_LIKES_SIGNED_DAYS, off by
+    default). An unsigned or forged sign-in adds nothing, so nobody can age an XUID before its
+    key is bound."""
     day = now // 86400
     record.setdefault("firstSigned", now)
     if record.get("lastSignedDay") != day:
@@ -367,8 +368,8 @@ def _has_first_score(xuid, record):
 def first_score(xuid):
     """firstScore in the player's record: when it first got a result on this server's boards (a
     speed trap, speed zone, event time or 1000 Club medal from a call that carries its own key:
-    scores.SCORED). The website accounts service links a website account to a key only when its
-    record has this and a signed sign-in (firstSigned). A player without a record (none, or
+    scores.SCORED). The website accounts service links a website account to a key, and counts
+    its likes, only when its record has this. A player without a record (none, or
     unreadable) gets none: Logon2 makes it."""
     stamp = _stamp(xuid)
     if stamp is None or _scored.get(xuid) == stamp:

@@ -14,8 +14,9 @@ The rules (the website's photo-of-the-month-rules.html says the same to players)
   did not disqualify for that month (Disqualified).
 - A like is a vote when it was given during the month, not by the photo's owner, by a key whose
   likes count in the public totals now (members.likes.counts_of: the link active and pinned, the
-  account not suspended, the XUID not banned, the key's first signed sign-in old enough), and
-  the account linked to that key now was at least POTM_ACCOUNT_DAYS old when the like was given.
+  account not suspended, the XUID not banned, a result on the boards), and, when
+  POTM_ACCOUNT_DAYS is set (0, no age rule, by default), the account linked to that key now was
+  at least that many days old when the like was given.
   Other likes still show on the photo (the public totals) but are not votes. A like taken back
   is gone, and so is its vote.
 - The most votes wins. A tie goes to the entry that reached its count first: the time of its

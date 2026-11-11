@@ -16,9 +16,10 @@ confirms the account it was shown. A token, code or address that leaks is useles
     POST /api/link/claim                 {"token"} or {"code"}: this account claims it
     POST /api/link/remove                {}: needs a sign-in in the past 10 minutes
 
-1. The launcher starts a request. The key must be bound on the game server, not banned, and
-   have a gamertag, a signed sign-in and a result on the boards there (members.game.played: a
-   speed trap is enough). It gets a token (256 bits, for the browser's
+1. The launcher starts a request, signed by the key the XUID is bound to on the game server
+   (which binds a key only on a HELLO that key signed). The XUID must not be banned and have a
+   gamertag and a result on the boards there, at any time (members.game.played: a speed trap is
+   enough). It gets a token (256 bits, for the browser's
    address, never shown) and a code (8 characters, for another device). A new request ends the
    XUID's previous one.
 2. In the browser the signed-in account peeks (sees the gamertag) and claims it.

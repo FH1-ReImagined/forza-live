@@ -89,9 +89,9 @@ The first result a signed-in player gets on the boards (a speed trap, speed zone
 1000 Club medal) is noted in its record (`players/<XUID>.json`, `firstScore`); at each start the
 server notes it for the players whose rows are older than that (also unranked rows from games
 before signed requests; not too-fast ones or refused ghosts). The website accounts service
-(`accounts/`) links a website account only to a player with one, and with a sign-in signed by its
-key (`firstSigned`): one speed trap uploaded to the server is enough, playing in a lobby is not
-needed.
+(`accounts/`) links a website account only to a player with one, and counts its likes, votes
+and reports from then on: one speed trap uploaded to the server at any time is enough, playing in
+a lobby or a signed sign-in is not needed.
 
 What the game is told about its own best (`GetBestScores`, the personal best of
 `GetRivalAndPersonalBest`: it submits a time only when it beats this, FH1 #569) follows from

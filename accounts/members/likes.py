@@ -13,8 +13,8 @@ that moved gains nothing. Only items in the public feeds can be liked (members.i
 the key's own.
 
 A like counts in the public totals when the key that gave it counts (members.game.counted):
-its link active and pinned, its account not suspended, not banned, and a signed sign-in and a
-result on the boards on the game server (a speed trap is enough). LIKES_AFTER_HOURS and
+its link active and pinned, its account not suspended, not banned, and a result on the boards
+of the game server at any time, before this rule too (a speed trap is enough). LIKES_AFTER_HOURS and
 LIKES_SIGNED_DAYS can add a wait (none by default). Who liked what is never
 shown. The totals are counted again at most every LIKE_COUNTS_SECONDS in each worker; the
 website's builder copies them into the pages, and signed-in visitors' pages ask for them live.
