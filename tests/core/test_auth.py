@@ -5,6 +5,7 @@ challenge and binding on first use; the upgrade from a raw friends key and the r
 after it; a conflicting upgrade; what a stolen stored value can do (nothing); raw keys until
 --raw-key-cutoff. Drives the server's handlers directly."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -355,6 +356,73 @@ class SignedCallTest(Base):
         self.assertEqual(results[:2], [(0, 0), (0, 0)])
         self.assertEqual(results[2:], [(2, 5), (2, 5)])
         self.assertEqual(auth.COUNTS["refused busy"], 2)
+
+    def spent(self):
+        """The server's check budget spent, refilling only after a test's worth of time."""
+        auth._budget[:] = [0.0, time.monotonic()]
+        patcher = mock.patch.object(auth, "VERIFY_RATE", (0.001, 2))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def http_logon(self, seed=SEED):
+        """Logon2 as the HTTP handler answers it: (status, content type, reply)."""
+        headers = {"x-classname": "Forza.WebServices.User, Forza.WebServices",
+                   "x-method": "Logon2", "x-userid": "0x%x" % XUID}
+        body = bytes(x.encode(x.UserLogon2_Params, {"loginData": {
+            "qwXuid": XUID, "wzGamerTag": "DriverA", "currentCareerLevel": 3}}))
+        headers[auth.HEADER] = auth.auth_header(seed, MAIN, XUID, "POST", TITLE, body, headers)
+        return asyncio.run(srv.lsp_answer(self.server, "POST", TITLE, headers, body,
+                                          ("127.0.0.1", 50000)))
+
+    def test_a_busy_check_is_not_a_forged_call(self):
+        self.spent()
+        headers = {"x-userid": "0x%x" % XUID}
+        headers[auth.HEADER] = auth.auth_header(SEED, MAIN, XUID, "POST", TITLE, b"", headers)
+        self.assertEqual(lsp.verify_caller(self.server, XUID, headers, "POST", TITLE, b""),
+                         lsp.BUSY)
+        with mock.patch.object(lsp.log, "warning") as warned:
+            self.assertEqual(self.race_stats(1), lsp.BUSY_REPLY)
+        warned.assert_not_called()  # not "not signed by its own key: refused"
+        self.assertIsNone(self.last_race())
+        self.assertEqual(self.status(self.read()), (0, 0))  # reads are answered
+
+    def test_a_busy_logon_is_checked_again(self):
+        self.spent()
+        waits = []
+
+        async def wait(seconds):  # the budget refills while the handler waits
+            waits.append(seconds)
+            if len(waits) == 2:
+                auth._budget[0] = 5.0
+
+        with mock.patch.object(srv.asyncio, "sleep", wait):
+            status, _, reply = self.http_logon()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.status(reply), (0, 0))  # signed in
+        self.assertEqual(waits, [srv.BUSY_WAIT] * 2)
+        self.assertEqual(auth.COUNTS["refused replay"], 0)  # the same nonce, checked again
+        self.assertEqual(auth.COUNTS["signed"], 1)
+
+    def test_still_busy_after_the_retries(self):
+        self.spent()
+
+        async def wait(seconds):
+            pass
+
+        with mock.patch.object(srv.asyncio, "sleep", wait):
+            status, _, reply = self.http_logon()
+        self.assertEqual((status, reply), (200, lsp.BUSY_REPLY))
+        self.assertEqual(auth.COUNTS["refused busy"], srv.BUSY_RETRIES + 1)
+        self.assertEqual(auth.COUNTS["busy after retries"], 1)
+
+    def test_a_forged_logon_is_not_retried(self):
+        async def wait(seconds):
+            raise AssertionError("waited for a forged call")
+
+        with mock.patch.object(srv.asyncio, "sleep", wait):
+            status, _, reply = self.http_logon(seed=SEED_B)
+        self.assertEqual(self.status(reply), (2, 5))
+        self.assertNotEqual(reply, lsp.BUSY_REPLY)
 
 
 class UdpSignInTest(Base):

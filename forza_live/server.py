@@ -129,6 +129,25 @@ MAX_PEERS_PER_IP = 16  # registered players behind one public address (a LAN, a 
 PACKETS_PER_IP = (2500, 5000)
 HELLOS_PER_IP = (2, 20)  # new registrations/s and burst from one address
 ERRORS_PER_IP = (2, 10)  # "not registered" replies/s and burst to one address
+# ERROR codes (u8 code, u16 length, text). The game logs every one ("server error N: text") and
+# says HELLO again at once after 1; it says HELLO every second anyway until it is welcomed.
+#   1 not registered (an unknown address: the server restarted, or the game spoke first)
+#   2 protocol version   3 server full   4 kicked or banned   5 needs event unlocks (TU4)
+#   6 too many sign-ins from this address (HELLOS_PER_IP): the game's next HELLO may get in.
+#     Not 1, which would make the game say HELLO again at once.
+ERR_SLOW_DOWN = 6
+# An address whose player was kicked or banned (a dropped game, or a refused HELLO) is kept for
+# REMOVED_KEEP s, at most REMOVED_MAX of them: its game's other packets get error 4 with the
+# reason, not "not registered" (which only makes it say HELLO again). Its HELLOs are checked
+# afresh: a lifted ban lets it in at once.
+REMOVED_KEEP = 600.0
+REMOVED_MAX = 4096
+# HELLO refusals (codes 2-6, malformed HELLOs) are logged at most once per address and reason
+# in REFUSAL_LOG_SECONDS, for operators asked "why can't X join".
+REFUSAL_LOG_SECONDS = 300.0
+REFUSAL_LOG_MAX = 20000
+REMOVED = {"banned": "banned from this server",  # drop() reason -> error 4 text
+           "kicked by the admin": "removed by the server admin"}
 # PROXY protocol v2 on UDP (--proxy-protocol-udp, proxy.py). A playit agent sends
 # its header only when it opens a flow, and closes a flow at most 106 s after the player's
 # last datagram (90 s, checked every 16 s). A header is believed only as the first datagram
@@ -244,6 +263,8 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.packet_buckets = {}  # ip -> token bucket of datagrams accepted
         self.hello_buckets = {}
         self.error_buckets = {}
+        self.removed = {}  # (ip, port) -> (error 4 text, monotonic time it is forgotten)
+        self.refusals_logged = {}  # (limit key, reason) -> monotonic time last logged
         self.per_ip = {}  # ip -> registered peers
         self.max_peers = max_peers
         self.epoch = random.randrange(1, 0x10000)  # changes when the server restarts
@@ -310,6 +331,48 @@ class ForzaLive(asyncio.DatagramProtocol):
         """Whether an error reply to addr is within ERRORS_PER_IP (its source may be forged)."""
         return take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP)
 
+    def tell_refusal(self, addr, reason, detail, xuid=None, name=None):
+        """Logs a refused HELLO at info, at most once per address and reason in
+        REFUSAL_LOG_SECONDS."""
+        now = time.monotonic()
+        key = (self.limit_key(addr), reason)
+        if now - self.refusals_logged.get(key, -REFUSAL_LOG_SECONDS) < REFUSAL_LOG_SECONDS:
+            return
+        if len(self.refusals_logged) >= REFUSAL_LOG_MAX:
+            self.refusals_logged.clear()
+        self.refusals_logged[key] = now
+        who = " xuid %016X %r" % (xuid, name) if xuid is not None else ""
+        log.info("refused HELLO from %s:%d%s: %s", addr[0], addr[1], who, detail)
+
+    def refuse(self, addr, code, message, xuid, name):
+        """A HELLO refused with an error (rate limited: the sender's address may be forged),
+        logged (tell_refusal). Error 4 remembers the address (removed_from)."""
+        self.tell_refusal(addr, code, "%s (error %d)" % (message, code), xuid, name)
+        if code == 4:
+            self.remember_removed(addr, message)
+        if self.take_error(addr):
+            self.error(addr, code, message)
+
+    def remember_removed(self, addr, message):
+        now = time.monotonic()
+        self.removed.pop(addr, None)
+        self.removed[addr] = (message, now + REMOVED_KEEP)
+        while self.removed:
+            oldest, (_, until) = next(iter(self.removed.items()))
+            if until > now and len(self.removed) <= REMOVED_MAX:
+                break
+            del self.removed[oldest]
+
+    def removed_from(self, addr):
+        """Why the player at addr was kicked or banned in the last REMOVED_KEEP s, or None."""
+        entry = self.removed.get(addr)
+        if entry is None:
+            return None
+        if entry[1] <= time.monotonic():
+            del self.removed[addr]
+            return None
+        return entry[0]
+
     def datagram_received(self, data, addr):
         if self.proxy_udp and limits.is_trusted_proxy(addr[0]):
             # the tunnel agent's socket of one player's flow: every datagram, its header
@@ -339,13 +402,20 @@ class ForzaLive(asyncio.DatagramProtocol):
                 return
             peer = self.by_addr.get(addr)
             if peer is None:
-                # Unknown sender (e.g. the server restarted): ask it to register again
-                # (rate limited: the sender's address may be forged).
+                # Unknown sender (e.g. the server restarted): ask it to register again, or tell
+                # a kicked or banned player why it is not (rate limited: the sender's address
+                # may be forged).
+                removed = self.removed_from(addr)
                 if take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP):
-                    self.error(addr, 1, "not registered")
+                    if removed is not None:
+                        self.error(addr, 4, removed)
+                    else:
+                        self.error(addr, 1, "not registered")
                 return
             if peer.xuid in bans.cached():  # banned while online (core/bans.py): nothing more
                 self.drop(peer, "banned")
+                if self.take_error(addr):
+                    self.error(addr, 4, REMOVED["banned"])
                 return
             peer.seen = time.monotonic()
             self.restored.discard(peer.id)
@@ -514,35 +584,41 @@ class ForzaLive(asyncio.DatagramProtocol):
         return peer.addr
 
     def on_hello(self, body, addr):
-        version, token, xuid, local_ip, local_port = struct.unpack_from(">HQQIH", body, 0)
-        pos = 24
-        room_len = body[pos]
-        room = body[pos + 1:pos + 1 + room_len].decode("utf-8", "replace")[:MAX_ROOM]
-        pos += 1 + room_len
-        name_len = body[pos]
-        name = limits.clean_gamertag(body[pos + 1:pos + 1 + name_len].decode("utf-8", "replace"), xuid)
-        pos += 1 + name_len
+        try:
+            version, token, xuid, local_ip, local_port = struct.unpack_from(">HQQIH", body, 0)
+            pos = 24
+            room_len = body[pos]
+            room = body[pos + 1:pos + 1 + room_len].decode("utf-8", "replace")[:MAX_ROOM]
+            pos += 1 + room_len
+            name_len = body[pos]
+            name = limits.clean_gamertag(body[pos + 1:pos + 1 + name_len].decode("utf-8", "replace"),
+                                         xuid)
+            pos += 1 + name_len
+        except (struct.error, IndexError):
+            self.tell_refusal(addr, "malformed", "malformed (%d bytes)" % len(body))
+            return
         features = body[pos] if pos < len(body) else 0
         signed = body[:pos + 1]  # what a HELLO's signature covers (auth.py)
         friend_key = b""  # after the features byte: u8 length + an auth block or the friends key
         if pos + 1 < len(body):
             friend_key = body[pos + 2:pos + 2 + body[pos + 1]]
         if version != VERSION:
+            self.tell_refusal(addr, 2, "server speaks protocol %d, client %d (error 2)"
+                              % (VERSION, version), xuid, name)
             self.error(addr, 2, f"server speaks protocol {VERSION}, client {version}")
             return
         if self.events.required and not features & events.FEATURE:
+            self.tell_refusal(addr, 5, "no event-unlock support (error 5)", xuid, name)
             self.error(addr, 5, "this server requires event-unlock support (TU4)")
             return
         if self.chat.banned(xuid):  # /admin/kick
-            if take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP):
-                self.error(addr, 4, "removed by the server admin")
+            self.refuse(addr, 4, REMOVED["kicked by the admin"], xuid, name)
             return
         if bans.banned(xuid):  # the operator's ban list (core/bans.py): no sign-in at all
             peer = self.by_addr.get(addr)
             if peer is not None:
                 self.drop(peer, "banned")
-            if take(self.error_buckets, self.limit_key(addr), ERRORS_PER_IP):
-                self.error(addr, 4, "banned from this server")
+            self.refuse(addr, 4, REMOVED["banned"], xuid, name)
             return
         flow, real = self.flow_public(addr, (token, xuid))  # PROXY protocol: its flow's address
         peer = self.by_addr.get(addr)
@@ -559,10 +635,11 @@ class ForzaLive(asyncio.DatagramProtocol):
             # whole-server cap and the per-tunnelled-player rates stay.
             if len(self.peers) >= self.max_peers or (
                     not proxied and self.per_ip.get(addr[0], 0) >= MAX_PEERS_PER_IP):
-                if take(self.error_buckets, key, ERRORS_PER_IP):
-                    self.error(addr, 3, "server full")
+                self.refuse(addr, 3, "server full", xuid, name)
                 return
             if not take(self.hello_buckets, key, HELLOS_PER_IP):
+                self.refuse(addr, ERR_SLOW_DOWN,
+                            "too many sign-ins from this address, trying again", xuid, name)
                 return
             back = self.take_gone(token, xuid)
             if back is None:
@@ -588,6 +665,7 @@ class ForzaLive(asyncio.DatagramProtocol):
             self.state_dirty = True
         peer.seen = time.monotonic()
         self.restored.discard(peer.id)
+        self.removed.pop(addr, None)  # signed in again: its packets are its own now
         if peer.proxied and peer.real_addr != real:
             peer.real_addr = real
             self.state_dirty = True
@@ -1342,6 +1420,8 @@ class ForzaLive(asyncio.DatagramProtocol):
                 self.per_ip[peer.addr[0]] = left
             else:
                 self.per_ip.pop(peer.addr[0], None)
+        if why in REMOVED:  # its game's next packets are told why (error 4), not "not registered"
+            self.remember_removed(peer.addr, REMOVED[why])
         log.info("leave #%d %r (%s)", peer.id, peer.name, why)
         self.friends.came_or_went(peer.xuid)
 
@@ -1452,6 +1532,31 @@ class ForzaLive(asyncio.DatagramProtocol):
 # single-player free roam) was never sent and timed out (0x80500010, "The Forza Horizon
 # server is not available") until the game found its title server again minutes later.
 KEEP_ALIVE_IDLE = 6 * 3600
+
+
+# A title service call whose signature the server had no budget to check (auth.VERIFY_RATE, under
+# load) is answered lsp.BUSY_REPLY: the server checks it again up to BUSY_RETRIES times,
+# BUSY_WAIT s apart (the budget refills meanwhile), before that is the answer. The game's
+# Logon2 would otherwise fail as a forged one does (the Horizon server shown as unavailable).
+# The signature's nonce is remembered only once it checked out, so a check again is no replay.
+BUSY_RETRIES = 4
+BUSY_WAIT = 0.25
+
+
+async def lsp_answer(server, method, path, headers, body, peer):
+    """lsp.handle's answer, checked again while it is lsp.BUSY_REPLY (BUSY_RETRIES)."""
+    for attempt in range(BUSY_RETRIES + 1):
+        if attempt:
+            await asyncio.sleep(BUSY_WAIT)
+        try:
+            answer = lsp.handle(server, method, path, headers, body, peer)
+        except Exception:  # a bad request must not take the server down
+            log.exception("LSP %s %s failed", method, path)
+            return 500, "text/plain", b"error"
+        if answer[2] != lsp.BUSY_REPLY:
+            return answer
+    auth.COUNTS["busy after retries"] += 1
+    return answer
 
 
 async def read_request(reader, idle=15):
@@ -1642,11 +1747,7 @@ async def http_handler(server, reader, writer):
                 reply = response(200, json.dumps(result, indent=2).encode(), "application/json",
                                  conn)
             else:
-                try:
-                    answer = lsp.handle(server, method, path, headers, body, peer)
-                except Exception:  # a bad request must not take the server down
-                    log.exception("LSP %s %s failed", method, path)
-                    answer = 500, "text/plain", b"error"
+                answer = await lsp_answer(server, method, path, headers, body, peer)
                 status, content_type, data = answer[:3]
                 extra = tuple(answer[3]) if len(answer) > 3 else ()  # e.g. ETag, Cache-Control
                 if not online.quiet(path, status):  # the polled players-online feed: errors only
