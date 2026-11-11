@@ -691,7 +691,12 @@ SERVICES = {
 #               longer use, or neither for an XUID that has a key on record (its game always
 #               signs, so a call without it is someone else's): calls that change anything are
 #               refused, reads are answered
-TRUSTED, UNVERIFIED, FORGED = "trusted", "unverified", "forged"
+#   BUSY        a signature not checked: the server's budget for checks was spent (auth.py,
+#               under load). Nothing is wrong with the call: one that changes anything gets
+#               BUSY_REPLY, which the HTTP handler takes for "check it again in a moment"
+#               (server.py lsp_answer); reads are answered
+TRUSTED, UNVERIFIED, FORGED, BUSY = "trusted", "unverified", "forged", "busy"
+BUSY_REPLY = x.failure(5, "server busy, try again")
 _caller = contextvars.ContextVar("lsp_caller", default=UNVERIFIED)
 _signed = contextvars.ContextVar("lsp_signed", default=False)
 READ_PREFIXES = ("Get", "Search", "Download")
@@ -714,13 +719,15 @@ def caller_signed():
 
 
 def verify_caller(server, xuid, headers, method="POST", path="", body=b""):
-    """TRUSTED, UNVERIFIED or FORGED for a call's X-UserId and its X-Forza-Auth signature
+    """TRUSTED, UNVERIFIED, FORGED or BUSY for a call's X-UserId and its X-Forza-Auth signature
     (or the X-Friends-Key of a game before signed requests)."""
     store = server.friends.store if server is not None else None
     if not auth.bound(store, xuid):
         return UNVERIFIED
     checked = auth.check_request(store, method, path, headers, body)
     if checked is not None:
+        if not checked.ok and checked.why == "busy" and checked.xuid == xuid:
+            return BUSY
         return TRUSTED if checked.ok and checked.xuid == xuid else FORGED
     given = headers.get("x-friends-key")
     if given is None:
@@ -766,6 +773,8 @@ def service_call(headers, body, server=None, http_method="POST", path="/Services
         # fails as a forged one does, which the game shows as a server it cannot sign in to.
         return x.failure(5, BANNED)
     state = verify_caller(server, xuid, headers, http_method, path, body)
+    if state == BUSY and changes_state(short, method):
+        return BUSY_REPLY  # auth.py counted and logged it
     if state == FORGED and changes_state(short, method):
         log.warning("title: %s.%s for %016X %s: refused", cls, method, xuid,
                     "not signed by its own key" if auth.HEADER in headers or "x-friends-key"

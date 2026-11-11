@@ -179,7 +179,8 @@ that was requested but not taken.
 ## Limits (all untrusted input)
 
 - per address (not for `--trusted-proxy` addresses): 16 players, 2500 datagrams/s, 2 new registrations/s, 32 HTTP connections
-  (they stay open while idle: the game needs that);
+  (they stay open while idle: the game needs that). A sign-in over the registration rate gets
+  "server error 6: too many sign-ins from this address" (the game tries again by itself);
 - per player: relay budget 256 KB/s (`--rate-limit`), 30 open auctions, 50 unretrieved
   gifts, 100 shared cars, 4 game invites per 30 s (the rest are dropped and logged);
   one upload at most 2 MB (a signed game's photo mode big shot: 32 MiB, in 256 KiB requests),

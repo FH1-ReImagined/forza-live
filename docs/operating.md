@@ -518,6 +518,28 @@ forza-relay --restart unless-stopped --network host -v /path/to/secret:/secret:r
 
 Players prove their XUID with a key pair, and the operator can let a new installation in or set a cutoff for old games; the options are in [configuration](configuration.md#signed-requests). Watch the `auth` block of the status page and the `auth: raw friends keys ... since start` log line before setting `--raw-key-cutoff`.
 
+The server checks at most 500 signatures a second (bursts of 1000). Under more load a title
+service call whose signature waits for a check is not taken for a forged one: the server checks
+it again for up to a second, and only then answers that it is busy. `refused busy` and `busy after
+retries` in the `auth` block count those.
+
+## Why a player cannot sign in
+
+The game logs every refusal as `FORZA_LIVE: server error N: <text>`, and the server logs each
+refused sign-in (`refused HELLO from <address> xuid <XUID> '<gamertag>': <reason> (error N)`) at
+most once per address and reason every 5 minutes:
+
+| Error | Meaning |
+|---|---|
+| 1 `not registered` | a packet from an address with no sign-in (the server restarted, or the game spoke before its HELLO): the game signs in again at once. Harmless when `signed in to` follows. |
+| 2 | another protocol version |
+| 3 `server full` | the player cap, or 16 players from one address |
+| 4 | kicked or banned. For 10 minutes the game's other packets get error 4 with the same text too, not error 1. |
+| 5 | the server requires event-unlock support (`--event-unlocks`) and the game has none |
+| 6 `too many sign-ins from this address` | over 2 new sign-ins a second from one address: the game's next HELLO may get in |
+
+A HELLO that cannot be read is logged as `malformed`.
+
 ## Website accounts
 
 The project website's accounts (sign-in with Discord, GitHub or an emailed code) are a separate
