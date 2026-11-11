@@ -104,6 +104,7 @@ class Eligibility(PotmTest):
         # Weeks later the account is old, but it was 3 days old when it liked.
         self.assertEqual(self.table(), [(P1, 0), (P2, 0), (P3, 0)])
 
+    @override_settings(LIKES_AFTER_HOURS=72, LIKES_SIGNED_DAYS=2)  # the operator's wait, when set
     def test_keys_that_do_not_count_in_public_do_not_vote(self):
         at = NOV_START + timedelta(days=10)
         cases = {
@@ -113,6 +114,9 @@ class Eligibility(PotmTest):
             # its first signed sign-in 12 hours before the review
             "new key": self.voter(first_days=(time.time() - ts(AFTER) + 43200) / 86400),
         }
+        unscored = self.voter()
+        self.unscored(int(unscored, 16))  # no result on the boards
+        cases["no score"] = unscored
         frozen = self.voter()
         GameLink.objects.filter(xuid=frozen).update(state=GameLink.FROZEN)
         cases["frozen"] = frozen
@@ -541,7 +545,8 @@ class Scale(PotmTest):
             self.friends["%016X" % xuid] = {"name": "K%d" % i, "seen": now, "key": "", "pub": pub, "friends": {},
                                             "in": {}, "out": {}, "blocked": {}}
             (self.data / "players" / ("%016X.json" % xuid)).write_text(json.dumps(
-                {"gamertag": "K%d" % i, "firstSigned": now - 3000 * 86400, "signedDays": 3}))
+                {"gamertag": "K%d" % i, "firstSigned": now - 3000 * 86400, "signedDays": 3,
+                 "firstScore": now - 3000 * 86400}))
             links.append(GameLink(xuid="%016X" % xuid, pub=pub, user=user, gamertag="K%d" % i, linked_at=OLD))
         self.write_friends()
         GameLink.objects.bulk_create(links)

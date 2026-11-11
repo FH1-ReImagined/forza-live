@@ -17,7 +17,8 @@ confirms the account it was shown. A token, code or address that leaks is useles
     POST /api/link/remove                {}: needs a sign-in in the past 10 minutes
 
 1. The launcher starts a request. The key must be bound on the game server, not banned, and
-   have a gamertag and a signed sign-in there. It gets a token (256 bits, for the browser's
+   have a gamertag, a signed sign-in and a result on the boards there (members.game.played: a
+   speed trap is enough). It gets a token (256 bits, for the browser's
    address, never shown) and a code (8 characters, for another device). A new request ends the
    XUID's previous one.
 2. In the browser the signed-in account peeks (sees the gamertag) and claims it.
@@ -60,6 +61,9 @@ log = logging.getLogger("members")
 CODES_OFF = "fh:link-codes-off"
 LINKS_HALF_WARNED = "fh:links-half-warned"
 REQUEST_ID = re.compile(r"[0-9a-f]{32}")
+# What the launcher and the site show for 409 "play online first" (the error itself stays).
+UPLOAD_FIRST = ("Upload one speed trap first: in game, with the Public server picked, drive through any speed "
+                "trap camera, then try again.")
 State = Literal["pending", "claimed", "declined", "linked", "cancelled", "expired"]
 
 
@@ -268,8 +272,8 @@ def link_start(request, body: StartIn):
     if game.banned(xuid):
         raise Refused(403, "not available")
     tag = game.gamertag(xuid)
-    if not tag or not isinstance(game.player(xuid).get("firstSigned"), int):
-        raise Refused(409, "play online first")
+    if not tag or not game.played(game.player(xuid)):
+        raise Refused(409, "play online first", message=UPLOAD_FIRST)
     if not may_change(request, change_keys(hx)):
         raise Refused(429, "changed in the past day")
     spend(request, "link_start", "x:" + hx)

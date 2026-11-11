@@ -290,10 +290,12 @@ LINK_CODES_OFF_MINUTES = 10  # codes stop this long after too many wrong ones (l
 # ---- Likes and the player's own items (members.likes, members.items) ----
 
 # The photos and designs are read from FORZA_GAME_DATA too (community.json, designs.json). A
-# key's likes count in public once its first sign-in signed by its key is LIKES_AFTER_HOURS old
-# and it has signed in on LIKES_SIGNED_DAYS days (the game server's firstSigned and signedDays).
-LIKES_AFTER_HOURS = 72
-LIKES_SIGNED_DAYS = 2
+# key's likes count in public as soon as it qualifies for its link (a signed sign-in and a result
+# on the boards: members.game.played). A wait can be added: its first sign-in signed by its key
+# LIKES_AFTER_HOURS old and signed sign-ins on LIKES_SIGNED_DAYS days (the game server's
+# firstSigned and signedDays). Both 0, no wait, by default.
+LIKES_AFTER_HOURS = int(env("FORZA_LIKES_AFTER_HOURS", "0"))
+LIKES_SIGNED_DAYS = int(env("FORZA_LIKES_SIGNED_DAYS", "0"))
 LIKE_COUNTS_SECONDS = 60  # the public totals are counted again at most this often (per worker)
 # The likes of a photo or design that is no longer in community.json or designs.json (the operator
 # deleted it, the game removed it, the screening took it down) are deleted once it has been missing

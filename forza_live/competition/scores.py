@@ -244,16 +244,48 @@ def migrate(boards):
 
 
 STORE = Store()
+# Called with the XUID of each result a signed-in player's call gets on the boards (a speed trap,
+# speed zone, event time or 1000 Club medal, a best or not): lsp.first_score keeps firstScore in
+# the player's record, which the website's accounts service reads.
+SCORED = None
 
 
-def configure(data_dir, server=None):
-    global DATA_DIR, SERVER_ID, _server_id
+def configure(data_dir, server=None, scored=None):
+    global DATA_DIR, SERVER_ID, SCORED, _server_id
     DATA_DIR = data_dir
     if server is not None:
         SERVER_ID = server
+    SCORED = scored
     _server_id = None
     STORE.__init__()
     score_token.configure()
+
+
+def scored(xuid):
+    if SCORED is not None:
+        SCORED(xuid)
+
+
+def first_results():
+    """{XUID hex: the time of its earliest kept result} for every player with a row on a board or
+    a 1000 Club medal: what a player had before the server kept firstScore (lsp.backfill_first_scores).
+    Ranked rows only: an unranked one (an unverified caller's) is nobody's proof."""
+    STORE.load()
+    out = {}
+
+    def add(key, at):
+        at = at if isinstance(at, (int, float)) and not isinstance(at, bool) and at > 0 else 0
+        if key not in out or (at and (not out[key] or at < out[key])):
+            out[key] = int(at)
+
+    for board in STORE.boards.values():
+        for key, e in board.items():
+            if isinstance(e, dict):
+                add(key, e.get("submitted"))
+    for key, e in STORE.club.items():
+        if isinstance(e, dict) and isinstance(e.get("cars"), dict) and club_medals(e):
+            add(e.get("xuid", key), e.get("submitted"))
+    return out
 
 
 def better(new, old, bigger):
@@ -457,6 +489,7 @@ def submit(xuid, gamertag, kind, data, extra=None):
         log.warning("title: score token: board %s, player %s, score %.3f: %s; ranked "
                     "(--score-tokens log)", board_key(kind, sbid, stt), public_id(xuid), score,
                     problem if problem == "no start" else "too fast, " + problem)
+    scored(xuid)
     board = STORE.board(kind, sbid, stt, create=True)
     if board is None:
         return nothing
@@ -640,6 +673,8 @@ def challenge_completed(gamertag_of):
             return x.reply()
         from forza_live.competition import objectives  # it imports this module
         objectives.medal(xuid, car, thumb)  # daily and weekly challenges
+        if car != 0:
+            scored(xuid)
         STORE.load()
         key = "%016X" % xuid
         entry = STORE.club.setdefault(key, {"xuid": key, "cars": {}})

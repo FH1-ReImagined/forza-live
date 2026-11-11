@@ -571,6 +571,7 @@ def player(server, query):
            "banned": x in bans,  # from the whole server (core/bans.py)
            "key": key_state(p),
            "signed_logons": {"first": rec.get("firstSigned"), "days": rec.get("signedDays", 0)},
+           "first_score": rec.get("firstScore"),  # a website account can link with both (accounts/)
            "last_seen": int((p or {}).get("seen", 0)) or None, "last_logon": rec.get("lastLogon"),
            "logons": rec.get("logons", 0), "career_level": rec.get("careerLevel"),
            "online": online,
