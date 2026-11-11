@@ -298,8 +298,9 @@ so for a new player one speed trap with the Public server picked does both.
 
 Players who had results before this rule need no new upload: at every start the game server
 gives `firstScore` to each player record that lacks it and whose XUID has a row on a board or a
-1000 Club medal (`lsp.backfill_first_scores`, the time of the earliest row). Unranked rows (an
-unverified caller's) do not count, and an XUID without a record gets none. An XUID with results
+1000 Club medal (`lsp.backfill_first_scores`, the time of the earliest row). The unranked rows of
+unverified callers (games from before signed requests) count too; rows kept off for a too-fast
+time or a refused ghost do not, and an XUID without a record gets none. An XUID with results
 but no signed sign-in yet (its game before signed requests) gets `firstScore` but cannot link
 until its game signs in once (an up-to-date launcher and game, the Public server picked): no new
 score is needed then. An XUID bound only to a raw friends key cannot link at all (401, as any

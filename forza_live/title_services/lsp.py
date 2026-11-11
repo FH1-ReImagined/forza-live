@@ -344,22 +344,41 @@ def signed_logon(record, now):
         record["lastSignedDay"] = day
 
 
-# XUIDs whose record has firstScore, so a result does not read the record again (this process).
-_scored = set()
+# {XUID: (mtime_ns, size) of its record when it last had firstScore}: a result only stats the
+# record, and reads it again when it changed (a record put back without firstScore gets it again).
+_scored = {}
+
+
+def _stamp(xuid):
+    try:
+        st = os.stat(player_path(xuid))
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def _has_first_score(xuid, record):
+    if isinstance(record.get("firstScore"), int):
+        _scored[xuid] = _stamp(xuid)
+        return True
+    return False
 
 
 def first_score(xuid):
     """firstScore in the player's record: when it first got a result on this server's boards (a
     speed trap, speed zone, event time or 1000 Club medal from a call that carries its own key:
     scores.SCORED). The website accounts service links a website account to a key only when its
-    record has this and a signed sign-in (firstSigned)."""
-    if xuid in _scored:
+    record has this and a signed sign-in (firstSigned). A player without a record (none, or
+    unreadable) gets none: Logon2 makes it."""
+    stamp = _stamp(xuid)
+    if stamp is None or _scored.get(xuid) == stamp:
         return
     record = load_player(xuid)
-    if not isinstance(record.get("firstScore"), int):
-        record["firstScore"] = int(time.time())
-        save_player(xuid, record)
-    _scored.add(xuid)
+    if not record or _has_first_score(xuid, record):
+        return
+    record["firstScore"] = int(time.time())
+    save_player(xuid, record)
+    _has_first_score(xuid, record)
 
 
 def backfill_first_scores():
@@ -373,16 +392,15 @@ def backfill_first_scores():
             xuid = int(key, 16)
         except (TypeError, ValueError):
             continue
-        if xuid in _scored or not os.path.exists(player_path(xuid)):
+        if not os.path.exists(player_path(xuid)):
             continue
         record = load_player(xuid)
-        if not record:
+        if not record or _has_first_score(xuid, record):
             continue
-        if not isinstance(record.get("firstScore"), int):
-            record["firstScore"] = at or int(time.time())
-            save_player(xuid, record)
-            wrote += 1
-        _scored.add(xuid)
+        record["firstScore"] = at or int(time.time())
+        save_player(xuid, record)
+        _has_first_score(xuid, record)
+        wrote += 1
     if wrote:
         log.info("title: firstScore kept for %d players with results from before it", wrote)
     return wrote

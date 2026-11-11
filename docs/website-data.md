@@ -87,7 +87,8 @@ player's row.
 
 The first result a signed-in player gets on the boards (a speed trap, speed zone, event time or
 1000 Club medal) is noted in its record (`players/<XUID>.json`, `firstScore`); at each start the
-server notes it for the players whose rows are older than that. The website accounts service
+server notes it for the players whose rows are older than that (also unranked rows from games
+before signed requests; not too-fast ones or refused ghosts). The website accounts service
 (`accounts/`) links a website account only to a player with one, and with a sign-in signed by its
 key (`firstSigned`): one speed trap uploaded to the server is enough, playing in a lobby is not
 needed.

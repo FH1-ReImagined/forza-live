@@ -3,7 +3,8 @@ The website accounts service links a website account only to a key whose record 
 signed sign-in, firstSigned). A result from a call carrying the player's own key sets it (a speed
 trap, speed zone, event time or 1000 Club medal, a best or not); an unverified caller's does not.
 Players who had results before the server kept it get it at the start, from the rows the boards
-already rank (lsp.backfill_first_scores), so they need no new upload.
+already rank and the unranked rows of games from before signed requests ("unverified"), not the
+too-fast or refused-ghost ones (lsp.backfill_first_scores), so they need no new upload.
 
 The data below has the shapes the server's files have (scoreboards.json with the boards by
 "type:sbid:stt", a board from before the type was in the key, rows from before the tags, unranked
@@ -78,12 +79,52 @@ class Live(tli.Base):
         self.assertEqual(round(scores.STORE.boards[tli.BOARD]["%016X" % B_XUID]["score"], 3), 107.228)
         self.assertIn("firstScore", self.record(B_XUID))
 
-    def test_an_unverified_caller_s_result_sets_nothing(self):
-        self.submit(A_XUID, 45.0, board=TRAP, kind=scores.SPEED_TRAP, trusted=False)
+    def test_an_unverified_caller_s_result_waits_for_the_next_start(self):
+        with mock.patch("time.time", return_value=1_800_000_000):
+            self.submit(A_XUID, 45.0, board=TRAP, kind=scores.SPEED_TRAP, trusted=False)
         self.assertEqual(self.record(), {"gamertag": "DriverA", "logons": 1})
-        self.assertEqual(scores.first_results(), {})  # its row is unranked: nobody's proof
-        self.assertEqual(lsp.backfill_first_scores(), 0)
+        # Its unranked row is a game's from before signed requests: counted at the next start (a
+        # link still needs a sign-in signed by the bound key, firstSigned, and the key's signature).
+        self.assertEqual(scores.first_results(), {"%016X" % A_XUID: 1_800_000_000})
+        self.assertEqual(lsp.backfill_first_scores(), 1)
+        self.assertEqual(self.record()["firstScore"], 1_800_000_000)
+
+    def test_a_too_fast_result_sets_nothing(self):
+        with mock.patch.object(scores.score_token, "check", return_value="12.0 s after the start"), \
+                mock.patch.object(scores.score_token, "MODE", "enforce"):
+            self.submit(A_XUID, 45.0, board=TRAP, kind=scores.SPEED_TRAP)
+        self.assertTrue(scores.STORE.unranked)
         self.assertNotIn("firstScore", self.record())
+        self.assertEqual(scores.first_results(), {})
+        self.assertEqual(lsp.backfill_first_scores(), 0)
+
+    def test_a_failing_hook_does_not_fail_the_result(self):
+        with mock.patch.object(lsp, "save_player", side_effect=OSError(28, "No space left on device")), \
+                self.assertLogs("forza-live", "WARNING") as logs:
+            self.submit(A_XUID, 45.0, board=TRAP, kind=scores.SPEED_TRAP)
+        self.assertIn("%016X" % A_XUID, scores.STORE.boards["1:%d:0" % TRAP])
+        self.assertIn("firstScore of %016X not kept: [Errno 28]" % A_XUID, "\n".join(logs.output))
+        self.submit(A_XUID, 46.0, board=TRAP, kind=scores.SPEED_TRAP)  # the next one writes it
+        self.assertIn("firstScore", self.record())
+
+    def test_no_record_or_an_empty_one_gets_no_file(self):
+        missing = 0x0009000000000077
+        self.submit(missing, 45.0, board=TRAP, kind=scores.SPEED_TRAP)
+        self.assertFalse(os.path.exists(path_of(self.dir.name, missing)))
+        write(path_of(self.dir.name, A_XUID), {})
+        self.submit(A_XUID, 45.0, board=TRAP, kind=scores.SPEED_TRAP)
+        self.assertEqual(self.record(), {})
+
+    def test_a_record_put_back_without_it_gets_it_again(self):
+        with mock.patch("time.time", return_value=1_800_000_000):
+            self.submit(A_XUID, 45.0, board=TRAP, kind=scores.SPEED_TRAP)
+        self.assertIn(A_XUID, lsp._scored)
+        write(path_of(self.dir.name, A_XUID), {"gamertag": "DriverA", "logons": 2})  # a restore
+        with mock.patch("time.time", return_value=1_800_000_500):
+            self.submit(A_XUID, 46.0, board=TRAP, kind=scores.SPEED_TRAP)
+        self.assertEqual(self.record(), {"gamertag": "DriverA", "logons": 2, "firstScore": 1_800_000_500})
+        with mock.patch.object(lsp, "load_player", side_effect=AssertionError("read again")):
+            self.submit(A_XUID, 47.0, board=TRAP, kind=scores.SPEED_TRAP)  # unchanged: a stat only
 
     def test_a_1000_club_medal(self):
         done = self.svc[("Challenge", "ChallengeCompleted")]
@@ -118,6 +159,14 @@ def legacy_data(folder):
                         "0009000000000013": row("0009000000000013", 39.0, 1_790_000_200)},
         },
         "unranked": {"1:230:0": {"0009000000000014": dict(row("0009000000000014", 70.0, 1_790_000_300),
+                                                          unranked="unverified"),
+                                 # kept off for a time faster than the start allows
+                                 "0009000000000018": dict(row("0009000000000018", 90.0, 1_790_000_400),
+                                                          unranked="start: 3.0 s after the start")},
+                     "3:199:0": {"0009000000000019": dict(row("0009000000000019", 50.0, 1_790_000_400),
+                                                          type=3, unranked="ghost: wrong track")},
+                     # an unverified row older than the player's ranked one
+                     "2:101:0": {"0009000000000011": dict(row("0009000000000011", 37.0, 1_790_000_050),
                                                           unranked="unverified")}},
         # put back by hand after an outage: no "xuid"; one with no medals at all
         "club1000": {"0009000000000015": {"gamertag": "P15", "cars": {"1398": [2926979283]}},
@@ -129,10 +178,12 @@ def legacy_data(folder):
         0x11: dict(signed, gamertag="P11", logons=40),
         0x12: {"gamertag": "P12", "logons": 2},                  # only unsigned sign-ins so far
         0x13: dict(signed, gamertag="P13"),
-        0x14: dict(signed, gamertag="P14"),                       # unranked rows only
+        0x14: dict(signed, gamertag="P14"),                       # an unverified unranked row only
         0x15: dict(signed, gamertag="P15"),
         0x16: dict(signed, gamertag="P16"),
         0x17: dict(signed, gamertag="P17", firstScore=1_700_000_000),  # already has it
+        0x18: dict(signed, gamertag="P18"),                       # a too-fast unranked row only
+        0x19: dict(signed, gamertag="P19"),                       # a refused ghost's row only
     }.items():
         write(path_of(folder, 0x0009000000000000 + n), rec)
 
@@ -159,21 +210,23 @@ class Backfill(unittest.TestCase):
     def test_players_with_results_qualify_without_a_new_upload(self):
         before = read(path_of(self.dir, 0x0009000000000011))
         with self.assertLogs("forza-live", "INFO") as logs:
-            self.assertEqual(self.start(), 4)
-        self.assertIn("firstScore kept for 4 players", "\n".join(logs.output))
-        self.assertEqual(self.first(0x11), 1_790_000_100)   # its earliest row, on the old-style board
+            self.assertEqual(self.start(), 5)
+        self.assertIn("firstScore kept for 5 players", "\n".join(logs.output))
+        self.assertEqual(self.first(0x11), 1_790_000_050)   # its earliest row, an unverified one
         self.assertEqual(self.first(0x12), 1_790_000_900)   # also without a signed sign-in (see below)
         self.assertEqual(self.first(0x13), 1_790_000_200)   # banned or not: the accounts service checks bans
         self.assertIsNotNone(self.first(0x15))              # a 1000 Club medal (no time: the start's)
-        self.assertIsNone(self.first(0x14))                 # unranked rows only
+        self.assertEqual(self.first(0x14), 1_790_000_300)   # a game's from before signed requests
+        self.assertIsNone(self.first(0x18))                 # too fast for its start
+        self.assertIsNone(self.first(0x19))                 # its ghost refused
         self.assertIsNone(self.first(0x16))                 # a club entry without medals
         self.assertEqual(self.first(0x17), 1_700_000_000)   # kept as it was
         self.assertFalse(os.path.exists(path_of(self.dir, 0x0009000000000099)))  # no record made
         after = read(path_of(self.dir, 0x0009000000000011))
-        self.assertEqual(after, dict(before, firstScore=1_790_000_100))  # nothing else changes
+        self.assertEqual(after, dict(before, firstScore=1_790_000_050))  # nothing else changes
 
     def test_every_start_after_the_first_writes_nothing(self):
-        self.assertEqual(self.start(), 4)
+        self.assertEqual(self.start(), 5)
         stamp = os.stat(path_of(self.dir, 0x0009000000000011)).st_mtime_ns
         self.assertEqual(self.start(), 0)
         self.assertEqual(os.stat(path_of(self.dir, 0x0009000000000011)).st_mtime_ns, stamp)
@@ -182,7 +235,7 @@ class Backfill(unittest.TestCase):
         parser = argparse.ArgumentParser()
         lsp.add_arguments(parser)
         lsp.configure(parser.parse_args(["--data-dir", self.dir]))
-        self.assertEqual(self.first(0x11), 1_790_000_100)
+        self.assertEqual(self.first(0x11), 1_790_000_050)
         self.assertIs(scores.SCORED, lsp.first_score)
 
     def test_no_scoreboards_file(self):

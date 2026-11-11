@@ -262,14 +262,22 @@ def configure(data_dir, server=None, scored=None):
 
 
 def scored(xuid):
+    """The SCORED hook: a failure there (a full disk, the players folder) is logged and never
+    fails the result itself."""
     if SCORED is not None:
-        SCORED(xuid)
+        try:
+            SCORED(xuid)
+        except Exception as e:  # noqa: BLE001 - the score counts whatever the hook does
+            log.warning("title: firstScore of %016X not kept: %s", xuid, e)
 
 
 def first_results():
     """{XUID hex: the time of its earliest kept result} for every player with a row on a board or
     a 1000 Club medal: what a player had before the server kept firstScore (lsp.backfill_first_scores).
-    Ranked rows only: an unranked one (an unverified caller's) is nobody's proof."""
+    Also the unranked rows of unverified callers (reason "unverified": a game from before signed
+    requests): the link itself is signed by the XUID's bound key, so a row is no proof of who drove
+    it either way. Not the rows kept off for a too-fast time ("start: ...") or a refused ghost
+    ("ghost: ..."), and implausible speeds are never kept."""
     STORE.load()
     out = {}
 
@@ -281,6 +289,10 @@ def first_results():
     for board in STORE.boards.values():
         for key, e in board.items():
             if isinstance(e, dict):
+                add(key, e.get("submitted"))
+    for board in STORE.unranked.values():
+        for key, e in board.items():
+            if isinstance(e, dict) and e.get("unranked") == "unverified":
                 add(key, e.get("submitted"))
     for key, e in STORE.club.items():
         if isinstance(e, dict) and isinstance(e.get("cars"), dict) and club_medals(e):
