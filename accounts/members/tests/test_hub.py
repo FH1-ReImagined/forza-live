@@ -309,7 +309,7 @@ class Moderation(HubTest):
     def test_a_malware_report_from_a_new_key_does_not_hide(self):
         item_id = self.live()
         c, _ = self.linked("333", SEED_C, XUID_C)
-        self.age(XUID_C, days=0.5)  # its likes do not count yet
+        self.unscored(XUID_C)  # its likes do not count yet: no result on the boards
         self.assertEqual(c.post_json("/api/hub/reports", {"item": item_id, "reason": "malware"}).status_code, 200)
         self.assertEqual(HubItem.objects.get(pk=item_id).state, "live")
         self.assertEqual(HubItem.objects.get(pk=item_id).reports, 1)

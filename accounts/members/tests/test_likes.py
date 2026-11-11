@@ -4,9 +4,10 @@ and banned_xuids.json), and the owner-only delete route of the game server itsel
 (forza_live.content.owners) served on 127.0.0.1.
 
 The like rules: a linked, usable account only; public items only; never the key's own; one like
-per key. The public totals: only keys whose link is active and pinned, not banned, and whose
-first signed sign-in is 72 hours old with signed sign-ins on 2 days; a frozen, banned, unlinked or
-too new key does not count. 50,000 likes are counted in under a second. My items: the key's
+per key. The public totals: only keys whose link is active and pinned, not banned, and that have a
+result on the boards at any time (firstScore, a signed sign-in or not), at once by default, or
+after the operator's wait (LIKES_AFTER_HOURS, LIKES_SIGNED_DAYS, on firstSigned) when set; a
+frozen, banned, unlinked or unscored key does not count. 50,000 likes are counted in under a second. My items: the key's
 items in every state, and nobody else's. Deleting: a recent sign-in, the owner's item, the game
 server's own checks, and the likes go with it."""
 
@@ -80,9 +81,18 @@ class LikesTest(LinkTest):
         """The key's first signed sign-in `days` ago, with signed sign-ins on `signed_days` days."""
         path = self.data / "players" / ("%016X.json" % xuid)
         record = json.loads(path.read_text())
-        record.update(firstSigned=int(time.time()) - int(days * DAY), signedDays=signed_days)
+        record.update(firstSigned=int(time.time()) - int(days * DAY), signedDays=signed_days,
+                      firstScore=int(time.time()) - int(days * DAY))
         if tag:
             record["gamertag"] = tag
+        path.write_text(json.dumps(record))
+
+    def unscored(self, xuid):
+        """The key's record without a result on the boards (no firstScore): a key that signed in
+        but never uploaded a speed trap or any other score."""
+        path = self.data / "players" / ("%016X.json" % xuid)
+        record = json.loads(path.read_text())
+        record.pop("firstScore", None)
         path.write_text(json.dumps(record))
 
     def linked(self, uid, seed, xuid):
@@ -226,7 +236,26 @@ class Counting(LikesTest):
         for browser in (self.b, self.c):
             self.like(browser)
 
-    def test_keys_count_72_hours_after_their_first_signed_sign_in_with_2_signed_days(self):
+    def test_keys_count_as_soon_as_they_have_a_result_on_the_boards(self):
+        # No wait by default: a key that signed in a minute ago with one signed day counts.
+        self.assertEqual((settings.LIKES_AFTER_HOURS, settings.LIKES_SIGNED_DAYS), (0, 0))
+        self.age(XUID_C, days=60 / DAY, signed_days=1)
+        self.assertEqual(self.totals(), {PHOTOS[0]: 2})
+        self.assertEqual(body(self.c.get_json("/api/me"))["link"]["counted"], True)
+        self.unscored(XUID_C)  # signed in, but no speed trap (or other score) yet
+        self.assertEqual(self.totals(), {PHOTOS[0]: 1})
+        self.assertEqual(body(self.like(self.c, PHOTOS[1]))["counted"], False)  # stored, not counted yet
+        self.assertEqual(body(self.c.get_json("/api/me"))["link"]["counted"], False)
+        self.age(XUID_C, days=60 / DAY, signed_days=1)  # its first speed trap: counted at once
+        self.assertEqual(self.totals(), {PHOTOS[0]: 2, PHOTOS[1]: 1})
+        record = self.data / "players" / ("%016X.json" % XUID_C)
+        # A speed trap from before the game signed its calls (the backfill), no signed sign-in: counted.
+        record.write_text(json.dumps({"gamertag": "DriverC", "logons": 9, "firstScore": 1}))
+        self.assertEqual(self.totals(), {PHOTOS[0]: 2, PHOTOS[1]: 1})
+        self.assertEqual(body(self.c.get_json("/api/me"))["link"]["counted"], True)
+
+    @override_settings(LIKES_AFTER_HOURS=72, LIKES_SIGNED_DAYS=2)
+    def test_the_wait_still_works_when_the_operator_sets_it(self):
         self.assertEqual(self.totals(), {PHOTOS[0]: 2})
         self.age(XUID_C, days=2.9, signed_days=5)
         self.assertEqual(self.totals(), {PHOTOS[0]: 1})
@@ -235,7 +264,8 @@ class Counting(LikesTest):
         self.age(XUID_C, days=3.01, signed_days=2)
         self.assertEqual(self.totals(), {PHOTOS[0]: 2})
         record = self.data / "players" / ("%016X.json" % XUID_C)
-        record.write_text(json.dumps({"gamertag": "DriverC", "logons": 9}))  # no signed sign-in at all
+        # A speed trap but no signed sign-in: the wait has nothing to start from.
+        record.write_text(json.dumps({"gamertag": "DriverC", "logons": 9, "firstScore": 1}))
         self.assertEqual(self.totals(), {PHOTOS[0]: 1})
         self.assertEqual(body(self.like(self.c, PHOTOS[1]))["counted"], False)  # stored, not counted yet
         self.assertEqual(body(self.c.get_json("/api/me"))["link"]["counted"], False)
@@ -267,7 +297,8 @@ class Counting(LikesTest):
         del self.friends["%016X" % XUID_C]
         self.write_friends()
         self.assertEqual(self.totals(), {PHOTOS[0]: 1})
-        self.assertEqual(body(self.like(self.c, PHOTOS[1])), {"error": "play online first"})
+        self.assertEqual(body(self.like(self.c, PHOTOS[1])), {"error": "play online first",
+                                                              "message": likes.KEY_FORGOTTEN})
         self.player(XUID_C, SEED_C, "DriverC")  # the same identity signs in again
         self.age(XUID_C)
         self.assertEqual(self.totals(), {PHOTOS[0]: 2})
@@ -338,7 +369,7 @@ class Counting(LikesTest):
             self.friends["%016X" % xuid] = {"name": "K%d" % i, "seen": now, "key": "", "pub": pub, "friends": {},
                                             "in": {}, "out": {}, "blocked": {}}
             (self.data / "players" / ("%016X.json" % xuid)).write_text(json.dumps(
-                {"gamertag": "K%d" % i, "firstSigned": now - 5 * DAY, "signedDays": 3 if i % 10 else 1}))
+                dict({"gamertag": "K%d" % i}, **({"firstScore": now - 5 * DAY} if i % 10 else {}))))
             links.append(GameLink(xuid="%016X" % xuid, pub=pub, user=user, gamertag="K%d" % i,
                                   linked_at=timezone.now()))
         self.write_friends()
@@ -353,7 +384,7 @@ class Counting(LikesTest):
         totals = likes.snapshot("photo")["counts"]
         took = time.perf_counter() - started
         self.assertLess(took, 1.0, "%.3f s" % took)
-        self.assertEqual(sum(totals.values()), 2250 * 20)  # every tenth key has signed in on one day only
+        self.assertEqual(sum(totals.values()), 2250 * 20)  # every tenth key has no result on the boards
         print("\n50,000 likes counted in %.0f ms" % (took * 1000))
 
 

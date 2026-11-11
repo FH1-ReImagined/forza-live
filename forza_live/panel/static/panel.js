@@ -352,6 +352,7 @@ RENDER.players = async function (xuid) {
       view({
       xuid: p.xuid, gamertag: p.gamertag, key: p.key.text + (p.key.public_key ? " (" + p.key.public_key + ")" : ""),
       "signed sign-ins": p.signed_logons.days + " days" + (p.signed_logons.first ? ", the first " + when(p.signed_logons.first) : ""),
+      "first result on the boards": p.first_score ? when(p.first_score) : "none yet (the website link waits for one)",
       last_seen: p.last_seen, last_logon: p.last_logon, logons: p.logons, "career level": p.career_level,
       build: p.build || "", "builds on the boards": p.builds.join(", "),
       friends: p.friends.friends + " friends, " + p.friends.requests_in + " requests in, " + p.friends.requests_out + " out, " + p.friends.blocked + " blocked",

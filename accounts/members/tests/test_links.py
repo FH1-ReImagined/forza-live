@@ -2,7 +2,7 @@
 server's data folder made here (friends.json, players/, banned_xuids.json), and the website's
 peek, claim and remove. Every check of a signed request (signature, server name, path, clock,
 replay in this worker and in another, unbound and legacy keys, browsers), the start's checks
-(ban, signed sign-in, limits), both confirmations, the rules (one key per account, moving, once a
+(ban, a result on the boards, limits), both confirmations, the rules (one key per account, moving, once a
 day, unlink and sign out from both sides) and the pinned key (frozen, waiting)."""
 
 import json
@@ -30,7 +30,11 @@ SEED_B = bytes([0xB0] * 32)
 SEED_C = bytes([0xC0] * 32)
 XUID = 0x0009000000000001
 XUID_B = 0x0009000000000002
+XUID_C = 0x0009000000000003
+XUID_D = 0x0009000000000004
+SEED_D = bytes([0xD0] * 32)
 START = "/api/game/link/start"
+UPLOAD_FIRST = {"error": "play online first", "message": links.UPLOAD_FIRST}
 
 
 def body(response):
@@ -54,7 +58,7 @@ class LinkTest(AccountsTest):
 
     # ---- the game server's data folder ----
 
-    def player(self, xuid, seed=None, tag="Driver", signed=True, legacy=None):
+    def player(self, xuid, seed=None, tag="Driver", signed=True, legacy=None, scored=True):
         rec = {"name": tag, "seen": time.time(), "key": legacy or "", "friends": {}, "in": {}, "out": {},
                "blocked": {}}
         if seed is not None:
@@ -64,6 +68,8 @@ class LinkTest(AccountsTest):
         record = {"gamertag": tag, "logons": 1}
         if signed:
             record.update(firstSigned=int(time.time()) - 86400, signedDays=1)
+        if scored:  # a speed trap on the boards (forza_live.title_services.lsp.first_score)
+            record["firstScore"] = int(time.time()) - 3600
         (self.data / "players" / ("%016X.json" % xuid)).write_text(json.dumps(record))
 
     def write_friends(self):
@@ -156,7 +162,7 @@ class Flow(LinkTest):
         api.MeOut.model_validate(me)
         self.assertEqual(me["link"], {"state": "active", "gamertag": "DriverA",
                                       "since": timezone.now().date().isoformat(),
-                                      "counted": False})  # one signed day, a day ago (members.likes)
+                                      "counted": True})  # a signed sign-in and a speed trap: no wait
         self.assertNotIn("0009000000000001", json.dumps(me))  # never the XUID
         self.assertIn("linked the game of DriverA", [e["event"] for e in me["events"]])
         link = GameLink.objects.get()
@@ -299,15 +305,39 @@ class StartChecks(LinkTest):
         r, doc = self.start()
         self.assertEqual((r.status_code, doc), (403, {"error": "not available"}))
 
-    def test_a_key_that_never_signed_in_to_the_game_server(self):
-        self.player(XUID_B, SEED_B, "DriverB", signed=False)
+    def test_a_key_with_neither_a_score_nor_a_signed_sign_in(self):
+        self.player(XUID_B, SEED_B, "DriverB", signed=False, scored=False)
         r, doc = self.start(xuid=XUID_B, seed=SEED_B)
-        self.assertEqual((r.status_code, doc), (409, {"error": "play online first"}))
+        self.assertEqual((r.status_code, doc), (409, UPLOAD_FIRST))
 
     def test_a_player_without_a_gamertag(self):
         self.player(XUID_B, SEED_B, "")
         r, doc = self.start(xuid=XUID_B, seed=SEED_B)
-        self.assertEqual((r.status_code, doc), (409, {"error": "play online first"}))
+        self.assertEqual((r.status_code, doc), (409, UPLOAD_FIRST))
+
+    def test_a_signed_sign_in_without_a_score_waits_for_one_speed_trap(self):
+        self.player(XUID_B, SEED_B, "DriverB", scored=False)
+        r, doc = self.start(xuid=XUID_B, seed=SEED_B)
+        self.assertEqual((r.status_code, doc), (409, UPLOAD_FIRST))
+        self.assertIn("speed trap", doc["message"])
+        self.player(XUID_B, SEED_B, "DriverB")  # its first speed trap (lsp.first_score)
+        self.started(xuid=XUID_B, seed=SEED_B)
+
+    def test_a_score_without_a_signed_sign_in_links_at_once(self):
+        # Results from before the game signed its calls (firstScore by the backfill), no signed
+        # sign-in: the request itself is signed by the key the XUID is bound to (bound only on a
+        # HELLO that key signed), which is all a signed sign-in would prove.
+        self.player(XUID_B, SEED_B, "DriverB", signed=False, scored=True)
+        self.started(xuid=XUID_B, seed=SEED_B)
+
+    def test_the_record_must_have_real_times(self):
+        for bad in ("1700000000", True, None, 1.5):
+            path = self.data / "players" / ("%016X.json" % XUID_B)
+            self.player(XUID_B, SEED_B, "DriverB")
+            record = json.loads(path.read_text())
+            record["firstScore"] = bad
+            path.write_text(json.dumps(record))
+            self.assertEqual(self.start(xuid=XUID_B, seed=SEED_B)[1], UPLOAD_FIRST, bad)
 
     def test_five_starts_an_hour(self):
         for _ in range(5):
@@ -572,6 +602,53 @@ class Pinning(LinkTest):
         b, _ = self.linked()
         self.player(XUID, SEED, "Renamed")
         self.assertEqual(body(b.get_json("/api/me"))["link"]["gamertag"], "Renamed")
+
+
+class ResultsFromBeforeTheRule(LinkTest):
+    """Players who had speed traps or other results on the public server before linking needed
+    one: the game server's start notes them (forza_live.title_services.lsp.backfill_first_scores,
+    run here on this data folder), and they link with no new upload."""
+
+    def setUp(self):
+        super().setUp()
+        from forza_live.competition import scores
+        from forza_live.title_services import lsp
+        self.scores, self.lsp = scores, lsp
+        self.addCleanup(setattr, lsp, "DATA_DIR", lsp.DATA_DIR)
+        self.addCleanup(lsp._scored.clear)
+        self.addCleanup(scores.configure, scores.DATA_DIR, "")
+        rows = {"%016X" % x: {"xuid": "%016X" % x, "gamertag": "P", "type": 1, "score": 60.0,
+                              "submitted": 1_790_000_000, "scoreId": "00" * 16, "carId": 1398, "carClassId": 7,
+                              "carPerformanceIndex": 0.86, "ghostFileId": -1}
+                for x in (XUID_B, XUID_C, XUID_D)}
+        (self.data / "scoreboards.json").write_text(json.dumps({"boards": {"1:230:0": rows}, "unranked": {},
+                                                                "club1000": {}, "nextFileId": 1}))
+        self.player(XUID_B, SEED_B, "DriverB", scored=False)               # signed sign-ins, a speed trap
+        self.player(XUID_C, SEED_C, "DriverC", signed=False, scored=False)  # no signed sign-in
+        self.player(XUID_D, None, "DriverD", scored=False, legacy="ab" * 32)  # a raw friends key only
+
+    def game_server_starts(self):
+        self.lsp.DATA_DIR = str(self.data)
+        self.scores.configure(str(self.data), "main-1", scored=self.lsp.first_score)
+        self.lsp._scored.clear()
+        return self.lsp.backfill_first_scores()
+
+    def test_a_player_with_a_speed_trap_links_after_the_deploy(self):
+        self.assertEqual(self.start(xuid=XUID_B, seed=SEED_B)[1], UPLOAD_FIRST)  # before
+        self.assertEqual(self.game_server_starts(), 3)
+        self.started(xuid=XUID_B, seed=SEED_B)
+
+    def test_without_a_signed_sign_in_too(self):
+        self.assertEqual(self.start(xuid=XUID_C, seed=SEED_C)[1], UPLOAD_FIRST)  # before
+        self.game_server_starts()
+        self.started(xuid=XUID_C, seed=SEED_C)  # its old speed trap is enough, no new score
+
+    def test_scores_never_let_anyone_else_link_the_xuid(self):
+        self.game_server_starts()
+        # bound only to a raw friends key: no public key to check, refused like any stranger
+        self.assertEqual(self.start(xuid=XUID_D, seed=SEED_D)[0].status_code, 401)
+        # signed by another player's key for an XUID that has scores
+        self.assertEqual(self.start(xuid=XUID_B, seed=SEED_C)[0].status_code, 401)
 
 
 class Upkeep(LinkTest):

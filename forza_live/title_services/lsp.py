@@ -242,7 +242,9 @@ def configure(args):
     os.makedirs(DATA_DIR, exist_ok=True)
     bans.configure(DATA_DIR)
     limits.configure(DATA_DIR)
-    scores.configure(DATA_DIR, args.server_id)
+    scores.configure(DATA_DIR, args.server_id, scored=first_score)
+    _scored.clear()
+    backfill_first_scores()
     score_token.configure(args.score_tokens)   # a bad FORZA_SCORE_TOKENS stops the start
     log.info("scoreboards: rows are tagged with server id %s; score tokens: %s", scores.server_id(),
              score_token.MODE)
@@ -333,13 +335,76 @@ PERMISSIONS = [{"MethodId": i, "Tier": 0, "IsEnabled": True, "Access": 0} for i 
 def signed_logon(record, now):
     """A sign-in signed by the player's own key: firstSigned (its time), signedDays (the UTC days
     with one) and lastSignedDay. The website accounts service (accounts/, website #4) reads them
-    to link a website account only to a key that has signed in here. An unsigned or forged
-    sign-in adds nothing, so nobody can age an XUID before its key is bound."""
+    only for its optional likes wait (FORZA_LIKES_AFTER_HOURS, FORZA_LIKES_SIGNED_DAYS, off by
+    default). An unsigned or forged sign-in adds nothing, so nobody can age an XUID before its
+    key is bound."""
     day = now // 86400
     record.setdefault("firstSigned", now)
     if record.get("lastSignedDay") != day:
         record["signedDays"] = record.get("signedDays", 0) + 1
         record["lastSignedDay"] = day
+
+
+# {XUID: (mtime_ns, size) of its record when it last had firstScore}: a result only stats the
+# record, and reads it again when it changed (a record put back without firstScore gets it again).
+_scored = {}
+
+
+def _stamp(xuid):
+    try:
+        st = os.stat(player_path(xuid))
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def _has_first_score(xuid, record):
+    if isinstance(record.get("firstScore"), int):
+        _scored[xuid] = _stamp(xuid)
+        return True
+    return False
+
+
+def first_score(xuid):
+    """firstScore in the player's record: when it first got a result on this server's boards (a
+    speed trap, speed zone, event time or 1000 Club medal from a call that carries its own key:
+    scores.SCORED). The website accounts service links a website account to a key, and counts
+    its likes, only when its record has this. A player without a record (none, or
+    unreadable) gets none: Logon2 makes it."""
+    stamp = _stamp(xuid)
+    if stamp is None or _scored.get(xuid) == stamp:
+        return
+    record = load_player(xuid)
+    if not record or _has_first_score(xuid, record):
+        return
+    record["firstScore"] = int(time.time())
+    save_player(xuid, record)
+    _has_first_score(xuid, record)
+
+
+def backfill_first_scores():
+    """firstScore for the players who already had results on the boards before the server kept
+    it (scores.first_results: the time of their earliest row), so they need no new one. At every
+    start; a record that has it stays as it is, and an XUID without a record (it never signed in
+    here) gets none. Returns how many records it wrote."""
+    wrote = 0
+    for key, at in scores.first_results().items():
+        try:
+            xuid = int(key, 16)
+        except (TypeError, ValueError):
+            continue
+        if not os.path.exists(player_path(xuid)):
+            continue
+        record = load_player(xuid)
+        if not record or _has_first_score(xuid, record):
+            continue
+        record["firstScore"] = at or int(time.time())
+        save_player(xuid, record)
+        _has_first_score(xuid, record)
+        wrote += 1
+    if wrote:
+        log.info("title: firstScore kept for %d players with results from before it", wrote)
+    return wrote
 
 
 def user_logon2(xuid, body):

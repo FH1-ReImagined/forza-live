@@ -13,8 +13,9 @@ that moved gains nothing. Only items in the public feeds can be liked (members.i
 the key's own.
 
 A like counts in the public totals when the key that gave it counts (members.game.counted):
-its link active and pinned, its account not suspended, not banned, and its first signed sign-in on the game server
-LIKES_AFTER_HOURS old with signed sign-ins on LIKES_SIGNED_DAYS days. Who liked what is never
+its link active and pinned, its account not suspended, not banned, and a result on the boards
+of the game server at any time, before this rule too (a speed trap is enough). LIKES_AFTER_HOURS and
+LIKES_SIGNED_DAYS can add a wait (none by default). Who liked what is never
 shown. The totals are counted again at most every LIKE_COUNTS_SECONDS in each worker; the
 website's builder copies them into the pages, and signed-in visitors' pages ask for them live.
 
@@ -104,6 +105,10 @@ class DeletedOut(Strict):
 
 # ---- The link, and the totals ----
 
+KEY_FORGOTTEN = ("The Public server no longer knows your game's key: play on it again (drive through any speed trap "
+                 "camera), then try again.")
+
+
 def usable_link(user):
     """The account's link when its key may like and manage its items, else Refused."""
     if not game.available():
@@ -116,7 +121,7 @@ def usable_link(user):
     if link.state == GameLink.FROZEN or (pub is not None and not links.pinned(link, pub)):
         raise Refused(409, "this link needs the operator")
     if pub is None:
-        raise Refused(409, "play online first")  # the game server forgot the key: it waits
+        raise Refused(409, "play online first", message=KEY_FORGOTTEN)  # the game server forgot the key: it waits
     if game.banned(xuid):
         raise Refused(403, "not available")
     return link

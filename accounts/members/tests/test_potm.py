@@ -1,8 +1,9 @@
 """Photo of the Month (members.potm), against the game server's data folder that test_likes makes.
 
 Eligibility: a like is a vote only when it was given during the month, by a key whose likes count
-in public (linked, active, pinned, not suspended, not banned, signed sign-ins old enough), whose
-linked account was POTM_ACCOUNT_DAYS old when it liked, and not the owner's; the other likes stay
+in public (linked, active, pinned, not suspended, not banned, a result on the boards), whose
+linked account was POTM_ACCOUNT_DAYS old when it liked when that is set (0 by default: these tests
+set 14), and not the owner's; the other likes stay
 in the public totals. Entries: public photos uploaded during the month (UTC), not disqualified.
 Month boundaries in UTC (the first second is in, the end is out, December to January, February
 in a leap year). The tie-break: the earliest to reach the final count, then the earlier upload,
@@ -97,6 +98,29 @@ class Eligibility(PotmTest):
         self.assertEqual((e.votes, e.likes), (2, 3))
         self.assertEqual(e.not_counted, {potm.TOO_NEW: 1})
 
+    def test_no_account_age_by_default(self):
+        from fh_accounts import settings as defaults
+        self.assertEqual(defaults.POTM_ACCOUNT_DAYS, 0)
+        at = NOV_START + timedelta(days=10)
+        new = self.voter(joined=at - timedelta(seconds=30))  # linked half a minute before it liked
+        self.vote(new, P1, at)
+        with override_settings(POTM_ACCOUNT_DAYS=defaults.POTM_ACCOUNT_DAYS):
+            e = {x.id: x for x in self.count().entries}[P1]
+        self.assertEqual((e.votes, e.likes, e.not_counted), (1, 1, {}))
+
+    def test_a_like_older_than_the_account_votes_by_default(self):
+        # Likes stay with the key, so a key that liked and then moved its link to a newer
+        # account still votes: with no account age set, nothing about the account is checked.
+        from fh_accounts import settings as defaults
+        at = NOV_START + timedelta(days=10)
+        moved = self.voter(joined=at + timedelta(days=1))
+        self.vote(moved, P1, at)
+        with override_settings(POTM_ACCOUNT_DAYS=defaults.POTM_ACCOUNT_DAYS):
+            e = {x.id: x for x in self.count().entries}[P1]
+            rows = potm.voters(NOV, P1, AFTER)
+        self.assertEqual((e.votes, e.likes, e.not_counted), (1, 1, {}))
+        self.assertEqual([(r["key"], r["vote"], r["why"]) for r in rows], [(moved, True, "")])
+
     def test_the_account_s_age_is_taken_when_it_liked_not_now(self):
         at = NOV_START + timedelta(days=5)
         xuid = self.voter(joined=at - timedelta(days=3))
@@ -104,6 +128,7 @@ class Eligibility(PotmTest):
         # Weeks later the account is old, but it was 3 days old when it liked.
         self.assertEqual(self.table(), [(P1, 0), (P2, 0), (P3, 0)])
 
+    @override_settings(LIKES_AFTER_HOURS=72, LIKES_SIGNED_DAYS=2)  # the operator's wait, when set
     def test_keys_that_do_not_count_in_public_do_not_vote(self):
         at = NOV_START + timedelta(days=10)
         cases = {
@@ -113,6 +138,9 @@ class Eligibility(PotmTest):
             # its first signed sign-in 12 hours before the review
             "new key": self.voter(first_days=(time.time() - ts(AFTER) + 43200) / 86400),
         }
+        unscored = self.voter()
+        self.unscored(int(unscored, 16))  # no result on the boards
+        cases["no score"] = unscored
         frozen = self.voter()
         GameLink.objects.filter(xuid=frozen).update(state=GameLink.FROZEN)
         cases["frozen"] = frozen
@@ -541,7 +569,8 @@ class Scale(PotmTest):
             self.friends["%016X" % xuid] = {"name": "K%d" % i, "seen": now, "key": "", "pub": pub, "friends": {},
                                             "in": {}, "out": {}, "blocked": {}}
             (self.data / "players" / ("%016X.json" % xuid)).write_text(json.dumps(
-                {"gamertag": "K%d" % i, "firstSigned": now - 3000 * 86400, "signedDays": 3}))
+                {"gamertag": "K%d" % i, "firstSigned": now - 3000 * 86400, "signedDays": 3,
+                 "firstScore": now - 3000 * 86400}))
             links.append(GameLink(xuid="%016X" % xuid, pub=pub, user=user, gamertag="K%d" % i, linked_at=OLD))
         self.write_friends()
         GameLink.objects.bulk_create(links)
