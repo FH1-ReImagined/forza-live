@@ -25,6 +25,8 @@ services). This answers the ones online play needs:
                                the design storefront: paint jobs and vinyl groups (designs.py)
     GET /community/..., /admin/photos  community photos: signed photo mode uploads published
                                for the website's gallery (community.py)
+    GET /community/online.json  how many players are online now, for the website's home
+                               page: counts only (online.py)
     GET /community/designs.json, /community/design-img/..., /admin/designs
                                the design storefront's designs on the website, after
                                screening (design_feed.py)
@@ -61,6 +63,7 @@ from forza_live.content import design_feed
 from forza_live.content import designs
 from forza_live.social import friends
 from forza_live.core import limits
+from forza_live.content import online
 from forza_live.content import owners
 from forza_live.core import relays
 from forza_live.core import server_list
@@ -938,6 +941,8 @@ def handle(server, method, path, headers, body, peer):
         log.info("LSP %s.%s (%d bytes)", headers.get("x-classname", "?").split(",")[0],
                  headers.get("x-method", "?"), len(body))
         return 200, "bin/xtsw", service_call(headers, body, server, method, path)
+    if url.path == online.PATH:  # players online now, for the website (online.py): polled,
+        return online.handle(server, method, WORLD_HOPPERS)  # so not in the request log
     log.info("LSP request %s %s (%d bytes)", method, path, len(body))
     if url.path.startswith("/shader-lists"):  # players' shader lists (shader_lists.py)
         answer = shader_lists.handle(server, method, path, headers, body)

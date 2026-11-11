@@ -1,6 +1,6 @@
 # Forza Live data for a website
 
-What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the daily and weekly challenges, the map, community photos and designs, shader lists, and the list of servers. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
+What the server publishes as public, read-only JSON and images on its HTTP port, for a community website to show: leaderboards, the daily and weekly challenges, the map, community photos and designs, how many players are online, shader lists, and the list of servers. Running the server is in the [hosting guide](hosting.md); moderation of photos and designs is in [operating](operating.md#community-photos-and-designs).
 
 ## Leaderboards
 
@@ -251,6 +251,18 @@ the worker screens designs as well as photos.
   [the leaderboards](#leaderboards)); otherwise `car` is null.
 
 Moderating designs: [operating](operating.md#community-designs).
+
+## Players online
+
+`GET /community/online.json` says how many players are on the server now, for the website's home
+page: `{"version":1,"generated":<unix>,"players":<int>,"worlds":<int>,"racing":<int>}`, counts
+only (no gamertag, XUID, id or address). `players` are the games connected now (tunnelled ones
+too, probe registrations not), `worlds` the open public Horizon Worlds, `racing` the players in a
+race or match lobby or in a world whose event is running. The server counts from memory, at most
+every 5 s, and answers with `Cache-Control: public, max-age=15`, so pages can poll it; other
+methods (`HEAD` too) get 405, as the other community feeds. The website reads it same-origin,
+through its pass-through to the server. Details:
+[title services](title_services.md#players-online-forza_livecontentonlinepy).
 
 ## Servers
 

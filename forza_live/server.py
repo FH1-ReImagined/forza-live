@@ -38,6 +38,7 @@ from forza_live.social import discord_status
 from forza_live.social import friends
 from forza_live.competition import events
 from forza_live.core import limits
+from forza_live.content import online
 from forza_live.title_services import lsp
 from forza_live.network import proxy
 from forza_live.panel import routes as panel
@@ -1403,6 +1404,20 @@ class ForzaLive(asyncio.DatagramProtocol):
         return {"playlist": match[0], "session": match[1][:8].hex(), "players": filled,
                 "slots": filled + free, "game_type": self.match_game_type(match[1])}
 
+    def peer_sessions(self, p):
+        """A player's published sessions for status(): the one it hosts and the one it is in."""
+        return {"match": self.match_status(getattr(p, "match", None)),
+                "standby": self.match_status(getattr(p, "standby", None))}
+
+    def lobby_rooms(self):
+        """status()'s rooms with only what the lobby counts read (discord_status.sessions):
+        each player's id and published sessions, no gamertag, XUID or address. In memory,
+        for the website's player counts (content/online.py)."""
+        rooms = {}
+        for p in self.peers.values():
+            rooms.setdefault(p.room, []).append({"id": p.id, **self.peer_sessions(p)})
+        return rooms
+
     def status(self):
         proxy_on = self.proxy_udp or self.proxy_tcp  # its fields only then: as before otherwise
         rooms = {}
@@ -1413,8 +1428,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                  "via_proxy": p.proxied,
                  **({"proxy_address": p.real_addr is not None} if proxy_on else {}),
                  "state": f"{p.state:08X}", "session": p.session[:8].hex(), "status": p.status,
-                 "match": self.match_status(getattr(p, "match", None)),
-                 "standby": self.match_status(getattr(p, "standby", None))})
+                 **self.peer_sessions(p)})
         worlds = {sid.hex(): {"host": host.name, "humans": humans,
                               "event": world.WORLDS.state.get(sid)}
                   for sid, (host, humans) in self.world_sessions().items()}
@@ -1635,8 +1649,9 @@ async def http_handler(server, reader, writer):
                     answer = 500, "text/plain", b"error"
                 status, content_type, data = answer[:3]
                 extra = tuple(answer[3]) if len(answer) > 3 else ()  # e.g. ETag, Cache-Control
-                log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, path, status,
-                         len(data))
+                if not online.quiet(path, status):  # the polled players-online feed: errors only
+                    log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, path, status,
+                             len(data))
                 reply = response(status, data, content_type, conn + extra)
             writer.write(reply)
             await writer.drain()
