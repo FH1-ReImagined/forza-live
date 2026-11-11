@@ -1048,6 +1048,16 @@ references into the game's compressed string tables, so without that file `car` 
 | `GET /community/design-img/<id>.png` | the preview of a design in the feed, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 design image requests a minute (then 429) |
 | `/admin/designs...` | the operator's and the screening worker's ([operating](operating.md#community-designs)), with the community photos' rules |
 
+### Players online (`forza_live/content/online.py`)
+
+How many players are online now, for the website's home page. Counts only, from the server's
+memory (the same lobby view as the Discord status message and the operator panel), made again at
+most every 5 s whoever asks; no disk access.
+
+| Route | |
+| --- | --- |
+| `GET /community/online.json` | `{"version":1,"generated":<unix>,"players":<int>,"worlds":<int>,"racing":<int>}`. `players`: the games connected now, through a tunnel or not, without probe registrations (room `probe`, `tools/server_probe.py`); the server runs no players of its own and the game's CPU drivers are never connections. `worlds`: the open public Horizon Worlds (each session of the Horizon World playlist once, a world whose host left kept by its members; Co-op Festival worlds are friends only and not counted). `racing`: the players in a Races or Playground Games lobby, a custom game other than Free Roam (public or private) or a world whose event round is running; never more than `players`. Never a gamertag, XUID, player id, session id or address. `Cache-Control: public, max-age=15`, `X-Content-Type-Options: nosniff`; other methods (`HEAD` too) get 405, as the other community feeds |
+
 ### A player's own items (`forza_live/content/owners.py`)
 
 The website accounts service ([`accounts/`](../accounts/README.md)) lets a signed-in player whose

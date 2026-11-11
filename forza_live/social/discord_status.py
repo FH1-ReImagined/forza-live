@@ -64,11 +64,13 @@ def lobby_name(playlist, game_type):
     return FIND_GAME.get(playlist) or CUSTOM_GAME.get(playlist) or f"Playlist {playlist}"
 
 
-def lobbies(status):
-    """{lobby name: [(players, slots), ...]}: each published session once, its players
-    the most of its host's filled slots and the players who published it (host or member;
-    a session whose host left is kept by its members' standby records)."""
-    sessions = {}
+def sessions(status):
+    """{(room, session id hex): {"members", "filled", "slots", "playlist", "game_type",
+    "name", "hosted"}}: each published session once, without probe registrations, described
+    by its host's record (else by a member's standby record: a session whose host left is
+    kept by its members' standby records). members: the ids of the players who published
+    it (host or member)."""
+    found = {}
     for room, peers in status.get("rooms", {}).items():
         if room in HIDDEN_ROOMS:
             continue
@@ -78,17 +80,31 @@ def lobbies(status):
                 if not m:
                     continue
                 key = (room, m["session"])
-                s = sessions.setdefault(key, {"members": set(), "filled": 0, "slots": 0,
-                                              "name": None, "hosted": False})
+                s = found.setdefault(key, {"members": set(), "filled": 0, "slots": 0,
+                                           "playlist": None, "game_type": None,
+                                           "name": None, "hosted": False})
                 s["members"].add(peer.get("id"))
                 if kind == "match" or not s["hosted"]:
+                    s["playlist"], s["game_type"] = m["playlist"], m.get("game_type")
                     s["name"] = lobby_name(m["playlist"], m.get("game_type"))
                     s["slots"] = m.get("slots", 0)
                     if kind == "match":
                         s["hosted"], s["filled"] = True, m.get("players", 0)
+    return found
+
+
+def session_players(s):
+    """A session's players (sessions()): the most of its host's filled slots and the
+    players who published it."""
+    return max(s["filled"], len(s["members"]))
+
+
+def lobbies(status):
+    """{lobby name: [(players, slots), ...]}: each published session once (sessions()), its
+    players as session_players() counts them."""
     out = {}
-    for s in sessions.values():
-        players = max(s["filled"], len(s["members"]))
+    for s in sessions(status).values():
+        players = session_players(s)
         out.setdefault(s["name"], []).append((players, max(s["slots"], players)))
     for name in out:
         out[name].sort(reverse=True)
@@ -100,10 +116,14 @@ def summary(status):
     registrations; lobbies as lobbies() gives them. The worlds are its Horizon World
     sessions: status()["worlds"] also counts a custom lobby whose members last searched
     the Horizon World playlist."""
-    players = sum(len(peers) for room, peers in status.get("rooms", {}).items()
-                  if room not in HIDDEN_ROOMS)
     found = lobbies(status)
-    return players, len(found.get(FIND_GAME[3], [])), found
+    return visible_players(status), len(found.get(FIND_GAME[3], [])), found
+
+
+def visible_players(status):
+    """The players of a status() dict, without probe registrations."""
+    return sum(len(peers) for room, peers in status.get("rooms", {}).items()
+               if room not in HIDDEN_ROOMS)
 
 
 def render_lobbies(found):

@@ -25,6 +25,8 @@ services). This answers the ones online play needs:
                                the design storefront: paint jobs and vinyl groups (designs.py)
     GET /community/..., /admin/photos  community photos: signed photo mode uploads published
                                for the website's gallery (community.py)
+    GET /community/online.json  how many players are online now, for the website's home
+                               page: counts only (online.py)
     GET /community/designs.json, /community/design-img/..., /admin/designs
                                the design storefront's designs on the website, after
                                screening (design_feed.py)
@@ -61,6 +63,7 @@ from forza_live.content import design_feed
 from forza_live.content import designs
 from forza_live.social import friends
 from forza_live.core import limits
+from forza_live.content import online
 from forza_live.content import owners
 from forza_live.core import relays
 from forza_live.core import server_list
@@ -962,6 +965,8 @@ def handle(server, method, path, headers, body, peer):
     if design_feed.handles(url.path):  # designs on the website (design_feed.py)
         return design_feed.handle(method, path, headers, body,
                                   lambda: is_local_admin(peer, headers))
+    if url.path == online.PATH:  # players online now, for the website (online.py)
+        return online.handle(server, method, WORLD_HOPPERS)
     if community.handles(url.path):  # community photos (community.py)
         return community.handle(method, path, headers, body,
                                 lambda: is_local_admin(peer, headers))

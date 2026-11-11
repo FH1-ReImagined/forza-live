@@ -1403,6 +1403,20 @@ class ForzaLive(asyncio.DatagramProtocol):
         return {"playlist": match[0], "session": match[1][:8].hex(), "players": filled,
                 "slots": filled + free, "game_type": self.match_game_type(match[1])}
 
+    def peer_sessions(self, p):
+        """A player's published sessions for status(): the one it hosts and the one it is in."""
+        return {"match": self.match_status(getattr(p, "match", None)),
+                "standby": self.match_status(getattr(p, "standby", None))}
+
+    def lobby_rooms(self):
+        """status()'s rooms with only what the lobby counts read (discord_status.sessions):
+        each player's id and published sessions, no gamertag, XUID or address. In memory,
+        for the website's player counts (content/online.py)."""
+        rooms = {}
+        for p in self.peers.values():
+            rooms.setdefault(p.room, []).append({"id": p.id, **self.peer_sessions(p)})
+        return rooms
+
     def status(self):
         proxy_on = self.proxy_udp or self.proxy_tcp  # its fields only then: as before otherwise
         rooms = {}
@@ -1413,8 +1427,7 @@ class ForzaLive(asyncio.DatagramProtocol):
                  "via_proxy": p.proxied,
                  **({"proxy_address": p.real_addr is not None} if proxy_on else {}),
                  "state": f"{p.state:08X}", "session": p.session[:8].hex(), "status": p.status,
-                 "match": self.match_status(getattr(p, "match", None)),
-                 "standby": self.match_status(getattr(p, "standby", None))})
+                 **self.peer_sessions(p)})
         worlds = {sid.hex(): {"host": host.name, "humans": humans,
                               "event": world.WORLDS.state.get(sid)}
                   for sid, (host, humans) in self.world_sessions().items()}
