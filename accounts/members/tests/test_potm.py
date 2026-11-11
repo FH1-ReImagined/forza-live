@@ -108,6 +108,19 @@ class Eligibility(PotmTest):
             e = {x.id: x for x in self.count().entries}[P1]
         self.assertEqual((e.votes, e.likes, e.not_counted), (1, 1, {}))
 
+    def test_a_like_older_than_the_account_votes_by_default(self):
+        # Likes stay with the key, so a key that liked and then moved its link to a newer
+        # account still votes: with no account age set, nothing about the account is checked.
+        from fh_accounts import settings as defaults
+        at = NOV_START + timedelta(days=10)
+        moved = self.voter(joined=at + timedelta(days=1))
+        self.vote(moved, P1, at)
+        with override_settings(POTM_ACCOUNT_DAYS=defaults.POTM_ACCOUNT_DAYS):
+            e = {x.id: x for x in self.count().entries}[P1]
+            rows = potm.voters(NOV, P1, AFTER)
+        self.assertEqual((e.votes, e.likes, e.not_counted), (1, 1, {}))
+        self.assertEqual([(r["key"], r["vote"], r["why"]) for r in rows], [(moved, True, "")])
+
     def test_the_account_s_age_is_taken_when_it_liked_not_now(self):
         at = NOV_START + timedelta(days=5)
         xuid = self.voter(joined=at - timedelta(days=3))

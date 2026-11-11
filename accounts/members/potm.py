@@ -197,7 +197,7 @@ def count(month, now=None):
         joined = joined_of(xuid)
         if joined is None:
             why[pid][NOT_LINKED] += 1
-        elif at - joined < min_age:
+        elif min_age and at - joined < min_age:
             why[pid][TOO_NEW] += 1
         else:
             votes[pid].append(at)
@@ -237,7 +237,7 @@ def voters(month, photo, now=None):
             reason = OWN
         elif joined is None:
             reason = NOT_LINKED
-        elif r.at - joined < min_age:
+        elif min_age and r.at - joined < min_age:
             reason = TOO_NEW
         else:
             reason = ""
