@@ -110,12 +110,12 @@ class SignedNonce(models.Model):
 
 
 class Like(models.Model):
-    PHOTO, DESIGN, MOD, PACK = "photo", "design", "mod", "pack"
-    KINDS = [(PHOTO, "photo"), (DESIGN, "design"), (MOD, "mod"), (PACK, "texture pack")]
+    PHOTO, DESIGN, VIDEO, MOD, PACK = "photo", "design", "video", "mod", "pack"
+    KINDS = [(PHOTO, "photo"), (DESIGN, "design"), (VIDEO, "video"), (MOD, "mod"), (PACK, "texture pack")]
 
     xuid = models.CharField(max_length=16)  # the game key's XUID (16 upper-case hex digits)
     kind = models.CharField(max_length=6, choices=KINDS)
-    item = models.CharField(max_length=12)  # the photo's or design's public id
+    item = models.CharField(max_length=12)  # the photo's, video's or design's public id
     at = models.DateTimeField()
 
     class Meta:

@@ -1,4 +1,4 @@
-# Screening worker for community photos and designs
+# Screening worker for community photos, videos and designs
 
 With `FORZA_COMMUNITY_HOLD=1`, every new community photo (a 1920x1080 PNG the server makes from
 a photo mode Big Shot; [`docs/operating.md`](../docs/operating.md#community-photos)) starts `held`.
@@ -7,8 +7,9 @@ the game at once but starts `pending` for the website
 ([`docs/operating.md`](../docs/operating.md#community-designs)). This worker screens both
 automatically on the server's own machine, with no hosted API:
 
-- It polls `GET /admin/photos/queue` and `GET /admin/designs/queue` every 30 s and fetches each
-  held photo and each pending design's preview.
+- It polls `GET /admin/photos/queue`, `GET /admin/videos/queue` and `GET /admin/designs/queue`
+  every 30 s and fetches each held photo, each held video's frames and each pending design's
+  preview.
 - It scores the picture with three CPU models (onnxruntime) and word lists.
 - It then **releases** clear ones, **hides** confident hits with a note naming the rule, and
   **leaves held** the doubtful ones for the maintainer, logging why. A hidden design is hidden in
@@ -59,6 +60,38 @@ Calibration and the hold rate:
 - Real photo mode shots have less text than menus, so they should hold even less. The target is to
   hold at most about 5% of photos.
 - Watch the share of `"decision":"hold"` lines in the worker's log over the first weeks.
+
+## Videos
+
+The game's movie uploads become [community videos](../docs/operating.md#community-videos) once
+the [video converter](../video/README.md) has made an MP4 of them. Every converted video starts
+`held`, whatever `FORZA_COMMUNITY_HOLD` says, so none is published before this worker (or the
+operator) has passed it. The converter samples **8 frames** spread over the clip, at the video's
+own size (the game's clips are 640x360), and the server serves them at
+`GET /admin/videos/frame/<id>-<n>.jpg`.
+
+- Each frame is scored like a photo, with the same models, word lists and thresholds (the decision
+  table above), as a whole frame (`[videos] grids = []`: the frames are small).
+- **The worst frame decides.** Any frame's hide rule hides the video, with a note naming the
+  frame (`screening: hide (nsfw-high: frame 3 of 8: ...)`); otherwise any frame's hold rule leaves
+  it held for the maintainer, logged; only a video whose every frame is clear is released
+  (`screening: release (clear: 8 frames)`).
+- The title (the game's own, "<car> on <route>") and the credited gamertag are checked once, with
+  the first frame.
+- A frame that cannot be fetched is retried, like a photo; one that cannot be decoded leaves the
+  video held (`error-decode`).
+- A server older than community videos answers 404 for the queue: the worker logs it, screens the
+  rest and asks again an hour later. `[videos] enabled = false` turns videos off (they then wait
+  for the operator).
+
+The log has one line per video (`"event":"video"`) with its id, the decision, the rule, the frame
+that decided and every frame's scores (`frames`).
+
+What it does not see: **the sound** (a game replay has the race's sound only; nothing is
+screened in it), anything shown between the sampled frames (8 frames of a 15 s clip are about
+2 s apart: a picture held on screen for less than that can be missed), and pHash (videos are not
+compared with hidden ones). Player reports and the operator are the net there. At about 1 s a
+frame, a video takes about 8 s; the server caps videos at 20 an hour.
 
 ## Designs
 

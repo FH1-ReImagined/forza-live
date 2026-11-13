@@ -1,9 +1,10 @@
-"""Likes, and the player's own photos and designs (community accounts design, sections 4.1-4.3).
+"""Likes, and the player's own photos, videos and designs (community accounts design, sections
+4.1-4.3).
 
-  POST /api/likes                {"kind": "photo"|"design", "item": "<id>", "on": true|false}
+  POST /api/likes                {"kind": "photo"|"video"|"design", "item": "<id>", "on": true|false}
   GET  /api/likes/mine?kind=     the items this key liked, and its own public ones
   GET  /api/likes/counts?kind=   anyone: the public totals, {"counts": {"<id>": n}}
-  GET  /api/me/items             the key's photos and designs, public or not, with their state
+  GET  /api/me/items             the key's photos, videos and designs, public or not, with their state
   POST /api/me/items/delete      {"kind", "id"}: needs a sign-in in the past 10 minutes
 
 Everything but the totals needs a signed-in account linked to its game, with the link usable:
@@ -47,8 +48,8 @@ from members.models import AuditEvent, GameLink, Like
 
 log = logging.getLogger("members")
 
-Kind = Literal["photo", "design", "mod", "pack"]  # mods and texture packs: members.hub
-ItemKind = Literal["photo", "design"]
+Kind = Literal["photo", "design", "video", "mod", "pack"]  # mods and texture packs: members.hub
+ItemKind = Literal["photo", "design", "video"]
 HUB_KINDS = ("mod", "pack")
 State = Literal["live", "pending", "held", "hidden"]
 COUNTS_MAX_AGE = 30  # Cache-Control of the public totals
@@ -128,7 +129,7 @@ def usable_link(user):
 
 
 def find(kind, item_id):
-    """The photo, design, mod or texture pack (members.items.Item), or None."""
+    """The photo, video, design, mod or texture pack (members.items.Item), or None."""
     from members import hub
     return hub.find(kind, item_id) if kind in HUB_KINDS else items.find(kind, item_id)
 
@@ -251,7 +252,8 @@ def my_items(request):
 def owner_delete(kind, item_id, xuid_hex):
     """The game server's owner-only delete route: its HTTP status, or None when it could not be
     reached. Straight to FORZA_GAME_URL: no proxy from the environment, no redirect."""
-    path = "/owner/%s/%s/delete" % ("photos" if kind == items.PHOTO else "designs", item_id)
+    path = "/owner/%s/%s/delete" % ({items.PHOTO: "photos", items.VIDEO: "videos"}.get(kind, "designs"),
+                                    item_id)
     req = urllib.request.Request(settings.GAME_URL + path, method="POST",
                                  data=json.dumps({"owner": xuid_hex}).encode(),
                                  headers={"Content-Type": "application/json", "X-Owner-Token": settings.OWNER_TOKEN})

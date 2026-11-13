@@ -7,7 +7,8 @@ const API = "/operator/api/";
 const KEY = "forzaLivePanelToken";
 const TABS = [
   ["status", "Status"], ["messages", "Messages"], ["gifts", "Gifts"], ["players", "Players"],
-  ["bans", "Bans and chat"], ["scores", "Scores"], ["photos", "Photos"], ["designs", "Designs"],
+  ["bans", "Bans and chat"], ["scores", "Scores"], ["photos", "Photos"], ["videos", "Videos"],
+  ["designs", "Designs"],
   ["servers", "Servers"], ["relays", "Relays"], ["challenges", "Challenges"],
   ["events", "Events"], ["audit", "Audit log"],
 ];
@@ -366,6 +367,7 @@ RENDER.players = async function (xuid) {
     card("Scores (" + p.scores.ranked + " ranked, " + p.scores.unranked + " unranked)",
       scoreTable(p.scores.rows, reload)),
     card("Photos", photoTable(p.photos, reload, false)),
+    card("Videos", videoTable(p.videos || [], reload, false)),
     card("Designs", designTable(p.designs, reload, false)),
     card("Challenges", p.challenges ? [view(p.challenges.player), p.challenges.sets.map(s => [
       el("h3", {text: s.kind + " (" + when(s.starts) + " to " + when(s.ends) + ")"}),
@@ -492,6 +494,57 @@ RENDER.photos = async function (which) {
     el("div", {class: "row"}, field("Show", pick)),
     el("p", {}, d.photos.length + " photos" + (d.photos.length > shown.length ? " (the first 200 shown)" : "") + "."),
     photoTable(shown, () => go("photos", which), which === "queue")));
+};
+
+// ---- Videos ----
+
+async function play(path, holder) {
+  const r = await api("GET", path);
+  if (!r.blob) {
+    holder.replaceChildren(el("span", {class: "error", text: (r.data && r.data.error) || "no video"}));
+    return;
+  }
+  const url = URL.createObjectURL(r.blob);
+  blobs.push(url);
+  holder.replaceChildren(el("video", {class: "thumb", src: url, controls: true, preload: "metadata"}));
+}
+
+function videoCell(v, auto) {
+  if (!v.poster) return el("span", {class: "muted", text: "converting"});
+  const holder = el("div");
+  holder.append(imageCell("videos/media/" + v.id + ".jpg", auto),
+    button("Play", () => play("videos/media/" + v.id + ".mp4", holder), "small quiet"),
+    button("Frames", () => {
+      const frames = el("div", {class: "row"});
+      holder.append(frames);
+      v.frames.forEach(f => { const h = el("div"); frames.append(h); image("videos/frame/" + f.split("/").pop(), h); });
+    }, "small quiet"));
+  return holder;
+}
+
+function videoTable(list, after, auto) {
+  return table(list, [[v => videoCell(v, auto), "video"], "id", [v => playerLink(v.owner, v.gamertag), "owner"], "title", "status", [v => v.seconds + " s", "length"], "banned", "public", "note", "takenAt", "decidedAt"], v => {
+    const a = (action, ask, cls) => button(action, () => act("videos/" + v.id + "/" + action, action === "ban" ? {reason: window.prompt("Reason for the ban:") || ""} : {note: "operator panel"}, ask, after), "small " + (cls || ""));
+    return [
+      v.status === "held" ? a("release", null) : null,
+      v.status === "live" ? a("hold", null) : null,
+      v.status === "hidden" ? a("unhide", null) : v.status !== "converting" ? a("hide", "Hide video " + v.id + " (out of the feed and its routes)?") : null,
+      a("delete", "Delete video " + v.id + " for good? The same clip is not published again.", "danger"),
+      v.banned ? null : a("ban", "Ban the owner " + v.gamertag + " (" + v.owner + ")?", "danger")];
+  });
+}
+
+RENDER.videos = async function (which) {
+  which = which || "queue";
+  const d = await get(which === "queue" ? "videos/queue" : "videos" + (which === "all" ? "" : "?status=" + which));
+  if (!d) return setView();
+  const pick = select("which", [["queue", "the queue (held, oldest first)"], ["converting", "converting"], ["live", "live"], ["held", "held"], ["hidden", "hidden"], ["all", "all"]], which);
+  pick.addEventListener("change", () => go("videos", pick.value));
+  const shown = d.videos.slice(0, 200);
+  setView(card("Community videos", hint("The game's movie uploads, converted by the video converter. Every video waits held until the screening worker or you release it. Release publishes a held video; hold takes a live one back to the queue; hide takes it out of the feed and its routes; delete removes it. Frames are the pictures the screening scored."),
+    el("div", {class: "row"}, field("Show", pick)),
+    el("p", {}, d.videos.length + " videos" + (d.videos.length > shown.length ? " (the first 200 shown)" : "") + "."),
+    videoTable(shown, () => go("videos", which), which === "queue")));
 };
 
 // ---- Designs ----

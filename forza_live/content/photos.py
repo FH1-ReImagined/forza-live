@@ -31,6 +31,11 @@ are started an hour on the whole server, and a player has one unfinished at a ti
 shot is not kept as a file: once it has arrived it goes to community (which publishes a
 smaller copy, or nothing) and is forgotten.
 
+The game's movie upload (a replay clip, an ASF/WMV file named like "Forza14930605") comes the
+same way: LargeFileUpload.Create, then the clip in chunks. It is kept like any other file here;
+the finished hook (videos.upload_finished) tells it from a picture and makes it a community
+video (videos.py), never a photo.
+
 A finished photo mode upload (kind "large") is handed to configure(finished=) with whether it was
 signed by the player's own key (its Create and the call that completed it; configure(proven=),
 lsp.caller_signed): community publishes the signed ones. Every file removed is

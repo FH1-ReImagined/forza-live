@@ -7,7 +7,8 @@
                                      log (audit.py)
 
 Every action goes through the server's own operator code: lsp.broadcast_request, gift_request
-and notify_request, scores.admin, community.admin_handle and design_feed.admin_handle, the chat's
+and notify_request, scores.admin, community.admin_handle, videos.admin_handle and
+design_feed.admin_handle, the chat's
 admin, server.events.handle, server.world_request, relays.add_relay and remove_relay, and the
 server list's checks (server_list.clean_entry). The panel adds what had no route: listing and
 deleting broadcasts, a player's page, the server list's and the relays' editing, the audit log.
@@ -46,6 +47,7 @@ from forza_live.content import community
 from forza_live.content import design_feed
 from forza_live.content import designs
 from forza_live.content import market
+from forza_live.content import videos
 from forza_live.competition import objectives
 from forza_live.competition import score_token
 from forza_live.competition import scores
@@ -68,7 +70,8 @@ STATIC = {PREFIX: "index.html", PREFIX + "/": "index.html", PREFIX + "/panel.js"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8"}
 HEADERS = ("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; "
-           "img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+           "img-src 'self' blob:; media-src blob:; connect-src 'self'; base-uri 'none'; "
+           "form-action 'none'; "
            "frame-ancestors 'none'",
            "X-Content-Type-Options: nosniff", "X-Frame-Options: DENY",
            "Referrer-Policy: no-referrer", "Cache-Control: no-store",
@@ -554,6 +557,10 @@ def player(server, query):
     photos = [community.admin_record(pid, ph, bans) for pid, ph in
               sorted(community.load()["photos"].items(), key=lambda e: e[1]["created"], reverse=True)
               if ph["owner"] == x]
+    found_videos = [videos.admin_record(vid, v, bans) for vid, v in
+                    sorted(videos.load()["videos"].items(), key=lambda e: e[1]["created"],
+                           reverse=True)
+                    if v["owner"] == x]
     found_designs = []
     for fid, f in designs.files(done=True, owner=x):
         try:
@@ -584,7 +591,8 @@ def player(server, query):
            "scores": {"ranked": sum(r["state"] == "ranked" for r in rows["rows"]),
                       "unranked": sum(r["state"] == "unranked" for r in rows["rows"]),
                       "matched": rows["matched"], "rows": rows["rows"][:100]},
-           "photos": photos, "designs": found_designs, "challenges": challenges, "gifts": gifts,
+           "photos": photos, "videos": found_videos, "designs": found_designs,
+           "challenges": challenges, "gifts": gifts,
            "bans": {"content": x in bans, "content_reason": audit.last_reason("ban", k),
                     "signin_until": int(server.chat.banned(x) or 0) or None,
                     "muted_until": int(server.chat.admin_muted(x) or 0) or None}}
@@ -712,6 +720,42 @@ def photo_action(server, data, pid, action):
     path = "/admin/photos/%s/%s" % (pid, action)
     return decoded(community.admin_handle("POST", urllib.parse.urlsplit(path), {},
                                           note_body(data), lambda: True))
+
+
+VIDEO_STATES = ("",) + videos.STATUSES
+
+
+def video_list(server, query):
+    status = q1(query, "status")
+    if status not in VIDEO_STATES:
+        raise Refused(400, "status: " + ", ".join(videos.STATUSES))
+    path = "/admin/videos" + ("?status=" + status if status else "")
+    return decoded(videos.admin_handle("GET", urllib.parse.urlsplit(path), {}, b"",
+                                       lambda: True))
+
+
+def video_queue(server, query):
+    return decoded(videos.admin_handle("GET", urllib.parse.urlsplit("/admin/videos/queue"),
+                                       {}, b"", lambda: True))
+
+
+def video_media(server, query, name):
+    """A video, its poster or a frame, for the page (which plays the video from a blob)."""
+    answer = videos.admin_handle("GET", urllib.parse.urlsplit("/admin/videos/" + name),
+                                 {}, b"", lambda: True)
+    if answer[0] != 200:
+        return reply(*decoded(answer))
+    return answer[0], answer[1], answer[2], HEADERS
+
+
+def video_action(server, data, vid, action):
+    if action not in ("hide", "unhide", "hold", "release", "delete", "ban"):
+        raise Refused(404, "hide, unhide, hold, release, delete or ban")
+    if action == "ban":
+        text(data, "reason", REASON_MAX, required=True)
+    path = "/admin/videos/%s/%s" % (vid, action)
+    return decoded(videos.admin_handle("POST", urllib.parse.urlsplit(path), {},
+                                       note_body(data), lambda: True))
 
 
 DESIGN_STATES = ("", "pending", "clear", "held", "hidden")
@@ -1047,6 +1091,10 @@ READS = (
     (r"photos", photo_list),
     (r"photos/queue", photo_queue),
     (r"photos/img/([A-Z2-7]{%d}\.(?:jpg|png))" % community.ID_LEN, photo_image),
+    (r"videos", video_list),
+    (r"videos/queue", video_queue),
+    (r"videos/((?:media/[A-Z2-7]{%d}\.(?:jpg|mp4))|(?:frame/[A-Z2-7]{%d}-\d{1,2}\.jpg))"
+     % (community.ID_LEN, community.ID_LEN), video_media),
     (r"designs", design_list),
     (r"designs/queue", design_queue),
     (r"designs/img/([A-Z2-7]{%d}\.png)" % designs.WEB_ID_LEN, design_image),
@@ -1071,6 +1119,8 @@ ACTIONS = (
                                                               sort_keys=True)[:128])),
     (r"photos/([A-Z2-7]{%d})/([a-z]+)" % community.ID_LEN,
      (photo_action, lambda d, pid, a: "photo " + a, lambda d, pid, a: pid)),
+    (r"videos/([A-Z2-7]{%d})/([a-z]+)" % community.ID_LEN,
+     (video_action, lambda d, vid, a: "video " + a, lambda d, vid, a: vid)),
     (r"designs/([A-Z2-7]{%d})/([a-z]+)" % designs.WEB_ID_LEN,
      (design_action, lambda d, wid, a: "design " + a, lambda d, wid, a: wid)),
     (r"servers/save", (servers_save, "server list save",

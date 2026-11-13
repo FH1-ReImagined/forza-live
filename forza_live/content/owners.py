@@ -1,10 +1,11 @@
-"""Forza Live: players delete their own community photos and designs from the website.
+"""Forza Live: players delete their own community photos, videos and designs from the website.
 
 The website accounts service (accounts/, website #4) knows which game key a signed-in account is
 linked to. When the player deletes one of their items on the account page, the service asks this
 route to delete it, naming the item's owner:
 
   POST /owner/photos/<id>/delete       {"owner": "<the owner's XUID, 16 hex digits>"}
+  POST /owner/videos/<id>/delete       the same
   POST /owner/designs/<webId>/delete   the same
 
 Rules:
@@ -17,6 +18,7 @@ Rules:
   exist does, so the route tells nothing about other players' items.
 - A photo is dropped as an operator's delete drops it (community.drop), but its picture is not
   put on the list of pictures never published again: it is the player's own to upload again. A
+  video likewise (videos.drop: its files go, the clip is not put on the deleted list). A
   design goes as the storefront's own RemoveFile takes it (designs.remove).
 
 The token can do nothing else: it cannot hide, release, ban, read held items or reach the
@@ -40,6 +42,7 @@ import urllib.parse
 from forza_live.content import community
 from forza_live.content import design_feed
 from forza_live.content import designs
+from forza_live.content import videos
 from forza_live.core import bans
 
 log = logging.getLogger("forza-live")
@@ -47,7 +50,7 @@ log = logging.getLogger("forza-live")
 PREFIX = "/owner/"
 OWNER_TOKEN = os.environ.get("FORZA_OWNER_TOKEN", "")
 OWNER_RE = re.compile(r"[0-9A-Fa-f]{16}")
-ROUTE_RE = re.compile(r"/owner/(photos|designs)/([A-Z2-7]{12})/delete")
+ROUTE_RE = re.compile(r"/owner/(photos|videos|designs)/([A-Z2-7]{12})/delete")
 MAX_BODY = 1024
 
 
@@ -89,6 +92,8 @@ def handle(method, path, headers, body, proxied):
     kind, item = m.groups()
     if kind == "photos":
         return delete_photo(item, xuid)
+    if kind == "videos":
+        return delete_video(item, xuid)
     return delete_design(item, xuid)
 
 
@@ -99,6 +104,15 @@ def delete_photo(pid, xuid):
     community.drop(pid, "deleted by its owner from the website")
     community.save()
     return reply(200, {"deleted": pid})
+
+
+def delete_video(vid, xuid):
+    v = videos.load()["videos"].get(vid)
+    if v is None or v["owner"] != xuid:
+        return reply(404, {"error": "no such video"})
+    videos.drop(vid, "deleted by its owner from the website")
+    videos.save()
+    return reply(200, {"deleted": vid})
 
 
 def delete_design(wid, xuid):

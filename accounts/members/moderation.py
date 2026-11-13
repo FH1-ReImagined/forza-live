@@ -13,7 +13,7 @@ a log line with the account id only (never an XUID).
 - sign_out: every session of the account ends (as "sign out everywhere").
 - unlink: the account's game link goes; the key keeps its likes, which no longer count.
 - purge_missing_likes: the nightly purge. A liked item that is no longer in the game server's
-  community.json or designs.json at all, in any state (the operator deleted it, the game removed
+  community.json, videos.json or designs.json at all, in any state (the operator deleted it, the game removed
   it, the screening took it down), is noted as missing; once it has been missing for LIKES_PURGE_GRACE_DAYS, its
   likes are deleted. An item that comes back is forgotten. A file that is missing, damaged or
   empty is not judged at all, so a bad mount or a restore in progress deletes nothing.
@@ -201,6 +201,7 @@ def stats(now=None):
         "links_daily_cap": settings.LINKS_DAILY,
         "likes_photo": likes_by_kind.get(Like.PHOTO, 0),
         "likes_design": likes_by_kind.get(Like.DESIGN, 0),
+        "likes_video": likes_by_kind.get(Like.VIDEO, 0),
         "likes_new_today": Like.objects.filter(at__gte=day).count(),
         "liked_items_missing": MissingItem.objects.count(),
     }

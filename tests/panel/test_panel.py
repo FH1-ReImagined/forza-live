@@ -29,6 +29,7 @@ from forza_live.social import notifications
 from forza_live.title_services import lsp
 from tests.content import test_community as tc
 from tests.content import test_design_feed as td
+from tests.content import test_videos as tv
 from tests.support import FakeTransport
 
 TOKEN = "panel-test-token"
@@ -39,11 +40,13 @@ JSON = {"Content-Type": "application/json"}
 # One request for every panel route (READS and ACTIONS): test_every_route_is_covered checks it.
 READ_PATHS = ["overview", "broadcasts", "gifts", "players?q=Al", "player?xuid=0009000000000A01",
               "bans", "chat", "scores", "photos", "photos/queue", "photos/img/AAAAAAAAAAAA.jpg",
+              "videos", "videos/queue", "videos/media/AAAAAAAAAAAA.jpg",
               "designs", "designs/queue", "designs/img/%s.png" % ("A" * designs.WEB_ID_LEN),
               "servers", "relays", "challenges", "events", "events/x-1/attendance", "audit"]
 ACTION_PATHS = ["broadcasts", "broadcasts/delete", "notify", "gifts", "bans", "chat/mute",
                 "chat/kick", "scores/unrank", "scores/rank", "scores/delete",
-                "photos/AAAAAAAAAAAA/hide", "designs/%s/hide" % ("A" * designs.WEB_ID_LEN),
+                "photos/AAAAAAAAAAAA/hide", "videos/AAAAAAAAAAAA/hide",
+                "designs/%s/hide" % ("A" * designs.WEB_ID_LEN),
                 "servers/save", "servers/remove", "servers/check", "relays/add", "relays/remove",
                 "events", "events/enroll", "events/x-1/start", "events/x-1/close",
                 "events/x-1/award", "events/x-1/revoke", "world-event"]
@@ -429,6 +432,51 @@ class ScoreTest(Base):
         self.assertEqual(self.post("scores/promote", {"filters": {"build": "x"}})[0], 404)
 
 
+class VideoPanelTest(tv.Base):
+    """The panel's video moderation goes through videos.admin_handle."""
+
+    panel = None  # PhotoPanelTest.panel, below
+
+    def setUp(self):
+        super().setUp()
+        routes._fails["total"].clear()
+        routes._fails["ip"].clear()
+        self.clip()
+        self.vid = self.only()[0]
+
+    def test_queue_media_and_actions(self):
+        status, d, _, _ = self.panel("GET", "videos?status=converting")
+        self.assertEqual(([v["id"] for v in d["videos"]], d["videos"][0]["poster"]), ([self.vid], None))
+        self.assertEqual(self.panel("GET", "videos?status=bogus")[0], 400)
+        self.converted(self.vid)
+        status, d, _, _ = self.panel("GET", "videos/queue")
+        self.assertEqual([v["id"] for v in d["videos"]], [self.vid])
+        for path, ctype in (("videos/media/%s.jpg" % self.vid, "image/jpeg"),
+                            ("videos/media/%s.mp4" % self.vid, "video/mp4"),
+                            ("videos/frame/%s-1.jpg" % self.vid, "image/jpeg")):
+            status, _, got, extra = self.panel("GET", path)
+            self.assertEqual((status, got), (200, ctype), path)
+            self.assertIn("Cache-Control: no-store", extra)
+        self.assertEqual(self.panel("GET", "videos/frame/%s-9.jpg" % self.vid)[0], 404)
+        status, d, _, _ = self.panel("POST", "videos/%s/release" % self.vid)
+        self.assertEqual((status, d["status"]), (200, "live"))
+        self.assertEqual(self.panel("POST", "videos/%s/ban" % self.vid)[0], 400)  # no reason
+        self.assertEqual(self.panel("POST", "videos/%s/delete" % self.vid)[0], 200)
+        self.assertEqual(self.records(), {})
+        lines = [(line["action"], line["status"]) for line in self.audit()]
+        self.assertEqual(lines, [("video release", 200), ("video ban", 400), ("video delete", 200)])
+
+    def audit(self):
+        with open(os.path.join(self.dir.name, audit.FILE)) as f:
+            return [json.loads(line) for line in f]
+
+    def test_the_page_plays_videos_from_blobs(self):
+        status, ctype, out, extra = run(routes.handle(SimpleNamespace(), "GET", "/operator/", {}, b"",
+                                                      tc.LAN))
+        csp = [h for h in extra if h.startswith("Content-Security-Policy")][0]
+        self.assertIn("media-src blob:", csp)
+
+
 class PhotoPanelTest(tc.Base):
     """The panel's photo moderation goes through community.admin_handle."""
 
@@ -709,3 +757,6 @@ class AdminBroadcastsTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+VideoPanelTest.panel = PhotoPanelTest.panel

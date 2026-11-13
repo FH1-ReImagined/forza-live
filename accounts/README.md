@@ -2,8 +2,8 @@
 
 Optional accounts for the project website: players sign in with **Discord**, **GitHub** or an
 **8-digit code sent by email**, then link the account to their game from the launcher (milestone
-M2). The link is the account's second factor: likes on the community photos and designs, "My
-items" (the player's own photos and designs, which they can delete) (milestone M3) and later
+M2). The link is the account's second factor: likes on the community photos, videos and designs,
+"My items" (the player's own photos, videos and designs, which they can delete) (milestone M3) and later
 uploads are only for linked accounts. An account that is not linked can only browse.
 
 This is a Django project with its own dependencies, image and tests. The game server
@@ -30,7 +30,7 @@ readers, and uses them on the game server's data folder, mounted read-only.
 | `members/api.py` | the django-ninja endpoints and their schemas |
 | `members/links.py` | the game link: the launcher's signed calls and the website's peek, claim and remove |
 | `members/likes.py` | likes, the public like totals, and My items with its delete |
-| `members/items.py` | the game server's photos and designs, read-only, with its own rules for which are public |
+| `members/items.py` | the game server's photos, videos and designs, read-only, with its own rules for which are public |
 | `members/game.py` | the game server's data, read-only (keys, players, bans), the signed-request check, and which keys' likes count |
 | `members/moderation.py` | the operator's tools (void likes, suspend, sign out, unlink, stats) and the purge of likes whose item is gone |
 | `members/hub.py` | the mods and texture packs hub (off unless `FORZA_HUB=1`): drafts, streamed uploads, the scanning worker's results, the review, publishing to the download host, reports and takedowns (the worker and the download host: [`hub/`](../hub/README.md)) |
@@ -56,9 +56,9 @@ readers, and uses them on the game server's data folder, mounted read-only.
   signed with the player's key (`X-Forza-Auth`).
 - This service reads the game server's data folder (`FORZA_GAME_DATA`, mounted read-only):
   `friends.json` for the public key each XUID is bound to, `players/<XUID>.json` for the gamertag,
-  the first result on the boards (and the signed sign-ins, for the optional likes wait), `banned_xuids.json`, and `community.json` and `designs.json` for the
-  photos and designs and who owns them.
-- It calls the game server for one thing only: deleting a player's own photo or design, through
+  the first result on the boards (and the signed sign-ins, for the optional likes wait), `banned_xuids.json`, and `community.json`, `videos.json` and `designs.json` for the
+  photos, videos and designs and who owns them.
+- It calls the game server for one thing only: deleting a player's own photo, video or design, through
   the game server's owner-only route (`forza_live/content/owners.py`, `FORZA_GAME_URL`,
   `FORZA_OWNER_TOKEN`), straight to its HTTP port from the internal network, never through the
   tunnel or a proxy.
@@ -115,10 +115,10 @@ away; its `message` asks the player to play on the Public server again).
 
 | Route | Answer |
 |-------|--------|
-| `POST /api/likes` | `{"kind": "photo"\|"design", "item": "<id>", "on": true\|false}` -> `{"ok": true, "on", "counted"}`. `counted`: this key's likes are in the public totals (see below). 404 `not found` when the item is not in the public feeds (taking a like back works for any item), 403 `your own`, 429 over the limits |
-| `GET /api/likes/mine?kind=photo\|design` | `{"kind", "liked": [ids], "own": [ids], "counted"}`: what this key liked, and its own public items (which it cannot like) |
-| `GET /api/likes/counts?kind=photo\|design` | anyone, no session: `{"version": 1, "kind", "generated", "counts": {"<id>": n}}`, the public totals (items with no counted like are left out). `Cache-Control: public, max-age=30` and an `ETag` (`If-None-Match` gives 304); counted again at most every 60 s in each worker. The website's build copies them into its pages |
-| `GET /api/me/items` | `{"items": [{"kind", "id", "title", "state", "public", "likes", "created"}], "counted"}`: the key's photos and designs, newest first, whatever their state: `live`, `pending` (waiting for the screening), `held` (left for the operator) or `hidden`. `public`: in the public feed (the website shows it) |
+| `POST /api/likes` | `{"kind": "photo"\|"video"\|"design", "item": "<id>", "on": true\|false}` -> `{"ok": true, "on", "counted"}`. `counted`: this key's likes are in the public totals (see below). 404 `not found` when the item is not in the public feeds (taking a like back works for any item), 403 `your own`, 429 over the limits |
+| `GET /api/likes/mine?kind=photo\|video\|design` | `{"kind", "liked": [ids], "own": [ids], "counted"}`: what this key liked, and its own public items (which it cannot like) |
+| `GET /api/likes/counts?kind=photo\|video\|design` | anyone, no session: `{"version": 1, "kind", "generated", "counts": {"<id>": n}}`, the public totals (items with no counted like are left out). `Cache-Control: public, max-age=30` and an `ETag` (`If-None-Match` gives 304); counted again at most every 60 s in each worker. The website's build copies them into its pages |
+| `GET /api/me/items` | `{"items": [{"kind", "id", "title", "state", "public", "likes", "created"}], "counted"}`: the key's photos, videos and designs, newest first, whatever their state: `live`, `pending` (waiting for the screening, or a video for its conversion), `held` (left for the operator) or `hidden`. `public`: in the public feed (the website shows it) |
 | `POST /api/me/items/delete` | `{"kind", "id"}` -> `{"ok": true, "deleted": true}`; 403 `sign in again` unless the last sign-in was in the past 10 minutes, 404 when it is not this key's, 502 `try again later` when the game server did not delete it, 503 when deleting is not configured |
 
 Which likes count in the public totals (`members.game.counted`): those of a key whose link is
@@ -134,10 +134,10 @@ deletes them. Self-likes are refused, and only items in the public feeds are cou
 rules as the game server's feeds: `community.public`, `design_feed.on_site`, and their caps).
 
 Deleting an item: the service checks the owner, then asks the game server
-(`POST /owner/photos/<id>/delete` or `/owner/designs/<id>/delete`, body `{"owner": "<XUID>"}`,
+(`POST /owner/photos/<id>/delete`, `/owner/videos/<id>/delete` or `/owner/designs/<id>/delete`, body `{"owner": "<XUID>"}`,
 header `X-Owner-Token`), which checks the owner again and refuses any request that came through
 the tunnel or a proxy or carries an `Origin`. A photo is dropped as the operator's delete drops
-it, but its picture may be uploaded again; a design leaves the game's storefront too. The item's
+it, but its picture may be uploaded again; a video likewise; a design leaves the game's storefront too. The item's
 likes are deleted with it.
 
 No answer ever contains an email address, a provider's user id or an XUID. With
@@ -469,8 +469,8 @@ It removes:
 - accounts not used for 30 days that are not linked to a game (a suspended account stays);
 - link requests that ended over an hour ago, and the launcher's used nonces past their window;
 - email accounts whose first code was never used, after a day;
-- the likes of photos and designs that are no longer in the game server's `community.json` or
-  `designs.json` (the operator deleted one, the game removed it, the screening took it down),
+- the likes of photos, videos and designs that are no longer in the game server's `community.json`,
+  `videos.json` or `designs.json` (the operator deleted one, the game removed it, the screening took it down),
   once they have been missing for 7 days (`LIKES_PURGE_GRACE_DAYS`). An item that comes back
   within that time keeps its likes. A file that is missing, damaged (with no good `.bak`) or
   empty is not judged at all, so a bad mount deletes nothing. `purge_likes [--dry-run]
@@ -540,7 +540,7 @@ a day when the past day's new links reach half of `FORZA_ACCOUNTS_LINKS_DAILY`.
 - **Link requests:** for 10 minutes (deleted an hour later): the XUID, its public key and
   gamertag, HMACs of the token and the code, and the account that claimed it.
 - **Launcher nonces:** the random nonce of each signed call, for 4 minutes, so none works twice.
-- **Likes:** the XUID of the key that gave it, the photo's or design's id, and when. Who liked
+- **Likes:** the XUID of the key that gave it, the photo's, video's or design's id, and when. Who liked
   what is never shown (only the operator sees it, in the admin); only the totals per item are
   public. A deleted item's likes are deleted with it, those of an item gone from the game server
   7 days after it went, and deleting the account deletes its key's likes.

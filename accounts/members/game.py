@@ -9,7 +9,7 @@ read-only. It reads, with the game server's own code:
   for the optional likes wait only, the signed sign-ins (firstSigned, signedDays:
   forza_live.title_services.lsp.signed_logon);
 - banned_xuids.json (forza_live.content.designs.banned_xuids);
-- community.json and designs.json, the photos and designs (members.items).
+- community.json, videos.json and designs.json, the photos, videos and designs (members.items).
 
 A signed request is checked by forza_live.core.auth.check_request: the server name (this site's
 host only), the 120 s clock window, the signature by the key the XUID is bound to, and its nonce,
@@ -26,7 +26,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from forza_live.content import community, designs
+from forza_live.content import community, designs, videos
 from forza_live.core import auth, durable
 from forza_live.social import friends
 
@@ -57,6 +57,7 @@ def configure():
     if _configured["dir"] != folder:
         designs.configure(folder)
         community.configure(folder, gamertag=lambda xuid: player(xuid).get("gamertag", ""))
+        videos.configure(folder)
         auth.SERVER_NAMES.clear()
         auth.SERVER_NAMES.add(auth.server_name(settings.SITE_HOST))
         _store.update({"mtime": None, "store": None})

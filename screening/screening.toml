@@ -19,6 +19,15 @@ hidden_refresh_seconds = 3600 # how often the hidden photos' pHashes are read ag
 enabled = true
 grids = []                    # tiles per grid for designs: none
 
+[videos]
+# The community videos (forza_live/content/videos.py: GET /admin/videos/queue). Every converted
+# clip waits held; the converter samples frames spread over it (8, at the video's own size: the
+# game's are 640x360). Each frame is scored like a photo and decided on its own: any frame's hide
+# hides the video, any frame's hold leaves it held for the maintainer, and only a video whose
+# every frame is clear is released. The title is checked once. The sound is not screened.
+enabled = true
+grids = []                    # tiles per grid for the frames: none (they are small)
+
 [runtime]
 models_dir = "/models"
 threads = 4                   # onnxruntime threads per model (they run one after the other)

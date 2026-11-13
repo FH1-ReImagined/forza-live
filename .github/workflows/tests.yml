@@ -57,6 +57,25 @@ jobs:
           python -m pip install numpy==2.5.3 pillow==12.3.0
           python -m unittest discover -s screening -p 'test_screen_*.py' -v
 
+  # The video converter (video/): its jobs, refusals and limits, and real conversions with
+  # Ubuntu's ffmpeg (clips made from a test pattern), the server's videos from the game's upload to
+  # the feed through it, and its image run as compose runs it (no network, read-only).
+  video:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Converter tests
+        run: python -m unittest discover -s video -p 'test_*.py' -v
+      - name: The server's videos with the real converter
+        run: python -m unittest tests.content.test_videos -v
+      - name: The converter's image, with no network
+        run: video/test_image.sh
+
   # The website accounts service (accounts/): its own pinned dependencies, installed by hash.
   accounts:
     runs-on: ubuntu-24.04

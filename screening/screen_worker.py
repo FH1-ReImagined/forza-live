@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Forza Live community photos and designs: the automatic screening worker (screening/README.md).
+"""Forza Live community photos, videos and designs: the automatic screening worker
+(screening/README.md).
 
-Polls the server's queue of held photos and its queue of pending designs (the design
-storefront's paint jobs and vinyl groups, before the website shows them), scores each one (NSFW
+Polls the server's queue of held photos, its queue of held videos (each scored frame by frame)
+and its queue of pending designs (the design storefront's paint jobs and vinyl groups, before
+the website shows them), scores each one (NSFW
 classifier, SigLIP2 zero-shot over the frame and, for photos, tiles; OCR and word lists over the
 picture's text, the title and a design's description) and releases it, hides it with a note
 naming the rule, or leaves it held for the maintainer (a design is moved to held, with the note).
@@ -214,6 +216,10 @@ class Worker:
         d = cfg.get("designs", {})
         self.designs_on = bool(d.get("enabled", True))
         self.design_grids = [tuple(g) for g in d.get("grids", [])]
+        v = cfg.get("videos", {})
+        self.videos_on = bool(v.get("enabled", True))
+        self.video_grids = [tuple(g) for g in v.get("grids", [])]
+        self._no_videos_until = 0.0  # a server without community videos: asked again then
         self.left = {}      # (kind, id, sha256) -> the decision that left it held: not screened again
         self.failures = {}  # (kind, id) -> image fetches that failed
         self.stop = threading.Event()
@@ -267,6 +273,22 @@ class Worker:
                 log.warning("designs' queue: %s", e)
             return [], 0
 
+    def video_queue(self):
+        """The held videos; none when off or when the server has no community videos (an older
+        forza-live: asked again an hour later). A failure here never stops the photos."""
+        if not self.videos_on or time.monotonic() < self._no_videos_until:
+            return []
+        try:
+            return self.client.video_queue()
+        except Exception as e:
+            if getattr(e, "status", None) == 404:
+                log.warning("the server has no videos queue (a forza-live before community "
+                            "videos): videos skipped for an hour")
+                self._no_videos_until = time.monotonic() + 3600
+            else:
+                log.warning("videos' queue: %s", e)
+            return []
+
     @staticmethod
     def key(p):
         return (p.get("kind", "photo"), p["id"], p["sha256"])
@@ -276,7 +298,7 @@ class Worker:
         self.refresh_hidden()
         queue = self.client.queue()
         designs, pending = self.design_queue()
-        items = queue + designs
+        items = queue + self.video_queue() + designs
         waiting = {self.key(p) for p in items}
         for key in set(self.left) - waiting:  # decided by the operator since
             del self.left[key]
@@ -290,8 +312,73 @@ class Worker:
             done += 1
         return done, len(todo) - done + max(0, pending - len(designs))
 
+    def fetch_failed(self, p, e, rec):
+        """A picture of p could not be fetched: retry later, or leave it (or hold a design)."""
+        fkey = self.key(p)[:2]
+        n = self.failures[fkey] = self.failures.get(fkey, 0) + 1
+        rec.update(decision="retry" if n < self.attempts else "hold",
+                   rule="fetch-failed", detail=str(e)[:200])
+        if getattr(e, "status", None) == 404:
+            rec.update(decision="gone", rule="gone")
+            self.failures[fkey] = self.attempts
+        elif p.get("kind") == "design" and n >= self.attempts and not self.dry_run:
+            self._act(p, "hold", "screening: hold (fetch-failed: %s)" % str(e)[:120], rec)
+        emit(rec)
+
+    def screen_video(self, p):
+        """Scores each frame of a held video like a photo, and acts on the worst decision: a
+        frame's hide hides it, a frame's hold leaves it held, every frame clear releases it."""
+        t0 = time.perf_counter()
+        rec = {"event": "video", "id": p["id"], "sha256": p["sha256"][:16],
+               "models": self.screener.versions, "seconds": p.get("seconds")}
+        verdicts, frames = [], []
+        for n, path in enumerate(p["frames"], 1):
+            try:
+                data = self.client.frame(path)
+            except Exception as e:
+                rec["frame"] = n
+                return self.fetch_failed(p, e, rec)
+            # the title and the gamertag are read once, with the first frame
+            about = p if n == 1 else {"id": p["id"], "kind": "video", "sha256": p["sha256"]}
+            try:
+                img = screen_image.decode(data, screen_image.VIDEO_MIN, screen_image.VIDEO_MAX)
+                scores, fields = self.screener.score(img, about, grids=self.video_grids, hidden={})
+                fields["size"] = "%dx%d" % img.size
+            except screen_image.BadPicture as e:
+                scores, fields = {"errors": {"decode": str(e)}}, {}
+            except Exception as e:  # never crash on a video: it stays held
+                log.exception("video %s frame %d", p["id"], n)
+                scores, fields = {"errors": {"screen": "%s: %s" % (type(e).__name__, e)}}, {}
+            v = screen_policy.decide(scores, self.cfg)
+            verdicts.append((n, v))
+            frames.append(dict({k: fields[k] for k in ("size", "nsfw", "zeroshot", "ocr", "hits", "ms")
+                                if k in fields}, frame=n, decision=v["decision"], rule=v["rule"]))
+        self.failures.pop(self.key(p)[:2], None)
+        worst = ([x for x in verdicts if x[1]["decision"] == "hide"]
+                 or [x for x in verdicts if x[1]["decision"] == "hold"] or verdicts)
+        n, verdict = worst[0]
+        detail = "frame %d of %d%s" % (n, len(verdicts),
+                                       ": " + verdict["detail"] if verdict["detail"] else "")
+        if verdict["decision"] == "release":
+            detail = "%d frames" % len(verdicts)
+        verdict = dict(verdict, detail=detail)
+        rec.update(frames=frames, decision=verdict["decision"], rule=verdict["rule"], detail=detail,
+                   rules=sorted({r[1] for _, v in verdicts for r in v["rules"]}))
+        action = verdict["decision"] if verdict["decision"] in ("release", "hide") else None
+        if action and not self.dry_run:
+            self._act(p, action, note_for(verdict), rec)
+        elif action:
+            rec["done"] = "dry-run"
+        if verdict["decision"] == "hold" and rec.get("done") in (None, "dry-run"):
+            self.left[self.key(p)] = verdict["rule"]
+        rec["ms"] = {"total": round((time.perf_counter() - t0) * 1000)}
+        rec["rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+        emit(rec)
+
     def screen(self, p):
-        """Scores one photo or design (p["kind"]) and acts on the decision."""
+        """Scores one photo, video or design (p["kind"]) and acts on the decision."""
+        if p.get("kind") == "video":
+            return self.screen_video(p)
         t0 = time.perf_counter()
         design = p.get("kind") == "design"
         rec = {"event": "design" if design else "photo", "id": p["id"]}
@@ -302,16 +389,7 @@ class Worker:
         try:
             data = self.client.image(p)
         except Exception as e:
-            n = self.failures[fkey] = self.failures.get(fkey, 0) + 1
-            rec.update(decision="retry" if n < self.attempts else "hold",
-                       rule="fetch-failed", detail=str(e)[:200])
-            if getattr(e, "status", None) == 404:
-                rec.update(decision="gone", rule="gone")
-                self.failures[fkey] = self.attempts
-            elif design and n >= self.attempts and not self.dry_run:
-                self._act(p, "hold", "screening: hold (fetch-failed: %s)" % str(e)[:120], rec)
-            emit(rec)
-            return
+            return self.fetch_failed(p, e, rec)
         self.failures.pop(fkey, None)
         try:
             if design:  # a small preview: the whole frame only, compared with hidden designs
@@ -351,6 +429,8 @@ class Worker:
         try:
             if p.get("kind") == "design":
                 self.client.design_act(p["id"], action, note)
+            elif p.get("kind") == "video":
+                self.client.video_act(p["id"], action, note)
             else:
                 self.client.act(p["id"], action, note)
             rec["done"] = action
