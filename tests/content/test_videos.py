@@ -15,6 +15,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import unittest
 import uuid
@@ -106,19 +107,24 @@ class Base(tc.Base):
         return self.upload(xuid, data if data is not None else make_asf(**kw), name=name,
                            overwrite=False, chunk=256 << 10)
 
-    def converted(self, vid, ok=True, mp4=None, poster=None, frames=3, result=None, files=None):
-        """What the converter writes for the clip: its result folder, in one rename."""
+    def converted(self, vid, ok=True, mp4=None, frames=None, result=None, files=None, seconds=15.27,
+                  poster_frame=2, frame=None, **fields):
+        """What the converter writes for the clip: its result folder, in one rename. frames:
+        how many it writes (frames_for(seconds) unless given); frame(n): frame n's bytes."""
         part = videos.folder("converted", ".%s.part" % vid)
         os.makedirs(part)
-        doc = result or ({"version": 1, "id": vid, "ok": True, "seconds": 15.27, "w": 640,
-                          "h": 360, "frames": frames} if ok else
+        want = videos.frames_for(seconds)
+        frames = want if frames is None else frames
+        doc = result or ({"version": 1, "id": vid, "ok": True, "seconds": seconds, "w": 640,
+                          "h": 360, "frames": want, "posterFrame": poster_frame} if ok else
                          {"version": 1, "id": vid, "ok": False, "reason": "ffprobe failed (exit 1)"})
+        doc.update(fields)
         made = {"result.json": json.dumps(doc).encode()}
         if ok:
             made["video.mp4"] = make_mp4() if mp4 is None else mp4
-            made["poster.jpg"] = tc.make_jpeg(640, 360) if poster is None else poster
             for n in range(1, frames + 1):
-                made["frame-%d.jpg" % n] = tc.make_jpeg(640, 360, comps=1 + 2 * (n % 2))
+                made["frame-%d.jpg" % n] = (frame(n) if frame else
+                                            tc.make_jpeg(640, 360, comps=1 + 2 * (n % 2)))
         made.update(files or {})
         for name, data in made.items():
             with open(os.path.join(part, name), "wb") as f:
@@ -168,6 +174,7 @@ class HeaderTest(unittest.TestCase):
             "no video stream": make_asf(videos_n=0),
             "more than one video stream": make_asf(videos_n=2),
             "121.0 seconds long": make_asf(seconds=121),
+            "0.50 seconds long": make_asf(seconds=0.5),
             "video size 4096x2160": make_asf(w=4096, h=2160),
             "video size 32x32": make_asf(w=32, h=32),
             "a broadcast stream": make_asf(broadcast=True),
@@ -202,12 +209,35 @@ class UploadTest(Base):
         with open(videos.folder("incoming", vid + ".wmv"), "rb") as f:
             self.assertEqual(f.read(), data)
         with open(videos.folder("incoming", vid + ".json")) as f:
-            self.assertEqual(json.load(f), {"version": 1, "id": vid, "maxSeconds": videos.MAX_SECONDS,
-                                            "maxWidth": videos.OUT_WIDTH, "frames": videos.FRAMES,
-                                            "maxBytes": videos.MAX_MP4})
+            job = json.load(f)
+        self.assertRegex(job.pop("seed"), "^[0-9a-f]{32}$")  # where the screened frames are taken
+        self.assertEqual(job, {"version": 1, "id": vid, "maxSeconds": videos.MAX_SECONDS,
+                               "maxWidth": videos.OUT_WIDTH, "maxBytes": videos.MAX_MP4})
         self.assertEqual(v["clipSha256"], hashlib.sha256(data).hexdigest())
-        self.assertEqual(self.download(ALICE, fid), data)  # the player's own file, as sent
         self.assertEqual(self.feed()["videos"], [])
+
+    def test_the_clip_is_never_kept_as_the_players_file(self):
+        small = self.clip(title="small")
+        self.assertNotIn(str(small), photos.load()["files"])
+        self.assertEqual(self.download(ALICE, small), b"")  # nothing to give back
+        self.assertFalse(os.path.exists(photos.file_path(small)))
+        refused = self.clip(seconds=600)  # refused clips too
+        self.assertNotIn(str(refused), photos.load()["files"])
+        self.assertEqual(len(self.records()), 1)
+        photo = self.upload(ALICE, tc.make_jpeg(), name="Sunset.jpg")  # a picture is kept as before
+        self.assertIn(str(photo), photos.load()["files"])
+
+    def test_the_seed_is_never_published(self):
+        self.clip()
+        vid, _ = self.only()
+        with open(videos.folder("incoming", vid + ".json")) as f:
+            seed = json.load(f)["seed"]
+        self.converted(vid)
+        status, d = self.vadmin("GET", "")
+        self.assertNotIn(seed, json.dumps(d))
+        self.assertNotIn(seed, json.dumps(videos.load()))
+        self.vadmin("POST", "/%s/release" % vid)
+        self.assertNotIn(seed, json.dumps(self.feed()))
 
     def test_pictures_still_become_photos(self):
         self.upload(ALICE, tc.make_jpeg(), name="Sunset.jpg")
@@ -264,11 +294,37 @@ class UploadTest(Base):
             self.clip(tc.CAROL)
         self.assertEqual(len(self.records()), 3)
 
-    def test_videos_count_in_the_disk_quota(self):
-        self.assertIn("videos", limits.BLOB_DIRS)
-        with mock.patch.object(limits, "DISK_CAP", 1):
-            self.clip()
+    def test_videos_have_their_own_budget(self):
+        self.assertNotIn("videos", limits.BLOB_DIRS)  # they never take the other uploads' room
+        with mock.patch.object(videos, "VIDEOS_CAP", 1000):
+            with self.assertLogs("forza-live", "INFO") as logs:
+                self.clip()
         self.assertEqual(self.records(), {})
+        self.assertIn("the videos' disk budget", " ".join(logs.output))
+        self.published()
+        limits._cache[0] = float("-inf")
+        before = limits.usage()
+        self.published(title="another")  # videos do not grow the shared quota
+        limits._cache[0] = float("-inf")
+        self.assertEqual(limits.usage(), before)
+
+    @unittest.skipIf(os.name == "nt", "the converter runs on Linux only")
+    def test_the_converter_and_the_screening_count_frames_as_the_server_does(self):
+        import importlib.util
+        mods = []
+        for rel, name in (("video/video_worker.py", "video_worker"), ("screening/screen_client.py", "screen_client")):
+            spec = importlib.util.spec_from_file_location("check_" + name, os.path.join(ROOT, rel))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mods.append(mod)
+        for hundredths in range(100, 13000, 7):
+            s = hundredths / 100
+            self.assertEqual({m.frames_for(s) for m in mods} | {videos.frames_for(s)}, {videos.frames_for(s)}, s)
+        self.assertEqual((mods[0].MAX_FRAMES, mods[1].MAX_FRAMES), (videos.MAX_FRAMES, videos.MAX_FRAMES))
+
+    def test_frames_for(self):
+        self.assertEqual([videos.frames_for(s) for s in (1, 15.27, 16, 16.01, 30, 119.99, 120, 121)],
+                         [8, 8, 8, 9, 15, 60, 60, 60])
 
 
 class ConvertedTest(Base):
@@ -282,11 +338,14 @@ class ConvertedTest(Base):
         self.assertTrue(videos.collect())
         v = self.records()[self.vid]
         self.assertEqual((v["status"], v["w"], v["h"], v["frames"], v["seconds"]),
-                         ("held", 640, 360, 3, 15.27))
+                         ("held", 640, 360, 8, 15.27))
         with open(videos.media_path(self.vid, ".mp4"), "rb") as f:
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(), v["sha256"])
-        for n in (1, 2, 3):
+        for n in range(1, 9):
             self.assertTrue(os.path.isfile(videos.frame_path(self.vid, n)))
+        with open(videos.media_path(self.vid, ".jpg"), "rb") as f, \
+                open(videos.frame_path(self.vid, 2), "rb") as g:
+            self.assertEqual(f.read(), g.read())  # the poster is the screened frame 2
         self.assertEqual(os.listdir(videos.folder("incoming")), [])
         self.assertEqual(os.listdir(videos.folder("converted")), [])
         self.assertEqual(self.feed()["videos"], [])  # held: not public until screened
@@ -299,11 +358,17 @@ class ConvertedTest(Base):
             videos.collect()
         self.assertEqual(self.records()[self.vid]["status"], "held")
 
-    def test_the_poster_is_cleaned(self):
-        self.converted(self.vid, poster=tc.make_jpeg(640, 360, extra=tc.METADATA, trailing=tc.SECRET))
+    def test_the_poster_and_frames_are_cleaned_and_a_poster_of_its_own_is_ignored(self):
+        dirty = tc.make_jpeg(640, 360, extra=tc.METADATA, trailing=tc.SECRET)
+        self.converted(self.vid, frame=lambda n: dirty,
+                       files={"poster.jpg": tc.make_jpeg(800, 450)})  # never screened: not used
         videos.collect()
+        v = self.records()[self.vid]
         with open(videos.media_path(self.vid, ".jpg"), "rb") as f:
-            self.assertNotIn(tc.SECRET, f.read())
+            poster = f.read()
+        self.assertNotIn(tc.SECRET, poster)
+        self.assertEqual(community.clean_jpeg(poster, videos.MIN_VIDEO)[1:], (640, 360))
+        self.assertEqual((v["w"], v["h"]), (640, 360))
 
     def check_dropped(self, **kw):
         self.converted(self.vid, **kw)
@@ -330,18 +395,101 @@ class ConvertedTest(Base):
     def test_an_mp4_without_h264(self):
         self.check_dropped(mp4=box(b"ftyp", b"isom\x00\x00\x00\x00") + box(b"moov", b"mp4v") + box(b"mdat"))
 
-    def test_a_bad_poster(self):
-        self.check_dropped(poster=b"GIF89a" + bytes(100))
+    def test_a_bad_frame(self):
+        self.check_dropped(frame=lambda n: b"GIF89a" + bytes(100) if n == 3 else tc.make_jpeg(640, 360))
 
-    def test_no_frames(self):
-        self.check_dropped(frames=0)
+    def test_frames_that_are_not_what_was_asked(self):
+        cases = [{"frames": 0}, {"frames": 7}, {"frames": 9}, {"frames": 8, "seconds": 30},
+                 {"posterFrame": 0}, {"posterFrame": 9}, {"posterFrame": True}, {"posterFrame": "2"},
+                 {"frame": lambda n: tc.make_jpeg(640 if n < 5 else 1280, 360 if n < 5 else 720)}]
+        self.enterContext(mock.patch.multiple(videos, PER_DAY=100, PER_HOUR=100, MAX_WAITING=100))
+        for i, kw in enumerate(cases):
+            with self.subTest(case=i):
+                before = set(self.records())
+                self.clip(title="clip %d" % i)
+                vid, = set(self.records()) - before
+                frames = kw.pop("frames", None)
+                seconds = kw.pop("seconds", 15.27)
+                self.converted(vid, frames=frames, seconds=seconds, **kw)
+                with self.assertLogs("forza-live", "INFO") as logs:
+                    videos.collect()
+                self.assertNotIn(vid, self.records())
+                self.assertIn("not published", " ".join(logs.output))
+                self.assertEqual(os.listdir(videos.folder("converted")), [])
+
+    def test_a_link_in_the_result_is_not_followed(self):
+        secret = os.path.join(self.dir.name, "secret.mp4")
+        with open(secret, "wb") as f:
+            f.write(make_mp4())  # a file the converter should not be able to hand over
+        self.converted(self.vid)
+        out = videos.folder("converted", self.vid)
+        os.remove(os.path.join(out, "video.mp4"))
+        try:
+            os.symlink(secret, os.path.join(out, "video.mp4"))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symbolic links here")
+        with self.assertLogs("forza-live", "INFO"):
+            videos.collect()
+        self.assertEqual(self.records(), {})
+        self.assertTrue(os.path.isfile(secret))
+
+    def test_a_result_folder_that_is_a_link(self):
+        elsewhere = os.path.join(self.dir.name, "elsewhere")
+        os.makedirs(elsewhere)
+        with open(os.path.join(elsewhere, "keep"), "w") as f:
+            f.write("x")
+        os.makedirs(videos.folder("converted"), exist_ok=True)
+        try:
+            os.symlink(elsewhere, videos.folder("converted", self.vid))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symbolic links here")
+        with self.assertLogs("forza-live", "INFO"):
+            videos.collect()
+        self.assertEqual(self.records(), {})
+        self.assertEqual(os.listdir(videos.folder("converted")), [])
+        self.assertTrue(os.path.isfile(os.path.join(elsewhere, "keep")))  # the link went, not its target
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no FIFOs here")
+    def test_a_fifo_in_the_result_does_not_block_the_server(self):
+        self.converted(self.vid)
+        out = videos.folder("converted", self.vid)
+        os.remove(os.path.join(out, "frame-1.jpg"))
+        os.mkfifo(os.path.join(out, "frame-1.jpg"))
+        done = []
+        t = threading.Thread(target=lambda: done.append(videos.collect()), daemon=True)
+        with self.assertLogs("forza-live", "INFO") as logs:
+            t.start()
+            t.join(5)
+        self.assertEqual(done, [True], "collect() blocked on a FIFO")
+        self.assertIn("not a plain file", " ".join(logs.output))
+        self.assertEqual(self.records(), {})
+
+    def test_too_many_files_or_too_large_ones(self):
+        self.converted(self.vid, files={"junk-%d" % i: b"x" for i in range(videos.MAX_RESULT_ENTRIES)})
+        with self.assertLogs("forza-live", "INFO") as logs:
+            videos.collect()
+        self.assertIn("files in the converter's result", " ".join(logs.output))
+        self.assertEqual(self.records(), {})
+
+    def test_a_result_that_breaks_the_server_is_looked_at_once(self):
+        self.converted(self.vid)
+        with mock.patch.object(videos, "_finish", side_effect=RuntimeError("boom")) as f:
+            with self.assertLogs("forza-live", "ERROR") as logs:
+                self.assertTrue(videos.collect())
+            videos.collect()
+        self.assertEqual(f.call_count, 1)
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(self.records(), {})
+        self.assertEqual(os.listdir(videos.folder("converted")), [])
+        videos.configure(self.dir.name)
+        self.assertEqual(self.records(), {})  # saved
 
     def test_a_bad_length(self):
         self.check_dropped(result={"version": 1, "id": self.vid, "ok": True, "seconds": 10 ** 6})
 
-    def test_the_quota(self):
-        with mock.patch.object(limits, "DISK_CAP", 1):
-            self.check_dropped()
+    def test_the_videos_budget(self):
+        with mock.patch.object(videos, "VIDEOS_CAP", 3000):
+            self.assertIn("budget", self.check_dropped())
 
     def test_a_clip_the_converter_never_answered(self):
         videos.collect(now=time.time() + videos.CONVERT_WAIT - 60)
@@ -422,7 +570,8 @@ class FeedTest(Base):
         for header in ("bytes=%d-" % n, "bytes=9-3", "bytes=-0", "bytes=-"):
             status, _, _, extra = self.http("GET", url, {"Range": header})
             self.assertEqual((status, extra["Content-Range"]), (416, "bytes */%d" % n), header)
-        for header in ("bytes=0-1,5-6", "items=0-1"):  # served whole
+        for header in ("bytes=0-1,5-6", "items=0-1", "bytes=" + "9" * 5000 + "-",
+                       "bytes=0-" + "9" * 5000):  # served whole
             self.assertEqual(self.http("GET", url, {"Range": header})[0], 200, header)
         etag = self.http("GET", url)[3]["ETag"]
         self.assertEqual(self.http("GET", url, {"Range": "bytes=0-1", "If-Range": etag})[0], 206)
@@ -464,12 +613,12 @@ class ModerationTest(Base):
         self.converted(vid)
         status, d = self.vadmin("GET", "/queue")
         rec, = d["videos"]
-        self.assertEqual(rec["frames"], ["/admin/videos/frame/%s-%d.jpg" % (vid, n) for n in (1, 2, 3)])
+        self.assertEqual(rec["frames"], ["/admin/videos/frame/%s-%d.jpg" % (vid, n) for n in range(1, 9)])
         for path in rec["frames"] + [rec["poster"], rec["video"]]:
             status, ctype, data, extra = self.http("GET", path, {"X-Admin-Token": tc.TOKEN})
             self.assertEqual(status, 200, path)
             self.assertEqual(extra["Cache-Control"], "no-store")
-        self.assertEqual(self.vadmin("GET", "/frame/%s-4.jpg" % vid)[0], 404)
+        self.assertEqual(self.vadmin("GET", "/frame/%s-9.jpg" % vid)[0], 404)
         status, d = self.vadmin("POST", "/%s/hide" % vid, json.dumps({"note": "screening: hide"}).encode())
         self.assertEqual((status, d["status"], d["note"]), (200, "hidden", "screening: hide"))
         self.assertEqual(self.vadmin("POST", "/%s/release" % vid)[0], 409)  # the worker cannot undo it
@@ -523,13 +672,12 @@ class OwnerAndRemovalTest(Base):
         self.clip()  # theirs to upload again
         self.assertEqual(len(self.records()), 1)
 
-    def test_overwrite_oldest_removes_the_video(self):
+    def test_a_video_takes_no_slot_of_the_players_files(self):
         with mock.patch.object(photos, "MAX_PER_PLAYER", 1):
-            fid = self.clip()
-            self.assertEqual(len(self.records()), 1)
-            self.upload(ALICE, tc.make_jpeg(), name="PHOTO2", overwrite=True)
-        self.assertEqual(self.records(), {})
-        self.assertNotIn(str(fid), photos.load()["files"])
+            self.clip()
+            self.upload(ALICE, tc.make_jpeg(), name="PHOTO2", overwrite=False)  # room: the clip is not kept
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(len(community.load()["photos"]), 1)
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
@@ -555,7 +703,7 @@ class ConverterTest(Base):
                        capture_output=True)
         videos.collect()
         v = self.records()[vid]
-        self.assertEqual((v["status"], v["w"], v["h"], v["frames"]), ("held", 640, 360, videos.FRAMES))
+        self.assertEqual((v["status"], v["w"], v["h"], v["frames"]), ("held", 640, 360, videos.frames_for(3)))
         self.assertEqual(self.vadmin("POST", "/%s/release" % vid)[0], 200)
         entry, = self.feed()["videos"]
         mp4 = self.http("GET", entry["video"])[2]

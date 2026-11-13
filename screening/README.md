@@ -66,12 +66,18 @@ Calibration and the hold rate:
 The game's movie uploads become [community videos](../docs/operating.md#community-videos) once
 the [video converter](../video/README.md) has made an MP4 of them. Every converted video starts
 `held`, whatever `FORZA_COMMUNITY_HOLD` says, so none is published before this worker (or the
-operator) has passed it. The converter samples **8 frames** spread over the clip, at the video's
-own size (the game's clips are 640x360), and the server serves them at
-`GET /admin/videos/frame/<id>-<n>.jpg`.
+operator) has passed it. The converter samples **one frame in each 2 s** of the video (at least
+8, at most 60 for a 2-minute clip), each at a random instant inside its 2 s, chosen from a seed the
+server picks for each clip and never publishes. The frames are at the video's own size (the game's
+clips are 640x360), and the server serves them at `GET /admin/videos/frame/<id>-<n>.jpg`. **The
+poster is one of these frames**: the server publishes no picture of a video that was not screened.
 
 - Each frame is scored like a photo, with the same models, word lists and thresholds (the decision
-  table above), as a whole frame (`[videos] grids = []`: the frames are small).
+  table above): as a whole frame up to `[videos] wide_width` (800 px), and a wider frame (a
+  1280x720 clip's) also in 2 x 2 tiles of 640x360 (`wide_grids`), as photos are, so a small
+  symbol is not squashed away.
+- A video whose queue entry has fewer (or more) frames than its length asks for is never released:
+  it is decided as doubtful (`frames-missing`) without being scored.
 - **The worst frame decides.** Any frame's hide rule hides the video, with a note naming the
   frame (`screening: hide (nsfw-high: frame 3 of 8: ...)`); only a video whose every frame is
   clear is released (`screening: release (clear: 8 frames)`).
@@ -91,11 +97,19 @@ own size (the game's clips are 640x360), and the server serves them at
 The log has one line per video (`"event":"video"`) with its id, the decision, the rule, the frame
 that decided and every frame's scores (`frames`).
 
-What it does not see: **the sound** (a game replay has the race's sound only; nothing is
-screened in it), anything shown between the sampled frames (8 frames of a 15 s clip are about
-2 s apart: a picture held on screen for less than that can be missed), and pHash (videos are not
-compared with hidden ones). Player reports and the operator are the net there. At about 1 s a
-frame, a video takes about 8 s; the server caps videos at 20 an hour.
+What it cannot catch, honestly:
+
+- **Anything on screen for less than about 2 s.** One instant in each 2 s is looked at. The
+  instants are random and secret, so a clip cannot be built around them, but a picture shown for
+  a shorter time is seen only if its instant happens to fall on it: half a second in a 2 s slot is
+  seen one time in four. A clip that flashes something for a few frames is likely to pass.
+- **The sound.** Nothing is screened in it (a game replay has the race's sound only, but a
+  modified client could upload any sound).
+- **Re-uploads of hidden videos.** There is no pHash for videos.
+
+Player reports and the operator (who sees every decision in the panel) are the net there. At about
+1 s a frame (more for wide frames, in tiles), a 15 s clip takes about 8 s and a 2-minute one about
+a minute; the server caps videos at 20 an hour.
 
 ## Designs
 

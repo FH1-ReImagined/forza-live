@@ -260,7 +260,7 @@ def configure(args):
     videos.configure(DATA_DIR)
     # a finished upload is a movie (videos.py) or a picture (community.py)
     photos.configure(DATA_DIR, proven=caller_signed, finished=videos.upload_finished,
-                     removed=videos.file_removed)
+                     removed=community.photo_removed)
     designs.configure(DATA_DIR, proven=caller_signed, trusted=caller_trusted)
     design_feed.configure()
     shader_lists.configure(DATA_DIR)

@@ -219,6 +219,10 @@ class Worker:
         v = cfg.get("videos", {})
         self.videos_on = bool(v.get("enabled", True))
         self.video_grids = [tuple(g) for g in v.get("grids", [])]
+        # a frame wider than this is scored in tiles too, as photos are (a small symbol in a
+        # 1280 px frame is not squashed away in the whole frame's 224 px)
+        self.video_wide = int(v.get("wide_width", 800))
+        self.video_wide_grids = [tuple(g) for g in v.get("wide_grids", [[2, 2]])]
         # "hide": a video with a doubtful frame is hidden, so none waits for the maintainer (who
         # can still unhide it); "hold": it stays held, as a doubtful photo does
         self.video_doubtful = str(v.get("doubtful", "hold"))
@@ -340,7 +344,11 @@ class Worker:
         rec = {"event": "video", "id": p["id"], "sha256": p["sha256"][:16],
                "models": self.screener.versions, "seconds": p.get("seconds")}
         verdicts, frames = [], []
-        for n, path in enumerate(p["frames"], 1):
+        if p.get("expected") != len(p["frames"]):  # never released with frames missing
+            verdicts.append((0, {"decision": "hold", "rule": "frames-missing",
+                                 "detail": "%d frames, %s expected" % (len(p["frames"]), p.get("expected")),
+                                 "rules": [("hold", "frames-missing", "")]}))
+        for n, path in enumerate([] if verdicts else p["frames"], 1):
             try:
                 data = self.client.frame(path)
             except Exception as e:
@@ -350,7 +358,8 @@ class Worker:
             about = p if n == 1 else {"id": p["id"], "kind": "video", "sha256": p["sha256"]}
             try:
                 img = screen_image.decode(data, screen_image.VIDEO_MIN, screen_image.VIDEO_MAX)
-                scores, fields = self.screener.score(img, about, grids=self.video_grids, hidden={})
+                grids = self.video_wide_grids if img.width > self.video_wide else self.video_grids
+                scores, fields = self.screener.score(img, about, grids=grids, hidden={})
                 fields["size"] = "%dx%d" % img.size
             except screen_image.BadPicture as e:
                 scores, fields = {"errors": {"decode": str(e)}}, {}
@@ -365,8 +374,8 @@ class Worker:
         worst = ([x for x in verdicts if x[1]["decision"] == "hide"]
                  or [x for x in verdicts if x[1]["decision"] == "hold"] or verdicts)
         n, verdict = worst[0]
-        detail = "frame %d of %d%s" % (n, len(verdicts),
-                                       ": " + verdict["detail"] if verdict["detail"] else "")
+        detail = ("frame %d of %d%s" % (n, len(verdicts), ": " + verdict["detail"] if verdict["detail"] else "")
+                  if n else verdict["detail"])
         if verdict["decision"] == "release":
             detail = "%d frames" % len(verdicts)
         verdict = dict(verdict, detail=detail)

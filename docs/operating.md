@@ -261,9 +261,12 @@ The game's movie uploads (replay clips, WMV) become videos only with the
 [video converter](../video/README.md) running beside the server (`COMPOSE_PROFILES=videos` in
 `.env` with the repository's `compose.yaml`). Without it a clip waits a day and is dropped, and
 nothing is published. A converted video is **always held** first, whatever
-`FORZA_COMMUNITY_HOLD` says: the [screening worker](#automatic-screening) scores 8 frames of it
-and releases it, hides it or leaves it held for you, and without the worker you release each one
-yourself. The routes have the photos' rules (the LAN or an ssh tunnel, the token in its header
+`FORZA_COMMUNITY_HOLD` says: the [screening worker](#automatic-screening) scores one frame in
+each 2 s of it (at random instants that only the server and the converter know; the poster is one
+of them) and releases or hides it, and without the worker you decide each one yourself. Videos
+have a disk budget of their own, `FORZA_VIDEOS_CAP_MB` (2048), apart from the quota of the other
+uploads (`FORZA_DISK_CAP_MB`): they can never stop the photos, ghosts or designs. The uploaded
+clip is not kept: it is deleted once the converter has made its copy, or when it is refused. The routes have the photos' rules (the LAN or an ssh tunnel, the token in its header
 only, no proxy, no `Origin`). With `T` and `S` as above:
 
 ```

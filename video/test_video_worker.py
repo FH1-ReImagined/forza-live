@@ -45,7 +45,7 @@ class Base(unittest.TestCase):
         self.dir.cleanup()
 
     def job(self, vid=VID, **fields):
-        doc = {"version": 1, "id": vid, "maxSeconds": 120, "maxWidth": 1280, "frames": 4,
+        doc = {"version": 1, "id": vid, "maxSeconds": 120, "maxWidth": 1280, "seed": "ab" * 16,
                "maxBytes": 32 << 20}
         doc.update(fields)
         with open(os.path.join(self.incoming, vid + ".json"), "w") as f:
@@ -80,14 +80,65 @@ class JobTest(Base):
         self.assertEqual(vw.pending(self.incoming, self.converted), [])
 
     def test_the_jobs_limits_only_lower_the_workers(self):
-        self.job(maxSeconds=10 ** 6, maxWidth=4096, frames=99, maxBytes=1 << 40)
+        self.job(maxSeconds=10 ** 6, maxWidth=4096, maxBytes=1 << 40)
         got = vw.job_limits(os.path.join(self.incoming, VID + ".json"))
-        self.assertEqual((got["maxSeconds"], got["maxWidth"], got["frames"], got["maxBytes"]),
-                         (vw.MAX_SECONDS, vw.OUT_WIDTH, vw.MAX_FRAMES, vw.MAX_BYTES))
-        self.job(maxSeconds=5, maxWidth=320, frames=2, maxBytes="lots")
+        self.assertEqual((got["maxSeconds"], got["maxWidth"], got["maxBytes"], got["seed"]),
+                         (vw.MAX_SECONDS, vw.OUT_WIDTH, vw.MAX_BYTES, b"\xab" * 16))
+        self.job(maxSeconds=5, maxWidth=320, maxBytes="lots", seed="not hex")
         got = vw.job_limits(os.path.join(self.incoming, VID + ".json"))
-        self.assertEqual((got["maxSeconds"], got["maxWidth"], got["frames"], got["maxBytes"]),
-                         (5, 320, 2, vw.MAX_BYTES))
+        self.assertEqual((got["maxSeconds"], got["maxWidth"], got["maxBytes"]), (5, 320, vw.MAX_BYTES))
+        self.assertEqual(len(got["seed"]), 16)  # a random one
+
+    def test_the_screened_instants(self):
+        self.assertEqual([vw.frames_for(s) for s in (1, 15.27, 16, 16.01, 30, 120)], [8, 8, 8, 9, 15, 60])
+        seed = b"\x01" * 16
+        times = vw.frame_times(15.27, 8, seed)
+        self.assertEqual(times, vw.frame_times(15.27, 8, seed))  # the seed decides
+        for k, t in enumerate(times):  # one inside each eighth
+            self.assertTrue(15.27 * k / 8 <= t < 15.27 * (k + 1) / 8, (k, t))
+        self.assertNotEqual(times, vw.frame_times(15.27, 8, b"\x02" * 16))
+        self.assertNotEqual(times, [15.27 * (k + 0.5) / 8 for k in range(8)])
+        late = vw.frame_times(120, 60, seed)
+        self.assertTrue(all(t <= 119.9 for t in late) and len(late) == 60)
+
+    def test_every_run_has_one_thread_and_a_small_malloc(self):
+        seen = []
+
+        def fake_popen(args, **kw):
+            seen.append((args, kw["env"]))
+            raise OSError("not really")
+        with mock.patch.object(vw.subprocess, "Popen", fake_popen):
+            for call in (lambda: vw.probe("x", vw.INPUT), lambda: vw.picture("x", 1.0, "y"),
+                         lambda: vw.brightness("x", 3), lambda: vw.convert("x", "y", 3, True, 640, 1 << 20)):
+                with self.assertRaises(vw.Refused):
+                    call()
+        for args, env in seen:
+            self.assertEqual(env["MALLOC_ARENA_MAX"], "2")
+            if os.path.basename(args[0]) == "ffmpeg":
+                i = args.index("-i")
+                self.assertIn("-threads", args[:i])          # the decoder
+                self.assertIn("-threads", args[i:])          # the encoder
+                self.assertEqual(args[args.index("-filter_threads") + 1], "1")  # the filters
+
+    def test_a_runs_process_group_is_killed(self):
+        with mock.patch.object(vw, "kill_group") as kill:
+            out, _ = vw.run([sys.executable, "-c", "print('hi')"], timeout=30)
+        self.assertEqual(out.strip(), b"hi")
+        kill.assert_called()
+
+    def test_a_job_that_is_gone_and_stale_leftovers(self):
+        self.job()
+        os.remove(os.path.join(self.incoming, VID + ".json"))
+        self.assertIsNone(vw.handle(self.incoming, self.converted, VID))
+        self.assertEqual(os.listdir(self.converted), [])
+        os.makedirs(os.path.join(self.converted, ".%s.part" % VID))
+        with open(os.path.join(self.converted, ".ZZZZZZZZZZZZ.attempts"), "w") as f:
+            f.write("1")
+        self.job("YYYYYYYYYYYY")
+        with open(os.path.join(self.converted, ".YYYYYYYYYYYY.attempts"), "w") as f:
+            f.write("1")
+        vw.tidy(self.incoming, self.converted)
+        self.assertEqual(os.listdir(self.converted), [".YYYYYYYYYYYY.attempts"])  # its job is waiting
 
     def test_bad_jobs_get_a_failed_result(self):
         for body in (b"not json", b'{"version": 2}', b"[1]", b"{" + b" " * 5000 + b"}"):
@@ -128,9 +179,9 @@ class JobTest(Base):
         self.assertIn(vw.resource.RLIMIT_NOFILE, got)
 
     def test_ffmpeg_is_told_to_read_asf_from_a_file_with_windows_media_decoders_only(self):
-        self.assertEqual(vw.INPUT[:2], ["-f", "asf"])
-        self.assertEqual(vw.INPUT[2:4], ["-protocol_whitelist", "file"])
-        self.assertEqual(set(vw.INPUT[5].split(",")), set(vw.VIDEO_CODECS + vw.AUDIO_CODECS))
+        self.assertEqual(vw.INPUT[:4], ["-threads", "1", "-f", "asf"])
+        self.assertEqual(vw.INPUT[4:6], ["-protocol_whitelist", "file"])
+        self.assertEqual(set(vw.INPUT[7].split(",")), set(vw.VIDEO_CODECS + vw.AUDIO_CODECS))
 
     def test_a_missing_ffmpeg_fails_the_clip_not_the_worker(self):
         self.job()
@@ -143,17 +194,18 @@ class JobTest(Base):
 
 @unittest.skipUnless(HAVE_FFMPEG, "ffmpeg and ffprobe are not installed")
 class ConversionTest(Base):
-    def test_a_clip_becomes_an_mp4_with_a_poster_and_frames_and_no_metadata(self):
+    def test_a_clip_becomes_an_mp4_with_its_frames_and_no_metadata(self):
         make_clip(self.clip_path(), extra=["-metadata", "title=SECRET-TITLE",
                                            "-metadata", "artist=SECRET-NAME"])
         self.job()
         self.run_once()
         r = self.result()
         self.assertTrue(r["ok"], r)
-        self.assertEqual((r["w"], r["h"], r["frames"]), (640, 360, 4))
+        self.assertEqual((r["w"], r["h"], r["frames"]), (640, 360, 8))
+        self.assertTrue(1 <= r["posterFrame"] <= 8)  # the poster is one of the screened frames
         self.assertAlmostEqual(r["seconds"], 3, delta=0.2)
-        self.assertEqual(self.files(), ["frame-1.jpg", "frame-2.jpg", "frame-3.jpg", "frame-4.jpg",
-                                        "poster.jpg", "result.json", "video.mp4"])
+        self.assertEqual(self.files(), sorted(["frame-%d.jpg" % k for k in range(1, 9)]
+                                              + ["result.json", "video.mp4"]))
         out = os.path.join(self.converted, VID)
         with open(os.path.join(out, "video.mp4"), "rb") as f:
             mp4 = f.read()
@@ -167,7 +219,7 @@ class ConversionTest(Base):
         self.assertEqual(codecs, ["aac", "h264"])
         h264 = [s for s in probe["streams"] if s["codec_name"] == "h264"][0]
         self.assertEqual((h264["pix_fmt"], h264["profile"]), ("yuv420p", "Main"))
-        for name in ("poster.jpg", "frame-1.jpg"):
+        for name in ("frame-1.jpg", "frame-8.jpg"):
             with open(os.path.join(out, name), "rb") as f:
                 self.assertEqual(f.read(3), b"\xff\xd8\xff")
         self.assertEqual(sorted(os.listdir(self.converted)), [VID])  # no .part, no attempts note
@@ -179,6 +231,23 @@ class ConversionTest(Base):
         r = self.result()
         self.assertTrue(r["ok"], r)
         self.assertEqual((r["w"], r["h"]), (640, 360))
+
+    def test_short_clips_and_non_square_pixels_are_refused(self):
+        make_clip(self.clip_path(), seconds=0.5, audio=False)
+        self.job()
+        self.run_once()
+        self.assertIn("seconds long", self.result()["reason"])
+        shutil.rmtree(os.path.join(self.converted, VID))
+        make_clip(self.clip_path(), seconds=2, audio=False, extra=["-vf", "setsar=2/1"])
+        self.run_once()
+        self.assertIn("not square", self.result()["reason"])
+
+    def test_with_a_tight_address_space_on_any_number_of_cores(self):
+        make_clip(self.clip_path(), seconds=3, size="1920x1080")
+        self.job()
+        with mock.patch.object(vw, "MEMORY", 600 << 20):  # well under the 1 GiB of production
+            self.run_once()
+        self.assertTrue(self.result()["ok"], self.result())
 
     def test_a_blank_picture_is_refused(self):
         make_clip(self.clip_path(), seconds=2, source="color=c=black")

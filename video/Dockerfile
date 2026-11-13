@@ -7,7 +7,10 @@
 # root and no privileges (compose.yaml, service video-converter): it reads the game server's clips
 # read-only and writes the converted videos beside them.
 FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
-RUN apt-get update \
+# A new value (docker build --build-arg REFRESH=$(date +%F)) installs Debian's latest ffmpeg
+# again instead of the cached layer (README.md, "Keeping ffmpeg up to date").
+ARG REFRESH=0
+RUN echo "ffmpeg from Debian's mirror, refresh $REFRESH" && apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10003 converter \

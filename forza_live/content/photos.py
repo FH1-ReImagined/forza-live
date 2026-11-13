@@ -32,9 +32,9 @@ shot is not kept as a file: once it has arrived it goes to community (which publ
 smaller copy, or nothing) and is forgotten.
 
 The game's movie upload (a replay clip, an ASF/WMV file named like "Forza14930605") comes the
-same way: LargeFileUpload.Create, then the clip in chunks. It is kept like any other file here;
-the finished hook (videos.upload_finished) tells it from a picture and makes it a community
-video (videos.py), never a photo.
+same way: LargeFileUpload.Create, then the clip in chunks. The finished hook
+(videos.upload_finished) tells it from a picture, copies it for the video converter (videos.py)
+and has it forgotten here: a clip is never kept as one of the player's files, whatever its size.
 
 A finished photo mode upload (kind "large") is handed to configure(finished=) with whether it was
 signed by the player's own key (its Create and the call that completed it; configure(proven=),

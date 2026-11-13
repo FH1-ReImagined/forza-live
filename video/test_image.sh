@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # The video converter's image, run the way compose.yaml runs it (no network, a read-only root, no
 # capabilities, its own user, its memory and process limits), on clips made here by the image's
-# own ffmpeg from a test pattern and a tone: one to convert, one blank picture, one that is not a
-# clip. Nothing is downloaded but the image's packages.
+# own ffmpeg from a test pattern and a tone: one to convert (1920x1080, under an address space of
+# 600 MB per ffmpeg run, well under production's 1 GiB: a run whose thread pools grew with the
+# machine's CPU count fails it), one blank picture, one that is not a clip. Nothing is downloaded
+# but the image's packages.
 #   video/test_image.sh          (docker, or podman when there is no docker)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,15 +27,15 @@ make() {  # id, the lavfi video source
     "$ENGINE" run --rm --network none --entrypoint ffmpeg "${USERNS[@]}" --user 10003:10003 \
         -v "$WORK/incoming:/out${Z/,/:}" "$IMAGE" -nostdin -v error -f lavfi -i "$2" \
         -f lavfi -i "sine=f=440:d=4:sample_rate=48000" -c:v wmv2 -b:v 800k -c:a wmav2 -f asf "/out/$1.wmv"
-    printf '{"version":1,"id":"%s","maxSeconds":120,"maxWidth":1280,"frames":8,"maxBytes":33554432}' "$1" \
+    printf '{"version":1,"id":"%s","maxSeconds":120,"maxWidth":1280,"maxBytes":33554432,"seed":"00112233445566778899aabbccddeeff"}' "$1" \
         > "$WORK/incoming/$1.json"
 }
-make GOODCLIPAAAA "testsrc2=s=640x360:r=20:d=4"
+make GOODCLIPAAAA "testsrc2=s=1920x1080:r=30:d=4"
 make BLANKCLIPAAA "color=c=black:s=640x360:r=20:d=4"
 printf 'not a clip' > "$WORK/incoming/NOTACLIPAAAA.wmv"
 printf '{"version":1,"id":"NOTACLIPAAAA"}' > "$WORK/incoming/NOTACLIPAAAA.json"
 "$ENGINE" run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges "${USERNS[@]}" \
-    --user 10003:10003 --tmpfs /tmp:size=16m --pids-limit 64 --memory 1536m \
+    --user 10003:10003 --tmpfs /tmp:size=16m --pids-limit 64 --memory 1536m -e FORZA_VIDEO_MEMORY_MB=600 \
     -v "$WORK/incoming:/incoming:ro$Z" -v "$WORK/converted:/converted${Z/,/:}" \
     "$IMAGE" --incoming /incoming --converted /converted --once
 python3 -I - "$WORK" <<'PY'
@@ -48,7 +50,8 @@ if bad:
 good = c / "GOODCLIPAAAA"
 assert (good / "video.mp4").read_bytes()[4:8] == b"ftyp"
 assert sorted(p.name for p in good.iterdir()) == sorted(
-    ["result.json", "video.mp4", "poster.jpg"] + ["frame-%d.jpg" % n for n in range(1, 9)])
+    ["result.json", "video.mp4"] + ["frame-%d.jpg" % n for n in range(1, 9)])
+assert (r["GOODCLIPAAAA"]["w"], r["GOODCLIPAAAA"]["frames"]) == (1280, 8) and 1 <= r["GOODCLIPAAAA"]["posterFrame"] <= 8
 assert "blank" in r["BLANKCLIPAAA"]["reason"], r["BLANKCLIPAAA"]
 print("image test passed: %s" % r["GOODCLIPAAAA"])
 PY

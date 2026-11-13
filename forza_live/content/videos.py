@@ -8,17 +8,20 @@ is an ASF (WMV) file: VC-1 video and WMA 2 audio (640x360 and 48 kHz stereo from
 2026), titled by the game after the car and the route ("Subaru WRX '05 on Beaumont - Stage 3")
 and tagged with the driver's name. When an upload finishes, photos hands it to upload_finished:
 a file that starts with the ASF Header Object (or is named .wmv or .asf) comes here, anything
-else goes on to community.photo_uploaded as before. A clip is never read as a picture.
+else goes on to community.photo_uploaded as before. A clip is never read as a picture, and the
+uploaded clip is never kept as one of the player's files (photos forgets it once it is here,
+whatever its size): only the converter's copy is kept.
 
 A clip becomes a community video if:
 - the upload was signed with the player's own key, the player is not banned and has a gamertag
   on record (community.photo_uploaded's rules);
 - its ASF header reads (read_asf): one video stream of MIN_VIDEO to MAX_VIDEO pixels, at most
-  MAX_STREAMS streams, at most MAX_SECONDS long, at most MAX_CLIP bytes;
+  MAX_STREAMS streams, MIN_SECONDS to MAX_SECONDS long, at most MAX_CLIP bytes;
 - the player's caps (PER_DAY a day, PER_PLAYER in all) and the server's (PER_HOUR an hour, and
-  MAX_WAITING clips waiting for the converter) allow it, and the disk quota has room;
-- the converter turns it into an MP4 (H.264 and AAC) with a poster and frames for screening, and
-  what it hands back passes the checks here (check_mp4, community.clean_jpeg). A clip whose
+  MAX_WAITING clips waiting for the converter) allow it, and the videos' own disk budget
+  (VIDEOS_CAP, FORZA_VIDEOS_CAP_MB: apart from the quota of the other uploads) has room;
+- the converter turns it into an MP4 (H.264 and AAC) and frames for screening, and what it hands
+  back passes the checks here (check_mp4, community.clean_jpeg, the frames' count). A clip whose
   picture is blank (every frame one flat colour) is not published.
 
 Anything else is simply not published: the game's upload succeeds all the same.
@@ -27,19 +30,25 @@ The conversion does not happen in this process. The clip is copied to
 DATA_DIR/videos/incoming/<id>.wmv with a job beside it (<id>.json, written last), and the video
 converter (video/ in this repository: ffmpeg in a container with no network, a read-only root,
 memory, CPU, process and file size limits) writes its result to DATA_DIR/videos/converted/<id>/
-(result.json, video.mp4, poster.jpg, frame-<n>.jpg; the folder appears in one rename). collect()
-(the server's tick, and every request to these routes) checks what it finds there, keeps the
-cleaned files and deletes the rest. A clip the converter has not answered within CONVERT_WAIT is
+(result.json, video.mp4, frame-<n>.jpg; the folder appears in one rename). collect() (the
+server's tick, and every operator request) checks what it finds there, read as untrusted
+(ResultDir: no links followed, regular files of bounded sizes, nothing that blocks), keeps the
+cleaned files and deletes the rest, whatever happened.
+
+The screened frames: one in each FRAME_SECONDS of the video (frames_for: at least MIN_FRAMES,
+at most MAX_FRAMES), each at an instant inside its interval that a random seed chooses. The
+server writes the seed into the job and never publishes it, so the uploader cannot know which
+instants are looked at. The poster is one of those frames (the result's posterFrame): no picture
+is published that the screening has not seen. A clip the converter has not answered within CONVERT_WAIT is
 dropped: a server without the converter publishes no videos and keeps no clips.
 
 A video is "converting" (waiting for the converter), "held" (converted, waiting for screening),
 "live" (in the feed and served) or "hidden" (by an operator or the screening). Every video is
 held when it has been converted, whatever FORZA_COMMUNITY_HOLD says: a clip is never published
-unscreened. The screening worker (screening/) scores the frames and releases, hides or leaves
-it held; without it the operator releases it. A banned player's videos are served to nobody. The
-same clip (SHA-256 of the upload) from the same player again moves its video to the newer file;
-a clip an operator deleted is not published again. When the player's file goes (photos.remove),
-its video goes with it. The player deletes one from the website's account page (owners.py).
+unscreened. The screening worker (screening/) scores the frames and releases or hides it;
+without it the operator decides. A banned player's videos are served to nobody. The same clip
+(SHA-256 of the upload) from the same player again is the same video; a clip an operator deleted
+is not published again. The player deletes one from the website's account page (owners.py).
 
 Public routes, on the title services port (no side effects, never a XUID):
 
@@ -56,7 +65,8 @@ through the tunnel or a reverse proxy, never with an Origin header):
 
   GET  /admin/videos[?status=converting|held|live|hidden]   every video with its owner's XUID
   GET  /admin/videos/queue                  the held videos, oldest first, with their frames
-  GET  /admin/videos/media/<id>.mp4 | .jpg  a video or its poster, whatever its status
+  GET  /admin/videos/media/<id>.mp4 | .jpg  a video or its poster (one of its frames), whatever
+                                            its status
   GET  /admin/videos/frame/<id>-<n>.jpg     a frame for screening
   POST /admin/videos/<id>/hide | unhide | hold | release | delete | ban
 
@@ -68,9 +78,12 @@ random (community.ID_LEN base32 characters), never the file's id.
 import hashlib
 import json
 import logging
+import math
 import os
 import re
+import secrets
 import shutil
+import stat
 import struct
 import time
 import urllib.parse
@@ -78,6 +91,7 @@ import uuid
 
 from forza_live.content import community
 from forza_live.content import designs
+from forza_live.content import photos
 from forza_live.competition import leaderboards
 from forza_live.core import durable
 from forza_live.core import limits
@@ -94,14 +108,18 @@ TITLE_MAX = 80
 MAX_CLIP = 32 << 20     # bytes of an uploaded clip (photos.MAX_BIG: the large-file upload's own cap)
 MAX_HEADER = 1 << 20    # bytes of its ASF header
 MAX_SECONDS = 120       # a clip's length, as its header says (the converter cuts there too)
+MIN_SECONDS = 1.0
 MIN_VIDEO = (96, 64)
 MAX_VIDEO = (1920, 1088)
 MAX_STREAMS = 4
 MAX_MP4 = 32 << 20      # bytes of a converted video
-MAX_POSTER = 2 << 20    # bytes of a poster or a frame
-MAX_FRAMES = 16         # frames for screening
+MAX_POSTER = 2 << 20    # bytes of a frame (the poster is one of them)
+FRAME_SECONDS = 2       # one screened frame in each 2 s of video (frames_for)
+MIN_FRAMES, MAX_FRAMES = 8, 60
+MAX_RESULT_ENTRIES = MAX_FRAMES + 8   # names in a result folder the server looks at
 OUT_WIDTH = 1280        # the converter scales a wider clip down to this
-FRAMES = 8              # frames the converter samples for screening
+# the videos' own disk budget: videos never take the room of the other uploads (limits.DISK_CAP)
+VIDEOS_CAP = int(os.environ.get("FORZA_VIDEOS_CAP_MB", "2048")) << 20
 CONVERT_WAIT = 86400    # a clip the converter has not answered by then is dropped
 COLLECT_SECONDS = 5     # how often the server's tick looks for converted clips
 DELETED_MAX = 10000
@@ -119,6 +137,7 @@ _feed = {"key": None, "body": b"", "etag": ""}
 _version = [0]
 _media = []        # times of the media requests of the last minute
 _collected = [0.0]
+_usage = {"at": float("-inf"), "bytes": 0, "added": 0}
 
 
 def configure(data_dir):
@@ -131,6 +150,7 @@ def configure(data_dir):
     _version[0] += 1
     _media.clear()
     _collected[0] = 0.0
+    _usage.update({"at": float("-inf"), "bytes": 0, "added": 0})
 
 
 def index_path():
@@ -174,6 +194,35 @@ def write(path, data):
     with open(tmp, "wb") as out:
         out.write(data)
     durable.replace(tmp, path)
+
+
+def usage():
+    """Bytes under DATA_DIR/videos (counted again at most every 30 s)."""
+    now = time.monotonic()
+    if now - _usage["at"] > 30:
+        total = 0
+        for root, _, names in os.walk(folder()):
+            for name in names:
+                try:
+                    total += os.lstat(os.path.join(root, name)).st_size
+                except OSError:
+                    pass
+        _usage.update({"at": now, "bytes": total, "added": 0})
+    return _usage["bytes"] + _usage["added"]
+
+
+def accept(nbytes):
+    """The videos' own budget (FORZA_VIDEOS_CAP_MB): ValueError when nbytes more do not fit."""
+    if usage() + nbytes > VIDEOS_CAP:
+        raise ValueError("the videos' disk budget (%d MB) is full" % (VIDEOS_CAP >> 20))
+    _usage["added"] += nbytes
+
+
+def frames_for(seconds):
+    """How many frames are screened for a video this long (its length to 0.01 s, as the result
+    gives it): one in each FRAME_SECONDS, MIN_FRAMES to MAX_FRAMES. The converter
+    (video/video_worker.py) and the screening worker count the same way."""
+    return max(MIN_FRAMES, min(MAX_FRAMES, math.ceil(round(seconds, 2) / FRAME_SECONDS - 1e-9)))
 
 
 def remove_file(path):
@@ -266,6 +315,8 @@ def read_asf(data):
         raise BadClip("video size %dx%d" % (info["w"], info["h"]))
     if info["seconds"] is None:
         raise BadClip("no file properties (no length)")
+    if info["seconds"] < MIN_SECONDS:
+        raise BadClip("%.2f seconds long (at least %d)" % (info["seconds"], MIN_SECONDS))
     if info["seconds"] > MAX_SECONDS:
         raise BadClip("%.1f seconds long (at most %d)" % (info["seconds"], MAX_SECONDS))
     return info
@@ -280,25 +331,21 @@ def clean_title(title):
 
 def upload_finished(fid, rec, path, signed):
     """photos' finished hook: a clip comes here (clip_uploaded), anything else goes to
-    community.photo_uploaded as before."""
+    community.photo_uploaded as before. The uploaded clip is never kept as one of the player's
+    files, whatever its size: once clip_uploaded has copied it for the converter (or refused it),
+    photos forgets it."""
     try:
         with open(path, "rb") as src:
             head = src.read(16)
     except OSError:
         head = b""
-    if looks_like_clip(rec.get("name", ""), head):
+    if not looks_like_clip(rec.get("name", ""), head):
+        return community.photo_uploaded(fid, rec, path, signed)
+    try:
         return clip_uploaded(fid, rec, path, signed)
-    return community.photo_uploaded(fid, rec, path, signed)
-
-
-def file_removed(fid):
-    """photos' removed hook: the player's file is gone, and so is its photo or video."""
-    community.photo_removed(fid)
-    gone = [vid for vid, v in load()["videos"].items() if v["fileId"] == fid]
-    for vid in gone:
-        drop(vid, "the player's file %d was removed" % fid)
-    if gone:
-        save()
+    finally:
+        photos.forget(fid)
+        photos.save()
 
 
 def waiting(d):
@@ -351,13 +398,14 @@ def clip_uploaded(fid, rec, path, signed):
             log.info("videos: %016X: file %d is video %s again", xuid, fid, vid)
             return vid
     try:
-        limits.accept(len(data), MAX_CLIP)
+        accept(len(data))
     except ValueError as e:
         return refuse(e)
     vid = community.new_id(d["videos"])
     write(folder("incoming", vid + ".wmv"), data)
+    # seed: where in each interval the screened frames are taken; only the converter reads it
     job = {"version": 1, "id": vid, "maxSeconds": MAX_SECONDS, "maxWidth": OUT_WIDTH,
-           "frames": FRAMES, "maxBytes": MAX_MP4}
+           "maxBytes": MAX_MP4, "seed": secrets.token_hex(16)}
     write(folder("incoming", vid + ".json"), json.dumps(job).encode())  # last: the job is whole
     d["videos"][vid] = {
         "owner": xuid, "fileId": fid, "gamertag": gamertag, "title": clean_title(info["title"]),
@@ -428,43 +476,125 @@ def picture(data, what):
         raise BadClip("the %s: %s" % (what, e)) from None
 
 
-def read_small(path, limit):
-    with open(path, "rb") as src:
-        data = src.read(limit + 1)
-    if len(data) > limit:
-        raise BadClip("%s is larger than %d bytes" % (os.path.basename(path), limit))
-    return data
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_BINARY = getattr(os, "O_BINARY", 0)
+BY_FD = os.open in os.supports_dir_fd and os.listdir in os.supports_fd
+
+
+class ResultDir:
+    """The converter's result folder, read as untrusted: the folder itself and every file in it
+    opened without following links and without blocking (a FIFO or a device would stall the
+    server), regular files only, of a bounded size (checked on the open descriptor), and at most
+    MAX_RESULT_ENTRIES names. BadClip for anything else. A context manager."""
+
+    def __init__(self, path):
+        self.path, self.fd = path, None
+
+    def __enter__(self):
+        try:
+            st = os.lstat(self.path)
+            if not stat.S_ISDIR(st.st_mode):
+                raise BadClip("the converter's result is not a folder")
+            if BY_FD:
+                self.fd = os.open(self.path, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+                if not stat.S_ISDIR(os.fstat(self.fd).st_mode):
+                    raise BadClip("the converter's result is not a folder")
+            names = os.listdir(self.fd if BY_FD else self.path)
+        except OSError as e:
+            self.close()
+            raise BadClip("the converter's result: %s" % e) from None
+        except BadClip:
+            self.close()
+            raise
+        if len(names) > MAX_RESULT_ENTRIES:
+            self.close()
+            raise BadClip("%d files in the converter's result" % len(names))
+        self.names = set(names)
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def read(self, name, limit):
+        flags = os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_BINARY
+        try:
+            if BY_FD:
+                fd = os.open(name, flags, dir_fd=self.fd)
+            else:  # (Windows: no dir_fd) the name checked first
+                if not stat.S_ISREG(os.lstat(os.path.join(self.path, name)).st_mode):
+                    raise BadClip("%s is not a plain file" % name)
+                fd = os.open(os.path.join(self.path, name), flags)
+        except OSError as e:
+            raise BadClip("the converter's %s: %s" % (name, e.strerror or e)) from None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise BadClip("%s is not a plain file" % name)
+            if st.st_size > limit:
+                raise BadClip("%s is larger than %d bytes" % (name, limit))
+            chunks, left = [], st.st_size + 1
+            while left > 0:
+                chunk = os.read(fd, min(left, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                left -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) > limit:
+                raise BadClip("%s is larger than %d bytes" % (name, limit))
+            return data
+        finally:
+            os.close(fd)
 
 
 def finish(vid, v, out):
     """The converter's result folder `out` for the converting video: the video held with its
-    files, or BadClip."""
+    files, or BadClip. The frames must be as many as frames_for(its length) says, and the poster
+    is one of them (posterFrame): nothing is published that the screening does not see."""
+    with ResultDir(out) as r:
+        _finish(vid, v, r)
+
+
+def _finish(vid, v, r):
     try:
-        result = json.loads(read_small(os.path.join(out, "result.json"), 65536))
-    except (OSError, ValueError) as e:
+        result = json.loads(r.read("result.json", 65536))
+    except ValueError as e:
         raise BadClip("the converter's result: %s" % e) from None
     if not isinstance(result, dict) or result.get("id") != vid:
         raise BadClip("the converter's result is not this clip's")
     if not result.get("ok"):
         raise BadClip(limits.clean_ascii_text(str(result.get("reason") or "the converter failed"), 200))
     seconds = result.get("seconds")
-    if not isinstance(seconds, (int, float)) or not 0 < seconds <= MAX_SECONDS + 1:
+    if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or not MIN_SECONDS <= seconds <= MAX_SECONDS + 1):
         raise BadClip("the converted video's length")
-    try:
-        video = read_small(os.path.join(out, "video.mp4"), MAX_MP4)
-        poster = read_small(os.path.join(out, "poster.jpg"), MAX_POSTER)
-        names = sorted((n for n in os.listdir(out) if re.fullmatch(r"frame-\d{1,2}\.jpg", n)),
-                       key=lambda n: int(n[6:-4]))
-        frames = [read_small(os.path.join(out, n), MAX_POSTER) for n in names[:MAX_FRAMES + 1]]
-    except OSError as e:
-        raise BadClip("the converter's files: %s" % e) from None
+    want = frames_for(seconds)
+    names = [n for n in r.names if re.fullmatch(r"frame-[1-9][0-9]?\.jpg", n)]
+    if result.get("frames") != want or sorted(names) != sorted("frame-%d.jpg" % k
+                                                               for k in range(1, want + 1)):
+        raise BadClip("%d frames for screening, %d expected" % (len(names), want))
+    poster_frame = result.get("posterFrame")
+    if isinstance(poster_frame, bool) or not isinstance(poster_frame, int) or not 1 <= poster_frame <= want:
+        raise BadClip("the poster is not one of the frames")
+    video = r.read("video.mp4", MAX_MP4)
     check_mp4(video)
-    poster, w, h = picture(poster, "poster")
-    if not 1 <= len(frames) <= MAX_FRAMES:
-        raise BadClip("%d frames for screening" % len(frames))
-    frames = [picture(f, "frame")[0] for f in frames]
-    total = len(video) + len(poster) + sum(map(len, frames))
-    limits.accept(total, MAX_MP4 + (MAX_FRAMES + 1) * MAX_POSTER)  # ValueError: the quota
+    frames, size = [], None
+    for k in range(1, want + 1):
+        clean, w, h = picture(r.read("frame-%d.jpg" % k, MAX_POSTER), "frame")
+        if size is not None and (w, h) != size:
+            raise BadClip("frames of different sizes")
+        size = (w, h)
+        frames.append(clean)
+    poster = frames[poster_frame - 1]  # a screened frame, byte for byte
+    w, h = size
+    accept(len(video) + len(poster) + sum(map(len, frames)))  # ValueError: the videos' budget
     write(media_path(vid, ".mp4"), video)
     write(media_path(vid, ".jpg"), poster)
     for n, f in enumerate(frames, 1):
@@ -474,37 +604,57 @@ def finish(vid, v, out):
              frames=len(frames), convertedAt=int(time.time()))
 
 
+MAX_RESULTS = 50  # results taken in by one pass (the rest wait for the next)
+
+
+def remove_result(path):
+    """A result folder gone, whatever the converter put there (a link is removed, not followed)."""
+    try:
+        if os.path.islink(path) or not os.path.isdir(path):
+            os.remove(path)
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def collect(now=None):
     """The converter's results: each converting video is held with its files or dropped; clips
     the converter has not answered within CONVERT_WAIT are dropped. Leftovers of videos that are
-    gone are deleted. True when anything changed."""
+    gone are deleted. A result is looked at once, whatever happens: it is removed in any case.
+    True when anything changed."""
     now = time.time() if now is None else now
     d = load()
     changed = False
     done = folder("converted")
     try:
-        names = os.listdir(done)
+        names = [n for n in os.listdir(done) if ID_RE.fullmatch(n)]  # not the converter's own
     except OSError:
         names = []
-    for name in names:
-        if not ID_RE.fullmatch(name):
-            continue  # the converter's own (a folder being written, its attempt notes)
+    for name in names[:MAX_RESULTS]:
         out = os.path.join(done, name)
         v = d["videos"].get(name)
-        if v is not None and v["status"] == CONVERTING:
-            try:
-                finish(name, v, out)
-                log.info("videos: %016X: video %s converted (%dx%d, %.1f s, %d bytes), held for "
-                         "screening", v["owner"], name, v["w"], v["h"], v["seconds"], v["size"])
-            except (BadClip, ValueError) as e:
-                d["videos"].pop(name)
-                remove_media(name)
-                log.info("videos: %016X: file %d (a movie) not published: %s", v["owner"],
-                         v["fileId"], e)
-            changed = True
-        shutil.rmtree(out, ignore_errors=True)
-        for ext in (".wmv", ".json"):
-            remove_file(folder("incoming", name + ext))
+        try:
+            if v is not None and v["status"] == CONVERTING:
+                changed = True
+                try:
+                    finish(name, v, out)
+                    log.info("videos: %016X: video %s converted (%dx%d, %.1f s, %d bytes, %d "
+                             "frames), held for screening", v["owner"], name, v["w"], v["h"],
+                             v["seconds"], v["size"], v["frames"])
+                except (BadClip, ValueError) as e:
+                    d["videos"].pop(name, None)
+                    remove_media(name)
+                    log.info("videos: %016X: file %d (a movie) not published: %s", v["owner"],
+                             v["fileId"], e)
+        except Exception:  # never retried: the result goes below
+            d["videos"].pop(name, None)
+            remove_media(name)
+            log.exception("videos: the converter's result for %s could not be taken in", name)
+        finally:
+            remove_result(out)
+            for ext in (".wmv", ".json"):
+                remove_file(folder("incoming", name + ext))
     for vid, v in list(d["videos"].items()):
         if v["status"] == CONVERTING and now - v["created"] > CONVERT_WAIT:
             d["videos"].pop(vid)
@@ -648,8 +798,8 @@ def handles(path):
 reply = community.reply
 TYPES = {".mp4": "video/mp4", ".jpg": "image/jpeg"}
 MEDIA_RE = re.compile(r"/([A-Z2-7]{%d})(\.mp4|\.jpg)" % community.ID_LEN)
-FRAME_RE = re.compile(r"/frame/([A-Z2-7]{%d})-(\d{1,2})\.jpg" % community.ID_LEN)
-RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+FRAME_RE = re.compile(r"/frame/([A-Z2-7]{%d})-([1-9][0-9]?)\.jpg" % community.ID_LEN)
+RANGE_RE = re.compile(r"bytes=(\d{0,15})-(\d{0,15})")  # 15 digits: far more than any file
 
 
 def byte_range(header, size):

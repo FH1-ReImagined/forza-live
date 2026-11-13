@@ -976,28 +976,29 @@ the game's own ("<car> on <route>"), its author the driver's gamertag, and exten
 environment, the track, the car's make and model ("Forza/TrackId" and so on). Its picture was four
 black frames: the recompiled game records the race's sound but no picture yet.
 
-`photos.py` keeps the clip as the player's file, as any other upload, and hands it to
-`videos.upload_finished`: a file that starts with the ASF Header Object's GUID (or is named `.wmv`
+`photos.py` hands the finished upload to `videos.upload_finished`, which has it forgotten
+afterwards: a clip is never kept as one of the player's files, whatever its size. a file that starts with the ASF Header Object's GUID (or is named `.wmv`
 or `.asf`) is a clip, anything else goes to `community.py`. A clip is refused, and the game's
 upload still succeeds, when it was not signed by the player's key, the player is banned or has no
 gamertag, the caps say no (5 a day and 50 in all per player, 20 an hour and 20 waiting on the
 server), or its ASF header (read with the standard library: File Properties, Stream
 Properties, Content Description) has no video stream or two, more than 4 streams, a broadcast
-flag, a picture smaller than 96x64 or larger than 1920x1088, more than 120 s, or more than
-32 MiB in all. Otherwise it is copied to `DATA_DIR/videos/incoming/<id>.wmv` with a job beside it,
-for the [video converter](../video/README.md), and the video is `converting`. The converter's
-result (`DATA_DIR/videos/converted/<id>/`) is checked here (the MP4's top-level boxes, the poster
-and the frames rewritten by community.py's JPEG cleaner, the sizes, the disk quota), and the
-video is `held`, always, for the screening worker or the operator. A clip the converter has not
+flag, a picture smaller than 96x64 or larger than 1920x1088, less than 1 s or more than 120 s,
+or more than 32 MiB in all, or when the videos' own disk budget (`FORZA_VIDEOS_CAP_MB`) is full. Otherwise it is copied to `DATA_DIR/videos/incoming/<id>.wmv` with a job beside it,
+for the [video converter](../video/README.md) (the job carries a random seed that places the
+screened instants, never published), and the video is `converting`. The converter's result
+(`DATA_DIR/videos/converted/<id>/`) is read as untrusted (no links followed, plain files of
+bounded sizes, nothing that blocks) and checked: exactly one frame for each 2 s of video (8 to
+60), the MP4's top-level boxes, the frames rewritten by community.py's JPEG cleaner, the poster
+taken from them (the result names which), the sizes and the budget. The video is then `held`,
+always, for the screening worker or the operator. A clip the converter has not
 answered within a day is dropped.
 
 A video has a random 12-character base32 id, the gamertag the player had, the clip's title
 (cleaned), `takenAt`, `approvedAt` (its first time in the feed), its length, size, width and
 height, and the SHA-256 of the MP4, of the poster and of the clip. It is `converting`, `held`,
 `live` or `hidden`; a banned player's videos are served to nobody. The same clip from the same
-player again moves its video to the newer file; a clip the operator deleted is not published
-again. When the player's file is removed by a later upload with overwriteOldest, its video goes
-too.
+player again is the same video; a clip the operator deleted is not published again.
 
 | Route | |
 | --- | --- |

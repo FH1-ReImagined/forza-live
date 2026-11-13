@@ -8,6 +8,7 @@ send the token to wherever a redirect points), no Origin header.
 """
 
 import json
+import math
 import re
 import urllib.error
 import urllib.request
@@ -16,7 +17,12 @@ ID_RE = re.compile(r"[A-Z2-7]{12}")
 IMAGE_RE = re.compile(r"/admin/photos/img/[A-Z2-7]{12}\.(png|jpg)")
 DESIGN_IMAGE_RE = re.compile(r"/admin/designs/img/[A-Z2-7]{12}\.png")
 VIDEO_FRAME_RE = re.compile(r"/admin/videos/frame/([A-Z2-7]{12})-\d{1,2}\.jpg")
-MAX_FRAMES = 16
+FRAME_SECONDS, MIN_FRAMES, MAX_FRAMES = 2, 8, 60  # forza_live/content/videos.py, video/video_worker.py
+
+
+def frames_for(seconds):
+    """How many frames the server screens for a video this long (videos.frames_for)."""
+    return max(MIN_FRAMES, min(MAX_FRAMES, math.ceil(round(seconds, 2) / FRAME_SECONDS - 1e-9)))
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 DESIGN_TYPES = ("livery", "vinylgroup")
 
@@ -82,7 +88,9 @@ def video_record(v):
     return {"id": v["id"], "kind": "video", "frames": [str(f) for f in frames],
             "sha256": sha if SHA_RE.fullmatch(sha) else "",
             "title": str(v.get("title") or "")[:200], "gamertag": str(v.get("gamertag") or "")[:64],
-            "status": str(v.get("status", "")), "seconds": v.get("seconds")}
+            "status": str(v.get("status", "")), "seconds": v.get("seconds"),
+            "expected": frames_for(v["seconds"]) if isinstance(v.get("seconds"), (int, float))
+            and not isinstance(v.get("seconds"), bool) and 0 < v["seconds"] <= 1000 else None}
 
 
 class AdminClient:

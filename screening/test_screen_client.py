@@ -519,15 +519,17 @@ class DesignsAgainstServer(unittest.TestCase):
 class VideosAgainstServer(unittest.TestCase):
     """The held videos: every frame scored like a photo, the worst frame decides."""
     IDS = {"AAAAAAAAAAAA": "clean", "BBBBBBBBBBBB": "one nsfw frame", "CCCCCCCCCCCC": "one doubtful frame",
-           "DDDDDDDDDDDD": "a broken frame"}
+           "DDDDDDDDDDDD": "a broken frame", "EEEEEEEEEEEE": "frames missing", "FFFFFFFFFFFF": "a wide clip"}
 
     def setUp(self):
         green, red, blue = jpeg(GREEN), jpeg(RED), jpeg(BLUE)
-        self.server = LocalServer({}, videos={
-            "AAAAAAAAAAAA": ([green, green, green], "Subaru WRX '05 on Beaumont - Stage 3"),
-            "BBBBBBBBBBBB": ([green, red, green], ""),
-            "CCCCCCCCCCCC": ([green, green, blue], ""),
-            "DDDDDDDDDDDD": ([green, green[:300]], "")})
+        self.server = LocalServer({}, videos={  # 15 s: 8 frames each
+            "AAAAAAAAAAAA": ([green] * 8, "Subaru WRX '05 on Beaumont - Stage 3"),
+            "BBBBBBBBBBBB": ([green, red] + [green] * 6, ""),
+            "CCCCCCCCCCCC": ([green] * 7 + [blue], ""),
+            "DDDDDDDDDDDD": ([green, green[:300]] + [green] * 6, ""),
+            "EEEEEEEEEEEE": ([green] * 3, ""),
+            "FFFFFFFFFFFF": ([jpeg(GREEN, (1280, 720))] * 8, "")})
 
     def tearDown(self):
         self.server.close()
@@ -538,36 +540,41 @@ class VideosAgainstServer(unittest.TestCase):
         for v in q:
             self.assertNotIn("owner", v)
             self.assertEqual((v["kind"], v["status"]), ("video", "held"))
-        self.assertEqual(q[0]["frames"], ["/admin/videos/frame/AAAAAAAAAAAA-%d.jpg" % n for n in (1, 2, 3)])
+        self.assertEqual(q[0]["frames"], ["/admin/videos/frame/AAAAAAAAAAAA-%d.jpg" % n for n in range(1, 9)])
 
     def test_release_hide_and_hold(self):
         stub = StubScreener()
         worker = screen_worker.Worker(CFG, self.server.client(), stub)
         (done, waiting), lines = run(worker)
-        self.assertEqual((done, waiting), (4, 0))
+        self.assertEqual((done, waiting), (6, 0))
         st = self.server.video_states()
-        self.assertEqual(st["AAAAAAAAAAAA"], ("live", "screening: release (clear: 3 frames)"))
+        self.assertEqual(st["AAAAAAAAAAAA"], ("live", "screening: release (clear: 8 frames)"))
+        self.assertEqual(st["EEEEEEEEEEEE"][0], "hidden")  # never released with frames missing
+        self.assertIn("frames-missing: 3 frames, 8 expected", st["EEEEEEEEEEEE"][1])
+        self.assertEqual(st["FFFFFFFFFFFF"][0], "live")
         self.assertEqual(st["BBBBBBBBBBBB"][0], "hidden")
-        self.assertTrue(st["BBBBBBBBBBBB"][1].startswith("screening: hide (nsfw-high: frame 2 of 3"),
+        self.assertTrue(st["BBBBBBBBBBBB"][1].startswith("screening: hide (nsfw-high: frame 2 of 8"),
                         st["BBBBBBBBBBBB"][1])
         # a doubtful frame, and a frame that cannot be read: hidden, none waits for the maintainer
         self.assertEqual(st["CCCCCCCCCCCC"][0], "hidden")
         self.assertTrue(st["CCCCCCCCCCCC"][1].startswith(
-            "screening: hide (doubtful-hate-suspect: frame 3 of 3"), st["CCCCCCCCCCCC"][1])
+            "screening: hide (doubtful-hate-suspect: frame 8 of 8"), st["CCCCCCCCCCCC"][1])
         self.assertEqual(st["DDDDDDDDDDDD"][0], "hidden")
         self.assertTrue(st["DDDDDDDDDDDD"][1].startswith(
-            "screening: hide (doubtful-error-decode: frame 2 of 2"), st["DDDDDDDDDDDD"][1])
-        self.assertEqual(self.server.video_feed(), ["AAAAAAAAAAAA"])
+            "screening: hide (doubtful-error-decode: frame 2 of 8"), st["DDDDDDDDDDDD"][1])
+        self.assertEqual(sorted(self.server.video_feed()), ["AAAAAAAAAAAA", "FFFFFFFFFFFF"])
         by_id = {r["id"]: r for r in lines if r.get("event") == "video"}
         self.assertEqual(by_id["CCCCCCCCCCCC"]["rule"], "doubtful-hate-suspect")
         self.assertEqual(by_id["DDDDDDDDDDDD"]["rule"], "doubtful-error-decode")
         self.assertEqual([f["decision"] for f in by_id["BBBBBBBBBBBB"]["frames"]],
-                         ["release", "hide", "release"])
+                         ["release", "hide"] + ["release"] * 6)
         for r in by_id.values():
             self.assertNotIn("00090000", json.dumps(r).upper())  # no XUID anywhere
         # every frame scored whole at its own size; the title read with the first frame only
-        self.assertEqual(stub.calls.count("AAAAAAAAAAAA"), 3)
+        self.assertEqual(stub.calls.count("AAAAAAAAAAAA"), 8)
         self.assertEqual(stub.grids["AAAAAAAAAAAA"], ([], (640, 360)))
+        self.assertEqual(stub.grids["FFFFFFFFFFFF"], ([(2, 2)], (1280, 720)))  # a wide frame: in tiles too
+        self.assertNotIn("EEEEEEEEEEEE", stub.calls)  # not even scored
         stub.calls.clear()
         (done, waiting), _ = run(worker)  # nothing is left held to score again
         self.assertEqual((done, stub.calls), (0, []))
@@ -648,7 +655,7 @@ class VideosAgainstServer(unittest.TestCase):
         for bad in ({"id": "AAAAAAAAAAAA", "frames": []},
                     {"id": "AAAAAAAAAAAA", "frames": ["/admin/videos/frame/BBBBBBBBBBBB-1.jpg"]},
                     {"id": "AAAAAAAAAAAA", "frames": ["http://elsewhere/x.jpg"]},
-                    {"id": "AAAAAAAAAAAA", "frames": ["/admin/videos/frame/AAAAAAAAAAAA-1.jpg"] * 17},
+                    {"id": "AAAAAAAAAAAA", "frames": ["/admin/videos/frame/AAAAAAAAAAAA-1.jpg"] * 61},
                     {"id": "../x", "frames": good["frames"]}):
             self.assertIsNone(screen_client.video_record(bad), bad)
         with self.assertRaises(ValueError):

@@ -184,7 +184,8 @@ that was requested but not taken.
 - per player: relay budget 256 KB/s (`--rate-limit`), 30 open auctions, 50 unretrieved
   gifts, 100 shared cars, 4 game invites per 30 s (the rest are dropped and logged);
   one upload at most 2 MB (a signed game's photo mode big shot or movie: 32 MiB, in 256 KiB
-  requests), community videos 5 a day and 50 in all ([website data](website-data.md#community-videos)),
+  requests), community videos 5 a day and 50 in all, in a disk budget of their own,
+  `FORZA_VIDEOS_CAP_MB` (2048) ([website data](website-data.md#community-videos)),
   HTTP bodies at most 8 MB;
 - whole server: ghosts, cars and market blobs at most `FORZA_DISK_CAP_MB` (default 4096) MB,
   at most `FORZA_MAX_PLAYERS` (20000) player records;
