@@ -73,9 +73,13 @@ own size (the game's clips are 640x360), and the server serves them at
 - Each frame is scored like a photo, with the same models, word lists and thresholds (the decision
   table above), as a whole frame (`[videos] grids = []`: the frames are small).
 - **The worst frame decides.** Any frame's hide rule hides the video, with a note naming the
-  frame (`screening: hide (nsfw-high: frame 3 of 8: ...)`); otherwise any frame's hold rule leaves
-  it held for the maintainer, logged; only a video whose every frame is clear is released
-  (`screening: release (clear: 8 frames)`).
+  frame (`screening: hide (nsfw-high: frame 3 of 8: ...)`); only a video whose every frame is
+  clear is released (`screening: release (clear: 8 frames)`).
+- **No video waits for the maintainer.** With `[videos] doubtful = "hide"` (the shipped setting) a
+  frame's hold rule, or a frame that cannot be read, hides the video as well (`screening: hide
+  (doubtful-hate-suspect: frame 3 of 8: ...)`); the maintainer can unhide it in the panel. A model
+  error is tried again at the next polls before the video is hidden. `doubtful = "hold"` leaves
+  such a video held instead, as a doubtful photo is.
 - The title (the game's own, "<car> on <route>") and the credited gamertag are checked once, with
   the first frame.
 - A frame that cannot be fetched is retried, like a photo; one that cannot be decoded leaves the

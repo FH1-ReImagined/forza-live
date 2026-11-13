@@ -23,9 +23,13 @@ grids = []                    # tiles per grid for designs: none
 # The community videos (forza_live/content/videos.py: GET /admin/videos/queue). Every converted
 # clip waits held; the converter samples frames spread over it (8, at the video's own size: the
 # game's are 640x360). Each frame is scored like a photo and decided on its own: any frame's hide
-# hides the video, any frame's hold leaves it held for the maintainer, and only a video whose
-# every frame is clear is released. The title is checked once. The sound is not screened.
+# hides the video, and only a video whose every frame is clear is released. A frame's hold
+# (doubtful, or a frame that cannot be read) hides the video too with doubtful = "hide", so no
+# video waits for the maintainer, who can still unhide one in the panel; a model error is tried
+# again first. doubtful = "hold" leaves such a video held instead, as a doubtful photo is.
+# The title is checked once. The sound is not screened.
 enabled = true
+doubtful = "hide"
 grids = []                    # tiles per grid for the frames: none (they are small)
 
 [runtime]

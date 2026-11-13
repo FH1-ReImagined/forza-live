@@ -301,8 +301,9 @@ the same way):
 
 It then releases the photo, hides it with a note naming the rule (`screening: hide (nsfw-high:
 ...)`), or leaves it held for you, logging why. A [video](#community-videos) is scored frame by
-frame, the same way: one frame's hide hides it, one frame's hold leaves it held, and it is
-released only when every frame is clear. Only a confident hit hides a photo. A race number
+frame, the same way: one frame's hide hides it, and it is released only when every frame is
+clear. A doubtful frame hides the video too, so no video waits for you; you can unhide one in
+the panel (`[videos] doubtful = "hold"` in `screening.toml` leaves such a video held instead). Only a confident hit hides a photo. A race number
 such as 14, 18 or 88, or a badge such as SS, never hides one. The decision table, the measured
 cost (about 1.3 s and 1.4 GB at peak on 4 threads) and the known limits are in its README.
 

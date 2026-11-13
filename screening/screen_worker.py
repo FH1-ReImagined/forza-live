@@ -219,6 +219,12 @@ class Worker:
         v = cfg.get("videos", {})
         self.videos_on = bool(v.get("enabled", True))
         self.video_grids = [tuple(g) for g in v.get("grids", [])]
+        # "hide": a video with a doubtful frame is hidden, so none waits for the maintainer (who
+        # can still unhide it); "hold": it stays held, as a doubtful photo does
+        self.video_doubtful = str(v.get("doubtful", "hold"))
+        if self.video_doubtful not in ("hide", "hold"):
+            raise ValueError('[videos] doubtful must be "hide" or "hold"')
+        self.video_tries = {}  # (kind, id) -> times a model error left it undecided
         self._no_videos_until = 0.0  # a server without community videos: asked again then
         self.left = {}      # (kind, id, sha256) -> the decision that left it held: not screened again
         self.failures = {}  # (kind, id) -> image fetches that failed
@@ -327,7 +333,9 @@ class Worker:
 
     def screen_video(self, p):
         """Scores each frame of a held video like a photo, and acts on the worst decision: a
-        frame's hide hides it, a frame's hold leaves it held, every frame clear releases it."""
+        frame's hide hides it, every frame clear releases it, and a frame's hold hides it too
+        ([videos] doubtful = "hide": no video waits for the maintainer; a model error is tried
+        again first) or leaves it held (doubtful = "hold")."""
         t0 = time.perf_counter()
         rec = {"event": "video", "id": p["id"], "sha256": p["sha256"][:16],
                "models": self.screener.versions, "seconds": p.get("seconds")}
@@ -362,14 +370,25 @@ class Worker:
         if verdict["decision"] == "release":
             detail = "%d frames" % len(verdicts)
         verdict = dict(verdict, detail=detail)
-        rec.update(frames=frames, decision=verdict["decision"], rule=verdict["rule"], detail=detail,
+        retry = False
+        if verdict["decision"] == "hold" and self.video_doubtful == "hide":
+            vkey = self.key(p)[:2]
+            tries = self.video_tries[vkey] = self.video_tries.get(vkey, 0) + 1
+            if verdict["rule"] == "error-screen" and tries < self.attempts:
+                retry = True  # a model that failed is asked again at the next poll
+            else:
+                verdict = dict(verdict, decision="hide", rule="doubtful-" + verdict["rule"])
+        if not retry:
+            self.video_tries.pop(self.key(p)[:2], None)
+        rec.update(frames=frames, decision="retry" if retry else verdict["decision"],
+                   rule=verdict["rule"], detail=detail,
                    rules=sorted({r[1] for _, v in verdicts for r in v["rules"]}))
         action = verdict["decision"] if verdict["decision"] in ("release", "hide") else None
         if action and not self.dry_run:
             self._act(p, action, note_for(verdict), rec)
         elif action:
             rec["done"] = "dry-run"
-        if verdict["decision"] == "hold" and rec.get("done") in (None, "dry-run"):
+        if verdict["decision"] == "hold" and not retry and rec.get("done") in (None, "dry-run"):
             self.left[self.key(p)] = verdict["rule"]
         rec["ms"] = {"total": round((time.perf_counter() - t0) * 1000)}
         rec["rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024

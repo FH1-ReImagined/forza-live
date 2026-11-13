@@ -550,12 +550,17 @@ class VideosAgainstServer(unittest.TestCase):
         self.assertEqual(st["BBBBBBBBBBBB"][0], "hidden")
         self.assertTrue(st["BBBBBBBBBBBB"][1].startswith("screening: hide (nsfw-high: frame 2 of 3"),
                         st["BBBBBBBBBBBB"][1])
-        self.assertEqual(st["CCCCCCCCCCCC"], ("held", ""))  # left held for the maintainer
-        self.assertEqual(st["DDDDDDDDDDDD"], ("held", ""))  # a frame that cannot be read: never released
+        # a doubtful frame, and a frame that cannot be read: hidden, none waits for the maintainer
+        self.assertEqual(st["CCCCCCCCCCCC"][0], "hidden")
+        self.assertTrue(st["CCCCCCCCCCCC"][1].startswith(
+            "screening: hide (doubtful-hate-suspect: frame 3 of 3"), st["CCCCCCCCCCCC"][1])
+        self.assertEqual(st["DDDDDDDDDDDD"][0], "hidden")
+        self.assertTrue(st["DDDDDDDDDDDD"][1].startswith(
+            "screening: hide (doubtful-error-decode: frame 2 of 2"), st["DDDDDDDDDDDD"][1])
         self.assertEqual(self.server.video_feed(), ["AAAAAAAAAAAA"])
         by_id = {r["id"]: r for r in lines if r.get("event") == "video"}
-        self.assertEqual(by_id["CCCCCCCCCCCC"]["rule"], "hate-suspect")
-        self.assertEqual(by_id["DDDDDDDDDDDD"]["rule"], "error-decode")
+        self.assertEqual(by_id["CCCCCCCCCCCC"]["rule"], "doubtful-hate-suspect")
+        self.assertEqual(by_id["DDDDDDDDDDDD"]["rule"], "doubtful-error-decode")
         self.assertEqual([f["decision"] for f in by_id["BBBBBBBBBBBB"]["frames"]],
                          ["release", "hide", "release"])
         for r in by_id.values():
@@ -564,8 +569,42 @@ class VideosAgainstServer(unittest.TestCase):
         self.assertEqual(stub.calls.count("AAAAAAAAAAAA"), 3)
         self.assertEqual(stub.grids["AAAAAAAAAAAA"], ([], (640, 360)))
         stub.calls.clear()
-        (done, waiting), _ = run(worker)  # what it left held is not scored again
+        (done, waiting), _ = run(worker)  # nothing is left held to score again
         self.assertEqual((done, stub.calls), (0, []))
+
+    def test_doubtful_videos_can_stay_held(self):
+        cfg = dict(CFG, videos=dict(CFG["videos"], doubtful="hold"))
+        stub = StubScreener()
+        worker = screen_worker.Worker(cfg, self.server.client(), stub)
+        _, lines = run(worker)
+        st = self.server.video_states()
+        self.assertEqual(st["CCCCCCCCCCCC"], ("held", ""))  # left held for the maintainer
+        self.assertEqual(st["DDDDDDDDDDDD"], ("held", ""))  # a frame that cannot be read: never released
+        by_id = {r["id"]: r for r in lines if r.get("event") == "video"}
+        self.assertEqual(by_id["CCCCCCCCCCCC"]["rule"], "hate-suspect")
+        stub.calls.clear()
+        (done, _), _ = run(worker)  # what it left held is not scored again
+        self.assertEqual((done, stub.calls), (0, []))
+        with self.assertRaises(ValueError):
+            screen_worker.Worker(dict(CFG, videos={"doubtful": "publish"}), self.server.client(), stub)
+
+    def test_a_model_error_is_tried_again_before_the_video_is_hidden(self):
+        boom = {"left": 2}
+
+        def fail_twice(item):  # the model fails on the first two polls of the first video
+            if item["id"] == "AAAAAAAAAAAA" and item.get("title") and boom["left"]:
+                boom["left"] -= 1
+                raise RuntimeError("model down")
+
+        worker = screen_worker.Worker(CFG, self.server.client(), StubScreener(fail_twice))
+        _, lines = run(worker)
+        rec = next(r for r in lines if r.get("id") == "AAAAAAAAAAAA")
+        self.assertEqual((rec["decision"], rec["rule"]), ("retry", "error-screen"))
+        self.assertEqual(self.server.video_states()["AAAAAAAAAAAA"], ("held", ""))
+        run(worker)
+        self.assertEqual(self.server.video_states()["AAAAAAAAAAAA"], ("held", ""))
+        run(worker)  # the model is back: released
+        self.assertEqual(self.server.video_states()["AAAAAAAAAAAA"][0], "live")
 
     def test_the_operator_decides_first(self):
         operator = self.server.client()
