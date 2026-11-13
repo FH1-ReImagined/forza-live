@@ -58,8 +58,8 @@ class EventOut(Strict):
 
 class LinkOut(Strict):
     """The linked game: active; frozen (the XUID is bound to another key now, so the operator
-    checks it); waiting (the game server forgot the key after a long time away, and its next
-    sign-in brings it back); or banned. Its gamertag, never its XUID. counted: the key's likes
+    checks it); waiting (the game server has no key for the XUID, and its next sign-in brings it
+    back); or banned. Its gamertag, never its XUID. counted: the key's likes
     are in the public totals (members.game.counted: a result on the boards, no wait by default)."""
     state: Literal["active", "frozen", "waiting", "banned"]
     gamertag: str

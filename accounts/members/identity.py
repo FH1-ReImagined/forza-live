@@ -7,10 +7,12 @@ import hmac
 import os
 import secrets
 import threading
+import unicodedata
 
 from django.conf import settings
 
 DOMAIN = "email.invalid"
+GMAIL = ("gmail.com", "googlemail.com")  # one mailbox whatever the dots, under either name
 _lock = threading.Lock()
 _pepper = {}
 
@@ -52,3 +54,37 @@ def stand_in(address):
 
 def is_stand_in(address):
     return isinstance(address, str) and address.endswith("@" + DOMAIN)
+
+
+def mailbox(address):
+    """The mailbox an address is delivered to, as far as it can be told without asking its mail
+    server, or None for an address whose domain is not written the way mail is sent to it. For
+    the limits only: the stand-in stays that of the address as typed, so no account moves.
+
+    The domain is the one IDNA names (what the mail is sent to): an address whose domain reads
+    differently after that mapping (full-width or other compatibility letters, a soft hyphen) is
+    another spelling of someone's address and is refused, so there is one spelling per domain
+    besides its xn-- form. The local part loses its quotes, its +tag and its compatibility
+    letters, and for Gmail its dots."""
+    local, at, domain = normalize(address).rpartition("@")
+    if not at or not local or not domain:
+        return None
+    try:
+        ascii_domain = domain.encode("idna").decode("ascii")
+        shown = ascii_domain.encode("ascii").decode("idna")
+    except UnicodeError:
+        return None
+    if domain not in (ascii_domain, shown):
+        return None
+    local = unicodedata.normalize("NFKC", local).lower()
+    if len(local) > 2 and local[0] == local[-1] == '"':
+        local = local[1:-1]
+    local = local.split("+", 1)[0]
+    if ascii_domain in GMAIL:
+        local, ascii_domain = local.replace(".", ""), GMAIL[0]
+    return "%s@%s" % (local, ascii_domain)
+
+
+def mailbox_key(box):
+    """What the per-address limits count a mailbox() under: its HMAC, never the address."""
+    return hmac.new(pepper(), b"mailbox|" + box.encode("utf-8"), hashlib.sha256).hexdigest()

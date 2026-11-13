@@ -29,8 +29,9 @@ confirms the account it was shown. A token, code or address that leaks is useles
 
 Rules: one key per account and one account per key; a key or an account links at most once a
 day; the key holder can always unlink and sign the account out everywhere. When the key the XUID
-is bound to is no longer the pinned one, the link freezes until the operator checks it. Nothing
-here returns an XUID.
+is bound to is no longer the pinned one, the link freezes until the operator checks it: that key
+can neither unlink it, sign its account out nor replace it with a new link. Nothing here returns
+an XUID.
 """
 
 import hashlib
@@ -272,6 +273,7 @@ def link_start(request, body: StartIn):
     xuid, hx, pub = caller(request)
     if game.banned(xuid):
         raise Refused(403, "not available")
+    pinned_link(hx, pub)  # a link another key pinned is the operator's to move, not a new key's
     tag = game.gamertag(xuid)
     if not tag or not game.played(game.player(xuid)):
         raise Refused(409, "play online first", message=UPLOAD_FIRST)
@@ -325,6 +327,7 @@ def link_confirm(request, rid: str, body: ConfirmIn):
         raise Refused(409, "the key changed")
     if game.banned(xuid):
         raise Refused(403, "not available")
+    pinned_link(hx, pub)
     keys = change_keys(hx, user)
     if not may_change(request, keys):
         raise Refused(429, "changed in the past day")
