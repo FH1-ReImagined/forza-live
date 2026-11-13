@@ -9,12 +9,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ENGINE="${ENGINE:-$(command -v docker || command -v podman)}"
 IMAGE=forza-video-converter:image-test
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK"/{incoming,converted}
 "$ENGINE" build -q -t "$IMAGE" "$HERE" >/dev/null
 chmod -R a+rwX "$WORK"
 USERNS=() Z=""
 if [ "$(basename "$ENGINE")" = podman ]; then USERNS=(--userns=keep-id:uid=10003,gid=10003) Z=",Z"; fi
+# The results' folders belong to the converter's user: it opens them up before they are removed.
+cleanup() {
+    "$ENGINE" run --rm --network none --user 10003:10003 "${USERNS[@]}" -v "$WORK/converted:/c${Z/,/:}" \
+        --entrypoint chmod "$IMAGE" -R a+rwX /c >/dev/null 2>&1 || true
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 make() {  # id, the lavfi video source
     "$ENGINE" run --rm --network none --entrypoint ffmpeg "${USERNS[@]}" --user 10003:10003 \
         -v "$WORK/incoming:/out${Z/,/:}" "$IMAGE" -nostdin -v error -f lavfi -i "$2" \
