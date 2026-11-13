@@ -238,6 +238,27 @@ routes are on the HTTP port with the rest.
 
 Moderating photos: [operating](operating.md#community-photos).
 
+## Community videos
+
+The game's movie uploads (replay clips) become community videos when the
+[video converter](../video/README.md) runs beside the server: it makes an MP4 (H.264 and AAC, at
+most 1280 px wide and 120 s, no metadata) and frames from each clip (one in each 2 s, at random
+instants; the poster is one of them), off the request path, in a container with no network. Every video is held until the
+[screening worker](operating.md#automatic-screening) or the operator releases it. Details and
+limits: [title services](title_services.md#community-videos-forza_livecontentvideospy).
+
+- Public: `GET /community/videos.json` (live videos, newest first, at most 200: id, gamertag,
+  the owner's player id, title, upload and approval times, length in seconds, size, width and
+  height, the MP4's and the poster's SHA-256 and URLs; no XUID), `GET /community/video/<id>.mp4`
+  (with byte ranges, which a browser's player needs) and `GET /community/video/<id>.jpg` (the
+  poster). The website's `tools/build_videos.py` copies them into the site, checked against
+  their SHA-256.
+- Caps: 5 videos a day and 50 in all per player, 20 an hour and 20 waiting for the converter on
+  the server; the files have a disk budget of their own, `FORZA_VIDEOS_CAP_MB` (2048), apart
+  from `FORZA_DISK_CAP_MB`.
+- A player deletes their own video from the website's account page; the operator from the
+  [video routes](operating.md#community-videos).
+
 ## Community designs
 
 The paint jobs and vinyl groups players share in the game's design storefront

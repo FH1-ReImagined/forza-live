@@ -965,6 +965,51 @@ headers above, and the website's `build_gallery.py` published it from the feed; 
 readback the server logged the failed capture and published nothing; the game said the upload
 succeeded both times.
 
+### Community videos (`forza_live/content/videos.py`)
+
+The game's movie upload goes through the same large-file upload as the Big Shot:
+`LargeFileUpload.Create` (payloadSize the clip's size, overwriteOldest false, userFileName
+`Forza<digits>`, no extension), then the clip in 256 KiB `UploadContent` chunks. Seen on the
+public server from the TU4 game (November 2026): a 387,095-byte ASF file, 15.3 s, VC-1 Advanced
+(`WVC1`) 640x360 and WMA 2 at 48 kHz stereo, 128 kbit/s; the ASF Content Description's title is
+the game's own ("<car> on <route>"), its author the driver's gamertag, and extended tags name the
+environment, the track, the car's make and model ("Forza/TrackId" and so on). Its picture was four
+black frames: the recompiled game records the race's sound but no picture yet.
+
+`photos.py` hands the finished upload to `videos.upload_finished`, which has it forgotten
+afterwards: a clip is never kept as one of the player's files, whatever its size. a file that starts with the ASF Header Object's GUID (or is named `.wmv`
+or `.asf`) is a clip, anything else goes to `community.py`. A clip is refused, and the game's
+upload still succeeds, when it was not signed by the player's key, the player is banned or has no
+gamertag, the caps say no (5 a day and 50 in all per player, 20 an hour and 20 waiting on the
+server), or its ASF header (read with the standard library: File Properties, Stream
+Properties, Content Description) has no video stream or two, more than 4 streams, a broadcast
+flag, a picture smaller than 96x64 or larger than 1920x1088, less than 1 s or more than 120 s,
+or more than 32 MiB in all, or when the videos' own disk budget (`FORZA_VIDEOS_CAP_MB`) is full. Otherwise it is copied to `DATA_DIR/videos/incoming/<id>.wmv` with a job beside it,
+for the [video converter](../video/README.md) (the job carries a random seed that places the
+screened instants, never published), and the video is `converting`. The converter's result
+(`DATA_DIR/videos/converted/<id>/`) is read as untrusted (no links followed, plain files of
+bounded sizes, nothing that blocks) and checked: exactly one frame for each 2 s of video (8 to
+60), the MP4's top-level boxes, the frames rewritten by community.py's JPEG cleaner, the poster
+taken from them (the result names which), the sizes and the budget. The video is then `held`,
+always, for the screening worker or the operator. A clip the converter has not
+answered within a day is dropped.
+
+A video has a random 12-character base32 id, the gamertag the player had, the clip's title
+(cleaned), `takenAt`, `approvedAt` (its first time in the feed), its length, size, width and
+height, and the SHA-256 of the MP4, of the poster and of the clip. It is `converting`, `held`,
+`live` or `hidden`; a banned player's videos are served to nobody. The same clip from the same
+player again is the same video; a clip the operator deleted is not published again.
+
+| Route | |
+| --- | --- |
+| `GET /community/videos.json` | `{"version":1,"generated":<unix>,"videos":[{"id","gamertag","owner","title","takenAt","approvedAt","seconds","w","h","size","sha256","video","poster","posterSha256"}]}`: live videos, newest first, at most 200; `owner` is the player id the leaderboards publish. `ETag`, `Cache-Control: public, max-age=60`. The website's `tools/build_videos.py` reads it |
+| `GET /community/video/<id>.mp4` | a live video: `Accept-Ranges: bytes`, one `Range` answered with 206 and `Content-Range` (`If-Range` honoured; an unsatisfiable one 416), `nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, cached a day |
+| `GET /community/video/<id>.jpg` | its poster; with the MP4, at most 600 media requests a minute (then 429) |
+| `/admin/videos...` | the operator's ([operating](operating.md#community-videos)) |
+
+Files: `DATA_DIR/videos.json` and `DATA_DIR/videos/` (`public/<id>.mp4` and `.jpg`,
+`frames/<id>-<n>.jpg`, `incoming/`, `converted/`), in the disk quota.
+
 ### The design storefront (`forza_live/content/designs.py`)
 
 Paint Shop > DESIGN STOREFRONT: paint jobs (liveries) and vinyl groups that players share,
@@ -1061,12 +1106,13 @@ most every 5 s whoever asks; no disk access.
 ### A player's own items (`forza_live/content/owners.py`)
 
 The website accounts service ([`accounts/`](../accounts/README.md)) lets a signed-in player whose
-account is linked to their game delete their own community photos and designs. It asks this
+account is linked to their game delete their own community photos, videos and designs. It asks this
 server, which checks again:
 
 | Route | |
 | --- | --- |
 | `POST /owner/photos/<id>/delete` | body `{"owner": "<the photo owner's XUID, 16 hex digits>"}`: the photo is dropped as the operator's delete drops it, but its picture may be published again (it is the player's own) |
+| `POST /owner/videos/<id>/delete` | the same for a video: its files go; the clip may be published again (it is the player's own) |
 | `POST /owner/designs/<id>/delete` | the same for a design (its public id): it goes from the storefront too, as the game's own RemoveFile takes it |
 
 Both need the `X-Owner-Token` header to be `FORZA_OWNER_TOKEN` (a token of its own, not the admin

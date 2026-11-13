@@ -19,6 +19,23 @@ hidden_refresh_seconds = 3600 # how often the hidden photos' pHashes are read ag
 enabled = true
 grids = []                    # tiles per grid for designs: none
 
+[videos]
+# The community videos (forza_live/content/videos.py: GET /admin/videos/queue). Every converted
+# clip waits held; the converter samples one frame in each 2 s of it (8 to 60), each at a random
+# instant inside its 2 s that only the server and the converter know, at the video's own size (the
+# game's are 640x360); the poster is one of them. A video with fewer frames than its length asks
+# for is never released. Each frame is scored like a photo and decided on its own: any frame's hide
+# hides the video, and only a video whose every frame is clear is released. A frame's hold
+# (doubtful, or a frame that cannot be read) hides the video too with doubtful = "hide", so no
+# video waits for the maintainer, who can still unhide one in the panel; a model error is tried
+# again first. doubtful = "hold" leaves such a video held instead, as a doubtful photo is.
+# The title is checked once. The sound is not screened.
+enabled = true
+doubtful = "hide"
+grids = []                    # tiles per grid for frames up to wide_width: none (the game's are 640x360)
+wide_width = 800              # a frame wider than this (a 1280x720 clip's) is also scored in tiles,
+wide_grids = [[2, 2]]         # 640x360 each, as photos are
+
 [runtime]
 models_dir = "/models"
 threads = 4                   # onnxruntime threads per model (they run one after the other)

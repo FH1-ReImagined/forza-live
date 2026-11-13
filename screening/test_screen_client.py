@@ -1,6 +1,7 @@
 """The worker against a real forza-live server (this repository's, started on 127.0.0.1 with
-FORZA_COMMUNITY_HOLD=1 and its photos seeded as held, its designs as pending), with stand-in
-models: the queues, release, hide, hold, the operator deciding first, bad pictures, refused
+FORZA_COMMUNITY_HOLD=1 and its photos seeded as held, its videos as held, its designs as
+pending), with stand-in models: the queues, release, hide, hold (a video frame by frame), the
+operator deciding first, bad pictures, refused
 requests. And the server's admin checks for the address a worker on Docker's default bridge
 network has."""
 
@@ -119,13 +120,45 @@ def seed_designs(data_dir, previews):
     return list(previews)
 
 
+def jpeg(colour, size=(640, 360)):
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, colour).save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def seed_videos(data_dir, clips):
+    """Held community videos in a data folder, as videos.py keeps them once converted: {id:
+    ([frame JPEGs], title)}. Returns the ids."""
+    os.makedirs(os.path.join(data_dir, "videos", "frames"), exist_ok=True)
+    os.makedirs(os.path.join(data_dir, "videos", "public"), exist_ok=True)
+    found = {}
+    for i, (vid, (frames, title)) in enumerate(clips.items()):
+        for n, data in enumerate(frames, 1):
+            with open(os.path.join(data_dir, "videos", "frames", "%s-%d.jpg" % (vid, n)), "wb") as f:
+                f.write(data)
+        for ext, data in ((".mp4", b"\x00\x00\x00\x10ftypisom\x00\x00\x00\x00"), (".jpg", frames[0])):
+            with open(os.path.join(data_dir, "videos", "public", vid + ext), "wb") as f:
+                f.write(data)
+        found[vid] = {"owner": 0x0009000000000201 + i, "fileId": 300 + i, "gamertag": "Driver%d" % i,
+                      "title": title, "status": "held", "created": 1793000000.0 + i,
+                      "takenAt": 1793000000 + i, "approvedAt": None, "decidedAt": None, "note": "",
+                      "clipSha256": "%064x" % i, "clipSize": 1000, "clip": {}, "seconds": 15.0,
+                      "w": 640, "h": 360, "sha256": "%064x" % (100 + i), "size": 24,
+                      "posterSha256": "%064x" % (200 + i), "frames": len(frames)}
+    with open(os.path.join(data_dir, "videos.json"), "w") as f:
+        json.dump({"videos": found, "uploads": {}, "serverUploads": [], "deleted": []}, f)
+    return list(clips)
+
+
 class LocalServer:
     """forza_live_server.py from this checkout, on 127.0.0.1, with the token and the hold."""
 
-    def __init__(self, pictures, extra_args=(), designs=None):
+    def __init__(self, pictures, extra_args=(), designs=None, videos=None):
         self.data = tempfile.TemporaryDirectory()
         self.ids = seed(self.data.name, pictures)
         self.design_ids = seed_designs(self.data.name, designs or {})
+        self.video_ids = seed_videos(self.data.name, videos or {})
         self.http = free_port()
         env = dict(os.environ, FORZA_ADMIN_TOKEN=TOKEN, FORZA_COMMUNITY_HOLD="1")
         env.pop("FORZA_TRUSTED_PROXIES", None)
@@ -157,6 +190,14 @@ class LocalServer:
     def gallery(self):
         doc = json.loads(urllib.request.urlopen(self.base + "/community/gallery.json").read())
         return [p["id"] for p in doc["photos"]]
+
+    def video_states(self):
+        doc = json.loads(self.client()._request("GET", "/admin/videos")[0])
+        return {v["id"]: (v["status"], v["note"]) for v in doc["videos"]}
+
+    def video_feed(self):
+        doc = json.loads(urllib.request.urlopen(self.base + "/community/videos.json").read())
+        return [v["id"] for v in doc["videos"]]
 
     def design_states(self):
         doc = json.loads(self.client()._request("GET", "/admin/designs")[0])
@@ -473,6 +514,152 @@ class DesignsAgainstServer(unittest.TestCase):
         (done, _), lines = run(worker)
         self.assertEqual(done, 1)
         self.assertEqual({s for s, _, _ in self.server.design_states().values()}, {"pending"})
+
+
+class VideosAgainstServer(unittest.TestCase):
+    """The held videos: every frame scored like a photo, the worst frame decides."""
+    IDS = {"AAAAAAAAAAAA": "clean", "BBBBBBBBBBBB": "one nsfw frame", "CCCCCCCCCCCC": "one doubtful frame",
+           "DDDDDDDDDDDD": "a broken frame", "EEEEEEEEEEEE": "frames missing", "FFFFFFFFFFFF": "a wide clip"}
+
+    def setUp(self):
+        green, red, blue = jpeg(GREEN), jpeg(RED), jpeg(BLUE)
+        self.server = LocalServer({}, videos={  # 15 s: 8 frames each
+            "AAAAAAAAAAAA": ([green] * 8, "Subaru WRX '05 on Beaumont - Stage 3"),
+            "BBBBBBBBBBBB": ([green, red] + [green] * 6, ""),
+            "CCCCCCCCCCCC": ([green] * 7 + [blue], ""),
+            "DDDDDDDDDDDD": ([green, green[:300]] + [green] * 6, ""),
+            "EEEEEEEEEEEE": ([green] * 3, ""),
+            "FFFFFFFFFFFF": ([jpeg(GREEN, (1280, 720))] * 8, "")})
+
+    def tearDown(self):
+        self.server.close()
+
+    def test_the_queue_has_no_xuid(self):
+        q = self.server.client().video_queue()
+        self.assertEqual([v["id"] for v in q], list(self.IDS))
+        for v in q:
+            self.assertNotIn("owner", v)
+            self.assertEqual((v["kind"], v["status"]), ("video", "held"))
+        self.assertEqual(q[0]["frames"], ["/admin/videos/frame/AAAAAAAAAAAA-%d.jpg" % n for n in range(1, 9)])
+
+    def test_release_hide_and_hold(self):
+        stub = StubScreener()
+        worker = screen_worker.Worker(CFG, self.server.client(), stub)
+        (done, waiting), lines = run(worker)
+        self.assertEqual((done, waiting), (6, 0))
+        st = self.server.video_states()
+        self.assertEqual(st["AAAAAAAAAAAA"], ("live", "screening: release (clear: 8 frames)"))
+        self.assertEqual(st["EEEEEEEEEEEE"][0], "hidden")  # never released with frames missing
+        self.assertIn("frames-missing: 3 frames, 8 expected", st["EEEEEEEEEEEE"][1])
+        self.assertEqual(st["FFFFFFFFFFFF"][0], "live")
+        self.assertEqual(st["BBBBBBBBBBBB"][0], "hidden")
+        self.assertTrue(st["BBBBBBBBBBBB"][1].startswith("screening: hide (nsfw-high: frame 2 of 8"),
+                        st["BBBBBBBBBBBB"][1])
+        # a doubtful frame, and a frame that cannot be read: hidden, none waits for the maintainer
+        self.assertEqual(st["CCCCCCCCCCCC"][0], "hidden")
+        self.assertTrue(st["CCCCCCCCCCCC"][1].startswith(
+            "screening: hide (doubtful-hate-suspect: frame 8 of 8"), st["CCCCCCCCCCCC"][1])
+        self.assertEqual(st["DDDDDDDDDDDD"][0], "hidden")
+        self.assertTrue(st["DDDDDDDDDDDD"][1].startswith(
+            "screening: hide (doubtful-error-decode: frame 2 of 8"), st["DDDDDDDDDDDD"][1])
+        self.assertEqual(sorted(self.server.video_feed()), ["AAAAAAAAAAAA", "FFFFFFFFFFFF"])
+        by_id = {r["id"]: r for r in lines if r.get("event") == "video"}
+        self.assertEqual(by_id["CCCCCCCCCCCC"]["rule"], "doubtful-hate-suspect")
+        self.assertEqual(by_id["DDDDDDDDDDDD"]["rule"], "doubtful-error-decode")
+        self.assertEqual([f["decision"] for f in by_id["BBBBBBBBBBBB"]["frames"]],
+                         ["release", "hide"] + ["release"] * 6)
+        for r in by_id.values():
+            self.assertNotIn("00090000", json.dumps(r).upper())  # no XUID anywhere
+        # every frame scored whole at its own size; the title read with the first frame only
+        self.assertEqual(stub.calls.count("AAAAAAAAAAAA"), 8)
+        self.assertEqual(stub.grids["AAAAAAAAAAAA"], ([], (640, 360)))
+        self.assertEqual(stub.grids["FFFFFFFFFFFF"], ([(2, 2)], (1280, 720)))  # a wide frame: in tiles too
+        self.assertNotIn("EEEEEEEEEEEE", stub.calls)  # not even scored
+        stub.calls.clear()
+        (done, waiting), _ = run(worker)  # nothing is left held to score again
+        self.assertEqual((done, stub.calls), (0, []))
+
+    def test_doubtful_videos_can_stay_held(self):
+        cfg = dict(CFG, videos=dict(CFG["videos"], doubtful="hold"))
+        stub = StubScreener()
+        worker = screen_worker.Worker(cfg, self.server.client(), stub)
+        _, lines = run(worker)
+        st = self.server.video_states()
+        self.assertEqual(st["CCCCCCCCCCCC"], ("held", ""))  # left held for the maintainer
+        self.assertEqual(st["DDDDDDDDDDDD"], ("held", ""))  # a frame that cannot be read: never released
+        by_id = {r["id"]: r for r in lines if r.get("event") == "video"}
+        self.assertEqual(by_id["CCCCCCCCCCCC"]["rule"], "hate-suspect")
+        stub.calls.clear()
+        (done, _), _ = run(worker)  # what it left held is not scored again
+        self.assertEqual((done, stub.calls), (0, []))
+        with self.assertRaises(ValueError):
+            screen_worker.Worker(dict(CFG, videos={"doubtful": "publish"}), self.server.client(), stub)
+
+    def test_a_model_error_is_tried_again_before_the_video_is_hidden(self):
+        boom = {"left": 2}
+
+        def fail_twice(item):  # the model fails on the first two polls of the first video
+            if item["id"] == "AAAAAAAAAAAA" and item.get("title") and boom["left"]:
+                boom["left"] -= 1
+                raise RuntimeError("model down")
+
+        worker = screen_worker.Worker(CFG, self.server.client(), StubScreener(fail_twice))
+        _, lines = run(worker)
+        rec = next(r for r in lines if r.get("id") == "AAAAAAAAAAAA")
+        self.assertEqual((rec["decision"], rec["rule"]), ("retry", "error-screen"))
+        self.assertEqual(self.server.video_states()["AAAAAAAAAAAA"], ("held", ""))
+        run(worker)
+        self.assertEqual(self.server.video_states()["AAAAAAAAAAAA"], ("held", ""))
+        run(worker)  # the model is back: released
+        self.assertEqual(self.server.video_states()["AAAAAAAAAAAA"][0], "live")
+
+    def test_the_operator_decides_first(self):
+        operator = self.server.client()
+
+        def hide_first(item):  # while the first frame is being scored
+            if item["id"] == "AAAAAAAAAAAA" and item.get("title"):
+                operator._request("POST", "/admin/videos/AAAAAAAAAAAA/hide", {"note": "operator"})
+
+        worker = screen_worker.Worker(CFG, self.server.client(), StubScreener(hide_first))
+        _, lines = run(worker)
+        rec = next(r for r in lines if r.get("id") == "AAAAAAAAAAAA")
+        self.assertEqual((rec["decision"], rec["done"]), ("release", "operator-decided-first"))
+        self.assertEqual(self.server.video_states()["AAAAAAAAAAAA"], ("hidden", "operator"))
+
+    def test_dry_run_and_turned_off(self):
+        worker = screen_worker.Worker(CFG, self.server.client(), StubScreener(), dry_run=True)
+        run(worker)
+        self.assertEqual({s for s, _ in self.server.video_states().values()}, {"held"})
+        worker = screen_worker.Worker(dict(CFG, videos={"enabled": False}), self.server.client(),
+                                      StubScreener())
+        (done, _), _ = run(worker)
+        self.assertEqual(done, 0)
+
+    def test_a_server_without_videos(self):
+        client = self.server.client()
+        real = client._request
+
+        def no_videos(method, path, *a, **kw):
+            if path.startswith("/admin/videos"):
+                raise screen_client.AdminError(404, "not found")
+            return real(method, path, *a, **kw)
+        client._request = no_videos
+        worker = screen_worker.Worker(CFG, client, StubScreener())
+        (done, _), _ = run(worker)
+        self.assertEqual(done, 0)
+        self.assertGreater(worker._no_videos_until, time.monotonic())
+
+    def test_malformed_queue_entries_are_dropped(self):
+        good = {"id": "AAAAAAAAAAAA", "frames": ["/admin/videos/frame/AAAAAAAAAAAA-1.jpg"]}
+        self.assertIsNotNone(screen_client.video_record(good))
+        for bad in ({"id": "AAAAAAAAAAAA", "frames": []},
+                    {"id": "AAAAAAAAAAAA", "frames": ["/admin/videos/frame/BBBBBBBBBBBB-1.jpg"]},
+                    {"id": "AAAAAAAAAAAA", "frames": ["http://elsewhere/x.jpg"]},
+                    {"id": "AAAAAAAAAAAA", "frames": ["/admin/videos/frame/AAAAAAAAAAAA-1.jpg"] * 61},
+                    {"id": "../x", "frames": good["frames"]}):
+            self.assertIsNone(screen_client.video_record(bad), bad)
+        with self.assertRaises(ValueError):
+            self.server.client().frame("/admin/photos/img/AAAAAAAAAAAA.png")
 
 
 class OlderServer(unittest.TestCase):

@@ -1,11 +1,14 @@
-"""The community photos and designs, as the game server keeps them, read-only.
+"""The community photos, videos and designs, as the game server keeps them, read-only.
 
-The game server writes DATA_DIR/community.json (forza_live.content.community) and
-DATA_DIR/designs.json (forza_live.content.designs) with forza_live.core.durable.replace, so a
-reader always sees a whole file. This service reads them again when they change (and at least
+The game server writes DATA_DIR/community.json (forza_live.content.community),
+DATA_DIR/videos.json (forza_live.content.videos) and DATA_DIR/designs.json
+(forza_live.content.designs) with forza_live.core.durable.replace, so a reader always sees a
+whole file. This service reads them again when they change (and at least
 once a minute, as gamertags change without them), with the game server's own rules:
 - a photo is public (in the gallery feed the website is built from) when community.public says
   so: live, its owner not banned; the newest community.FEED_MAX of them, in the feed's order;
+- a video likewise (videos.public, videos.FEED_MAX); one still converting is listed to its owner
+  as pending;
 - a design when design_feed.on_site says so: listed in the game, clear, with a converted preview
   and a gamertag to credit; the newest design_feed.FEED_MAX.
 
@@ -23,14 +26,14 @@ from typing import NamedTuple
 
 from django.conf import settings
 
-from forza_live.content import community, design_feed, designs
+from forza_live.content import community, design_feed, designs, videos
 from forza_live.core import durable, limits
 
 from members import game
 
-PHOTO, DESIGN = "photo", "design"
-KINDS = (PHOTO, DESIGN)
-ITEM_ID = r"^[A-Z2-7]{12}$"  # community.ID_RE, designs.WEB_ID_CHARS and WEB_ID_LEN
+PHOTO, DESIGN, VIDEO = "photo", "design", "video"
+KINDS = (PHOTO, DESIGN, VIDEO)
+ITEM_ID = r"^[A-Z2-7]{12}$"  # community.ID_RE (videos' too), designs.WEB_ID_CHARS and WEB_ID_LEN
 REFRESH_SECONDS = 60
 
 _lock = threading.Lock()
@@ -88,6 +91,28 @@ def _photos(bans):
             for pid, owner, title, status, created in out]
 
 
+def _videos(bans):
+    found = _read("videos.json", {}).get("videos")
+    out, live = [], []
+    for vid, v in (found if isinstance(found, dict) else {}).items():
+        try:
+            owner, status = int(v["owner"]), v["status"]
+            created = int(v.get("created") or v.get("takenAt") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if status not in videos.STATUSES:
+            continue
+        if videos.public(v, bans):
+            live.append((v.get("approvedAt") or 0, v.get("created") or 0, vid))
+        state = "pending" if status == videos.CONVERTING else status
+        out.append((vid, owner, limits.clean_ascii_text(v.get("title") or "", videos.TITLE_MAX), state,
+                    created))
+    live.sort(reverse=True)  # videos.feed's order
+    in_feed = {vid for _, _, vid in live[:videos.FEED_MAX]}
+    return [Item(VIDEO, vid, designs.hx(owner), title, state, vid in in_feed, created)
+            for vid, owner, title, state, created in out]
+
+
 def _design_state(f):
     if f.get("web") == designs.HIDDEN or f.get("status") == designs.HIDDEN:
         return "hidden"
@@ -117,15 +142,16 @@ def _designs(bans):
 
 
 def index():
-    """Every photo and design (Index), read again when a file or the bans changed, or a minute
-    passed."""
+    """Every photo, video and design (Index), read again when a file or the bans changed, or a
+    minute passed."""
     game.configure()
     bans = designs.banned_xuids()
-    key = (_mtime("community.json"), _mtime("designs.json"), bans, int(time.time() // REFRESH_SECONDS))
+    key = (_mtime("community.json"), _mtime("designs.json"), _mtime("videos.json"), bans,
+           int(time.time() // REFRESH_SECONDS))
     with _lock:
         if _cache["key"] != key:
             items, by_owner = {}, {}
-            for item in _photos(bans) + _designs(bans):
+            for item in _photos(bans) + _designs(bans) + _videos(bans):
                 items[(item.kind, item.id)] = item
                 by_owner.setdefault(item.owner, []).append(item)
             for mine in by_owner.values():
@@ -144,8 +170,10 @@ def present():
     purge of the likes of items that are gone."""
     photos = (_read("community.json", None) or {}).get("photos")
     files = (_read("designs.json", None) or {}).get("files")
+    clips = (_read("videos.json", None) or {}).get("videos")
     return {
         PHOTO: set(photos) if isinstance(photos, dict) else None,
+        VIDEO: set(clips) if isinstance(clips, dict) else None,
         DESIGN: {f["webId"] for f in files.values() if isinstance(f, dict) and isinstance(f.get("webId"), str)}
         if isinstance(files, dict) else None,
     }

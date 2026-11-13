@@ -23,7 +23,8 @@ photos hands it here (photo_uploaded), and it becomes a community photo if:
 - the player's caps (PER_DAY a day, PER_PLAYER in all) and the server's (PER_HOUR an hour) allow
   it, and the disk quota (limits) has room.
 
-Anything else is simply not published: the game's upload succeeds all the same. The same picture
+Anything else is simply not published: the game's upload succeeds all the same. A movie (the
+game's replay clip, an ASF file) never comes here: videos.py takes it first. The same picture
 (SHA-256 of the published file) from the same player again moves its photo to the newer file
 rather than adding a second one; a picture an operator deleted is not published again.
 
@@ -204,11 +205,14 @@ def _scan_end(data, i):
         return i
 
 
-def clean_jpeg(data):
+def clean_jpeg(data, min_size=None, max_size=None):
     """(cleaned JPEG, width, height) of a JPEG file; BadImage when it is anything else or not one
-    this server publishes. The cleaned file holds SOI, a shortened JFIF APP0 and Adobe APP14 when
-    the file had them, its DQT, DHT and DRI segments, the frame (SOF0 or SOF2) and its scans
-    with their data, and EOI: nothing that is not needed to decode the picture."""
+    this server publishes (min_size to max_size pixels: MIN_SIZE to MAX_SIZE unless given; the
+    videos' posters and frames are smaller). The cleaned file holds SOI, a shortened JFIF APP0
+    and Adobe APP14 when the file had them, its DQT, DHT and DRI segments, the frame (SOF0 or
+    SOF2) and its scans with their data, and EOI: nothing that is not needed to decode the
+    picture."""
+    min_size, max_size = min_size or MIN_SIZE, max_size or MAX_SIZE
     if not isinstance(data, (bytes, bytearray)) or len(data) < 4 or data[:2] != b"\xff\xd8":
         raise BadImage("not a JPEG file")
     data = bytes(data)
@@ -252,7 +256,7 @@ def clean_jpeg(data):
                 raise BadImage("%d-bit samples" % bits)
             if comps not in (1, 3) or len(body) != 6 + 3 * comps:
                 raise BadImage("%d components" % comps)
-            if not (MIN_SIZE[0] <= w <= MAX_SIZE[0] and MIN_SIZE[1] <= h <= MAX_SIZE[1]):
+            if not (min_size[0] <= w <= max_size[0] and min_size[1] <= h <= max_size[1]):
                 raise BadImage("size %dx%d" % (w, h))
             if max(w / h, h / w) > MAX_ASPECT:
                 raise BadImage("aspect ratio %dx%d" % (w, h))

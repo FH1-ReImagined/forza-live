@@ -1,5 +1,6 @@
 """Likes and the player's own items (members.likes, members.items, members.game.counted), against
-a game server's data folder made here (community.json, designs.json beside friends.json, players/
+a game server's data folder made here (community.json, videos.json, designs.json beside
+friends.json, players/
 and banned_xuids.json), and the owner-only delete route of the game server itself
 (forza_live.content.owners) served on 127.0.0.1.
 
@@ -34,6 +35,7 @@ from members.tests.test_links import SEED, SEED_B, SEED_C, XUID, XUID_B, LinkTes
 XUID_C = 0x0009000000000003
 PHOTOS = ["PHOTOAAAAAAA", "PHOTOBBBBBBB", "PHOTOCCCCCCC"]
 DESIGN, DESIGN_B = "DESIGNAAAAAA", "DESIGNBBBBBB"
+VIDEO, VIDEO_B = "VIDEOAAAAAAA", "VIDEOBBBBBBB"
 DAY = 86400
 B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
@@ -46,6 +48,13 @@ def photo(owner, status="live", title="Sunset", at=1_800_000_000):
     return {"owner": owner, "fileId": 1, "gamertag": "x", "title": title, "type": "jpeg", "takenAt": at,
             "created": at, "status": status, "approvedAt": at if status == "live" else None,
             "decidedAt": None, "note": "", "sha256": "0" * 64, "w": 1280, "h": 720, "size": 1}
+
+
+def video(owner, status="live", title="Subaru WRX '05 on Beaumont", at=1_800_000_000):
+    return {"owner": owner, "fileId": 2, "gamertag": "x", "title": title, "status": status, "created": at,
+            "takenAt": at, "approvedAt": at if status == "live" else None, "decidedAt": None, "note": "",
+            "clipSha256": "2" * 64, "clipSize": 1, "clip": {}, "seconds": 15.0, "w": 640, "h": 360,
+            "sha256": "3" * 64, "size": 1, "posterSha256": "4" * 64, "frames": 8}
 
 
 def design(owner, wid, web="clear", status="live", title="FLAMES", at=1_800_000_000, done=True):
@@ -64,6 +73,7 @@ class LikesTest(LinkTest):
         self.player(XUID_C, SEED_C, "DriverC")
         self.photos = {pid: photo(XUID) for pid in PHOTOS}
         self.designs = {"100000000": design(XUID, DESIGN), "100000001": design(XUID_B, DESIGN_B, at=1_800_000_100)}
+        self.videos = {VIDEO: video(XUID), VIDEO_B: video(XUID_B, at=1_800_000_200)}
         self.write_items()
         for x in (XUID, XUID_B, XUID_C):
             self.age(x)
@@ -75,6 +85,8 @@ class LikesTest(LinkTest):
             {"photos": self.photos, "uploads": {}, "serverUploads": [], "deleted": []}))
         (self.data / "designs.json").write_text(json.dumps(
             {"nextId": 100000002, "files": self.designs, "uploads": {}, "serverUploads": []}))
+        (self.data / "videos.json").write_text(json.dumps(
+            {"videos": self.videos, "uploads": {}, "serverUploads": [], "deleted": []}))
         items.forget()
 
     def age(self, xuid, days=4, signed_days=2, tag=None):
@@ -137,6 +149,17 @@ class Liking(LikesTest):
         self.assertEqual(self.like(b, DESIGN, kind="photo").status_code, 404)  # not a photo's id
         self.assertEqual(self.totals("design"), {DESIGN: 1})
         self.assertEqual(self.totals("photo"), {})
+
+    def test_videos_too(self):
+        b, _ = self.linked("222", SEED_B, XUID_B)
+        self.assertEqual(self.like(b, VIDEO, kind="video").status_code, 200)
+        self.assertEqual(self.like(b, VIDEO, kind="photo").status_code, 404)  # not a photo's id
+        self.assertEqual(self.like(b, VIDEO_B, kind="video").status_code, 403)  # its own
+        self.assertEqual(self.totals("video"), {VIDEO: 1})
+        self.videos[VIDEO]["status"] = "held"  # back to the screening: out of the totals
+        self.write_items()
+        self.assertEqual(self.totals("video"), {})
+        self.assertEqual(self.like(b, VIDEO, kind="video").status_code, 404)
 
     def test_self_likes_are_refused(self):
         b, _ = self.linked("222", SEED_B, XUID_B)
@@ -398,6 +421,8 @@ class MyItems(LikesTest):
         self.designs["100000002"] = design(XUID, "DESIGNCCCCCC", web="pending", title="NEW", at=1_800_000_900)
         self.designs["100000003"] = design(XUID, "DESIGNDDDDDD", web="clear", status="hidden")  # 3 reports
         self.designs["100000004"] = design(XUID, "DESIGNEEEEEE", done=False)  # still uploading
+        self.videos["VIDEOCCCCCCC"] = video(XUID, status="converting", title="", at=1_700_000_000)
+        self.videos["VIDEODDDDDDD"] = video(XUID, status="held", title="Held", at=1_700_000_001)
         self.write_items()
 
     def test_the_key_s_items_in_every_state(self):
@@ -414,12 +439,15 @@ class MyItems(LikesTest):
             ("design", DESIGN): ("live", True, 1, "FLAMES"),
             ("design", "DESIGNCCCCCC"): ("pending", False, 0, "NEW"),
             ("design", "DESIGNDDDDDD"): ("hidden", False, 0, "FLAMES"),
+            ("video", VIDEO): ("live", True, 0, "Subaru WRX '05 on Beaumont"),
+            ("video", "VIDEOCCCCCCC"): ("pending", False, 0, ""),
+            ("video", "VIDEODDDDDDD"): ("held", False, 0, "Held"),
         })
         self.assertEqual([i.id for i in doc.items][:2], ["DESIGNCCCCCC", PHOTOS[1]])  # newest first
         self.assertNotIn(DESIGN_B, r.content.decode())  # Driver B's
         for x in (XUID, XUID_B):
             self.assertNotIn("%016X" % x, r.content.decode())
-        self.assertEqual([i["id"] for i in body(self.b.get_json("/api/me/items"))["items"]], [DESIGN_B])
+        self.assertEqual([i["id"] for i in body(self.b.get_json("/api/me/items"))["items"]], [VIDEO_B, DESIGN_B])
 
 
 class OwnerRoute(BaseHTTPRequestHandler):
@@ -494,6 +522,19 @@ class Deleting(LikesTest):
         self.assertEqual(r.status_code, 200, r.content)
         self.assertNotIn("100000001", json.loads((self.data / "designs.json").read_text())["files"])
 
+    def test_the_owner_deletes_a_video_and_its_likes_go(self):
+        (self.data / "videos" / "public").mkdir(parents=True)
+        (self.data / "videos" / "public" / (VIDEO + ".mp4")).write_bytes(b"mp4")
+        self.like(self.b, VIDEO, kind="video")
+        r = self.delete(self.a, "video", VIDEO)
+        self.assertEqual((r.status_code, body(r)), (200, {"ok": True, "deleted": True}))
+        self.assertEqual(OwnerRoute.seen[-1][0], "/owner/videos/%s/delete" % VIDEO)
+        self.assertNotIn(VIDEO, json.loads((self.data / "videos.json").read_text())["videos"])
+        self.assertFalse((self.data / "videos" / "public" / (VIDEO + ".mp4")).exists())
+        self.assertEqual(Like.objects.filter(kind="video").count(), 0)
+        self.assertEqual(self.delete(self.b, "video", VIDEO).status_code, 404)
+        self.assertEqual(self.delete(self.a, "video", VIDEO_B).status_code, 404)  # not theirs
+
     def test_only_the_owner(self):
         r = self.delete(self.b, "photo", PHOTOS[0])
         self.assertEqual((r.status_code, body(r)), (404, {"error": "not found"}))
@@ -566,6 +607,8 @@ class Unconfigured(LikesTest):
         b, _ = self.linked("222", SEED_B, XUID_B)
         (self.data / "community.json").write_text("{not json")
         (self.data / "designs.json").write_text(json.dumps({"files": {"1": {"owner": "x"}, "2": []}}))
+        (self.data / "videos.json").write_text(json.dumps({"videos": {"VIDEOAAAAAAA": {"owner": "x"},
+                                                                     "VIDEOBBBBBBB": []}}))
         items.forget()
         self.assertEqual(self.like(b).status_code, 404)
         self.assertEqual(body(b.get_json("/api/me/items"))["items"], [])

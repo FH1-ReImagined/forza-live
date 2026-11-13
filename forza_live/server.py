@@ -34,6 +34,7 @@ from forza_live.social import chat
 from forza_live.world import club_world
 from forza_live.content import community
 from forza_live.content import design_feed
+from forza_live.content import videos
 from forza_live.social import discord_status
 from forza_live.social import friends
 from forza_live.competition import events
@@ -1620,10 +1621,11 @@ async def read_proxy_header(server, reader, idle):
 def response(status, body, content_type="application/octet-stream", extra=(), cors=True):
     """cors: answer any site's page (Access-Control-Allow-Origin: *); the operator panel's
     answers do not."""
-    reason = {200: "OK", 304: "Not Modified", 400: "Bad Request", 401: "Unauthorized",
+    reason = {200: "OK", 206: "Partial Content", 304: "Not Modified", 400: "Bad Request", 401: "Unauthorized",
               403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
               413: "Payload Too Large", 415: "Unsupported Media Type",
-              429: "Too Many Requests", 500: "Internal Server Error"}
+              416: "Range Not Satisfiable", 429: "Too Many Requests",
+              500: "Internal Server Error"}
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
             f"Content-Length: {len(body)}", *(["Access-Control-Allow-Origin: *"] if cors else []),
             f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (auth.py)
@@ -1672,10 +1674,11 @@ async def http_handler(server, reader, writer):
                          urllib.parse.urlsplit(path).path, status, len(data))
                 reply = response(status, data, content_type, conn + tuple(extra), cors=False)
             elif path.startswith("/admin/") and not (community.handles(path)
-                                                     or design_feed.handles(path)):
+                                                     or design_feed.handles(path)
+                                                     or videos.handles(path)):
                 # Chat moderation (chat.py): /admin/chat, /admin/mute, /admin/kick.
-                # (Community photos' /admin/photos and the designs' /admin/designs have their
-                # own rules: lsp.handle.)
+                # (Community photos' /admin/photos, videos' /admin/videos and the designs'
+                # /admin/designs have their own rules: lsp.handle.)
                 url = urllib.parse.urlsplit(path)
                 query = urllib.parse.parse_qs(url.query)
                 if not lsp.is_admin(peer, headers, query):
@@ -1895,6 +1898,7 @@ async def main():
                 server.expire()
             server.maybe_save_state()
             server.friends.store.maybe_save()
+            videos.tick()  # the video converter's results (videos.collect)
             try:
                 server.events.flush()
             except (OSError, sqlite3.Error):

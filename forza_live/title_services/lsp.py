@@ -30,9 +30,12 @@ services). This answers the ones online play needs:
     GET /community/designs.json, /community/design-img/..., /admin/designs
                                the design storefront's designs on the website, after
                                screening (design_feed.py)
-    POST /owner/photos/<id>/delete, /owner/designs/<id>/delete
-                               a player deletes their own photo or design from the website,
-                               through the website accounts service (owners.py)
+    GET /community/videos.json, /community/video/..., /admin/videos
+                               community videos: the game's movie uploads, converted to MP4
+                               off the request path and published after screening (videos.py)
+    POST /owner/photos/<id>/delete, /owner/designs/<id>/delete, /owner/videos/<id>/delete
+                               a player deletes their own photo, design or video from the
+                               website, through the website accounts service (owners.py)
     Xls.WebServices.Notifications  the Message Center (notifications.py): Rivals,
                                gifts, auctions and car club messages
 
@@ -58,6 +61,7 @@ from forza_live.core import bans
 from forza_live.world import campaign
 from forza_live.social import clubs
 from forza_live.content import community
+from forza_live.content import videos
 from forza_live.world import coop_ledger
 from forza_live.content import design_feed
 from forza_live.content import designs
@@ -253,7 +257,9 @@ def configure(args):
     clubs.configure(DATA_DIR, load_player)
     notifications.configure(DATA_DIR)
     community.configure(DATA_DIR, gamertag=lambda xuid: load_player(xuid).get("gamertag", ""))
-    photos.configure(DATA_DIR, proven=caller_signed, finished=community.photo_uploaded,
+    videos.configure(DATA_DIR)
+    # a finished upload is a movie (videos.py) or a picture (community.py)
+    photos.configure(DATA_DIR, proven=caller_signed, finished=videos.upload_finished,
                      removed=community.photo_removed)
     designs.configure(DATA_DIR, proven=caller_signed, trusted=caller_trusted)
     design_feed.configure()
@@ -897,7 +903,7 @@ def came_through_proxy(peer, headers):
 
 def is_local_admin(peer, headers):
     """is_admin for the operator endpoints that must never be used from the internet (community
-    photos' and the designs' moderation, community.py and design_feed.py): the
+    photos', videos' and the designs' moderation, community.py, videos.py and design_feed.py): the
     token only in its header (a query string ends
     up in logs and browser history), and nothing that came through the tunnel or a proxy (the
     token would cross it in plain text). From the LAN, an ssh tunnel or this machine."""
@@ -1038,6 +1044,9 @@ def handle(server, method, path, headers, body, peer):
         answer = leaderboards.handle(method, path)
         if answer is not None:
             return answer
+    if videos.handles(url.path):  # community videos (videos.py), ahead of /community/
+        return videos.handle(method, path, headers, body,
+                             lambda: is_local_admin(peer, headers))
     if design_feed.handles(url.path):  # designs on the website (design_feed.py)
         return design_feed.handle(method, path, headers, body,
                                   lambda: is_local_admin(peer, headers))

@@ -1,4 +1,4 @@
-# Screening worker for community photos and designs
+# Screening worker for community photos, videos and designs
 
 With `FORZA_COMMUNITY_HOLD=1`, every new community photo (a 1920x1080 PNG the server makes from
 a photo mode Big Shot; [`docs/operating.md`](../docs/operating.md#community-photos)) starts `held`.
@@ -7,8 +7,9 @@ the game at once but starts `pending` for the website
 ([`docs/operating.md`](../docs/operating.md#community-designs)). This worker screens both
 automatically on the server's own machine, with no hosted API:
 
-- It polls `GET /admin/photos/queue` and `GET /admin/designs/queue` every 30 s and fetches each
-  held photo and each pending design's preview.
+- It polls `GET /admin/photos/queue`, `GET /admin/videos/queue` and `GET /admin/designs/queue`
+  every 30 s and fetches each held photo, each held video's frames and each pending design's
+  preview.
 - It scores the picture with three CPU models (onnxruntime) and word lists.
 - It then **releases** clear ones, **hides** confident hits with a note naming the rule, and
   **leaves held** the doubtful ones for the maintainer, logging why. A hidden design is hidden in
@@ -59,6 +60,56 @@ Calibration and the hold rate:
 - Real photo mode shots have less text than menus, so they should hold even less. The target is to
   hold at most about 5% of photos.
 - Watch the share of `"decision":"hold"` lines in the worker's log over the first weeks.
+
+## Videos
+
+The game's movie uploads become [community videos](../docs/operating.md#community-videos) once
+the [video converter](../video/README.md) has made an MP4 of them. Every converted video starts
+`held`, whatever `FORZA_COMMUNITY_HOLD` says, so none is published before this worker (or the
+operator) has passed it. The converter samples **one frame in each 2 s** of the video (at least
+8, at most 60 for a 2-minute clip), each at a random instant inside its 2 s, chosen from a seed the
+server picks for each clip and never publishes. The frames are at the video's own size (the game's
+clips are 640x360), and the server serves them at `GET /admin/videos/frame/<id>-<n>.jpg`. **The
+poster is one of these frames**: the server publishes no picture of a video that was not screened.
+
+- Each frame is scored like a photo, with the same models, word lists and thresholds (the decision
+  table above): as a whole frame up to `[videos] wide_width` (800 px), and a wider frame (a
+  1280x720 clip's) also in 2 x 2 tiles of 640x360 (`wide_grids`), as photos are, so a small
+  symbol is not squashed away.
+- A video whose queue entry has fewer (or more) frames than its length asks for is never released:
+  it is decided as doubtful (`frames-missing`) without being scored.
+- **The worst frame decides.** Any frame's hide rule hides the video, with a note naming the
+  frame (`screening: hide (nsfw-high: frame 3 of 8: ...)`); only a video whose every frame is
+  clear is released (`screening: release (clear: 8 frames)`).
+- **No video waits for the maintainer.** With `[videos] doubtful = "hide"` (the shipped setting) a
+  frame's hold rule, or a frame that cannot be read, hides the video as well (`screening: hide
+  (doubtful-hate-suspect: frame 3 of 8: ...)`); the maintainer can unhide it in the panel. A model
+  error is tried again at the next polls before the video is hidden. `doubtful = "hold"` leaves
+  such a video held instead, as a doubtful photo is.
+- The title (the game's own, "<car> on <route>") and the credited gamertag are checked once, with
+  the first frame.
+- A frame that cannot be fetched is retried, like a photo; one that cannot be decoded leaves the
+  video held (`error-decode`).
+- A server older than community videos answers 404 for the queue: the worker logs it, screens the
+  rest and asks again an hour later. `[videos] enabled = false` turns videos off (they then wait
+  for the operator).
+
+The log has one line per video (`"event":"video"`) with its id, the decision, the rule, the frame
+that decided and every frame's scores (`frames`).
+
+What it cannot catch, honestly:
+
+- **Anything on screen for less than about 2 s.** One instant in each 2 s is looked at. The
+  instants are random and secret, so a clip cannot be built around them, but a picture shown for
+  a shorter time is seen only if its instant happens to fall on it: half a second in a 2 s slot is
+  seen one time in four. A clip that flashes something for a few frames is likely to pass.
+- **The sound.** Nothing is screened in it (a game replay has the race's sound only, but a
+  modified client could upload any sound).
+- **Re-uploads of hidden videos.** There is no pHash for videos.
+
+Player reports and the operator (who sees every decision in the panel) are the net there. At about
+1 s a frame (more for wide frames, in tiles), a 15 s clip takes about 8 s and a 2-minute one about
+a minute; the server caps videos at 20 an hour.
 
 ## Designs
 

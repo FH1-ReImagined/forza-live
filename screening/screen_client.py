@@ -1,5 +1,5 @@
-"""The operator API of the community photos (community.py) and of the designs
-on the website (design_feed.py) as the screening worker uses it.
+"""The operator API of the community photos (community.py), the community videos (videos.py) and
+the designs on the website (design_feed.py) as the screening worker uses it.
 
 The token goes only in the X-Admin-Token header and never into a log line, an exception or a URL.
 Requests go straight to the server: no proxy from the environment (a proxy could add
@@ -8,6 +8,7 @@ send the token to wherever a redirect points), no Origin header.
 """
 
 import json
+import math
 import re
 import urllib.error
 import urllib.request
@@ -15,6 +16,13 @@ import urllib.request
 ID_RE = re.compile(r"[A-Z2-7]{12}")
 IMAGE_RE = re.compile(r"/admin/photos/img/[A-Z2-7]{12}\.(png|jpg)")
 DESIGN_IMAGE_RE = re.compile(r"/admin/designs/img/[A-Z2-7]{12}\.png")
+VIDEO_FRAME_RE = re.compile(r"/admin/videos/frame/([A-Z2-7]{12})-\d{1,2}\.jpg")
+FRAME_SECONDS, MIN_FRAMES, MAX_FRAMES = 2, 8, 60  # forza_live/content/videos.py, video/video_worker.py
+
+
+def frames_for(seconds):
+    """How many frames the server screens for a video this long (videos.frames_for)."""
+    return max(MIN_FRAMES, min(MAX_FRAMES, math.ceil(round(seconds, 2) / FRAME_SECONDS - 1e-9)))
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 DESIGN_TYPES = ("livery", "vinylgroup")
 
@@ -62,6 +70,27 @@ def design_record(d):
             "description": str(d.get("description") or "")[:300],
             "gamertag": str(d.get("gamertag") or "")[:64], "status": str(d.get("state", "")),
             "w": d.get("w"), "h": d.get("h")}
+
+
+def video_record(v):
+    """The fields the worker uses from a video of the videos' queue, checked; None for a
+    malformed one. The owner's XUID is not kept."""
+    if not isinstance(v, dict) or not ID_RE.fullmatch(str(v.get("id", ""))):
+        return None
+    frames = v.get("frames")
+    if not isinstance(frames, list) or not 1 <= len(frames) <= MAX_FRAMES:
+        return None
+    for f in frames:
+        m = VIDEO_FRAME_RE.fullmatch(str(f))
+        if m is None or m.group(1) != v["id"]:
+            return None
+    sha = str(v.get("sha256", ""))
+    return {"id": v["id"], "kind": "video", "frames": [str(f) for f in frames],
+            "sha256": sha if SHA_RE.fullmatch(sha) else "",
+            "title": str(v.get("title") or "")[:200], "gamertag": str(v.get("gamertag") or "")[:64],
+            "status": str(v.get("status", "")), "seconds": v.get("seconds"),
+            "expected": frames_for(v["seconds"]) if isinstance(v.get("seconds"), (int, float))
+            and not isinstance(v.get("seconds"), bool) and 0 < v["seconds"] <= 1000 else None}
 
 
 class AdminClient:
@@ -146,6 +175,32 @@ class AdminClient:
         doc = self._json("GET", "/admin/designs?state=" + state)
         found = doc.get("designs") if isinstance(doc, dict) else None
         return [r for r in map(design_record, found or []) if r is not None]
+
+    def video_queue(self):
+        """The held videos, oldest first, as video_record()s. AdminError 404 from a server
+        without community videos."""
+        doc = self._json("GET", "/admin/videos/queue")
+        found = doc.get("videos") if isinstance(doc, dict) else None
+        if not isinstance(found, list):
+            raise AdminError(None, "the videos' queue is not {\"videos\": [...]}")
+        return [r for r in map(video_record, found) if r is not None]
+
+    def frame(self, path):
+        """One frame of a video_record() (a JPEG)."""
+        if not VIDEO_FRAME_RE.fullmatch(path):
+            raise ValueError("bad frame path")
+        data, ctype = self._request("GET", path, limit=self.max_image_bytes)
+        if ctype.split(";")[0].strip() != "image/jpeg":
+            raise AdminError(None, "frame %s: content type %r" % (path, ctype[:40]))
+        return data
+
+    def video_act(self, vid, action, note=None):
+        """release or hide a held video: its record after it. AdminError 409 when its status no
+        longer allows it (an operator decided first), 404 when it is gone."""
+        if not ID_RE.fullmatch(vid) or action not in ("release", "hide"):
+            raise ValueError("bad video id or action")
+        return self._json("POST", "/admin/videos/%s/%s" % (vid, action),
+                          {"note": note} if note is not None else None)
 
     def design_act(self, did, action, note=None, expect="pending"):
         """release, hide or hold a design that is still `expect` (pending: the worker's own

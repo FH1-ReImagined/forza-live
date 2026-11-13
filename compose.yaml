@@ -28,3 +28,50 @@ services:
       # - --trusted-proxy=127.0.0.0/8
       # A name for this server's leaderboard rows (default: data/server_id.txt).
       # - --server-id=my-server
+
+  # The video converter (video/README.md): the game's movie uploads become MP4s the website plays.
+  # Off unless the profile is on: COMPOSE_PROFILES=videos in .env. No network, a read-only root;
+  # it reads the clips read-only and writes only its results.
+  videos-init:
+    profiles: [videos]
+    image: forza-video-converter:latest
+    build: video
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /v/incoming /v/converted && chown 10003:10003 /v/converted && chmod 0755 /v/converted"]
+    volumes:
+      - ./data/videos:/v
+    restart: "no"
+
+  video-converter:
+    profiles: [videos]
+    image: forza-video-converter:latest
+    build: video
+    network_mode: none
+    user: "10003:10003"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command: ["--incoming", "/incoming", "--converted", "/converted"]
+    pids_limit: 64
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=16m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+    volumes:
+      - ./data/videos/incoming:/incoming:ro
+      - ./data/videos/converted:/converted
+    depends_on:
+      videos-init: {condition: service_completed_successfully}

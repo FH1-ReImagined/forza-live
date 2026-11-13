@@ -217,9 +217,9 @@ friendships, an auction's top bid) stays, and a game already in a session with o
 direct connections to them until that session ends (the server no longer relays or lists it).
 A timed sign-in ban (`/admin/kick`) is separate: it only refuses the sign-in, for N minutes.
 
-## Community photos and designs
+## Community photos, videos and designs
 
-Photos and designs players share can appear on a website ([what is published](website-data.md#community-photos)). Moderating them has stricter rules than the other operator endpoints, and the [screening worker](#automatic-screening) can do the first pass.
+Photos, videos and designs players share can appear on a website ([what is published](website-data.md#community-photos)). Moderating them has stricter rules than the other operator endpoints, and the [screening worker](#automatic-screening) can do the first pass.
 
 ### Community photos
 
@@ -255,6 +255,40 @@ takes a live photo back to the queue, `POST .../release` publishes a held one (a
 operator hid cannot be released, 409), and both take an optional `{"note": "..."}` kept for the
 operator.
 
+### Community videos
+
+The game's movie uploads (replay clips, WMV) become videos only with the
+[video converter](../video/README.md) running beside the server (`COMPOSE_PROFILES=videos` in
+`.env` with the repository's `compose.yaml`). Without it a clip waits a day and is dropped, and
+nothing is published. A converted video is **always held** first, whatever
+`FORZA_COMMUNITY_HOLD` says: the [screening worker](#automatic-screening) scores one frame in
+each 2 s of it (at random instants that only the server and the converter know; the poster is one
+of them) and releases or hides it, and without the worker you decide each one yourself. Videos
+have a disk budget of their own, `FORZA_VIDEOS_CAP_MB` (2048), apart from the quota of the other
+uploads (`FORZA_DISK_CAP_MB`): they can never stop the photos, ghosts or designs. The uploaded
+clip is not kept: it is deleted once the converter has made its copy, or when it is refused. The routes have the photos' rules (the LAN or an ssh tunnel, the token in its header
+only, no proxy, no `Origin`). With `T` and `S` as above:
+
+```
+curl -H "$T" $S/admin/videos                     # every video: id, owner XUID, gamertag, title,
+                                                 # status, length, sizes, the clip's codecs
+curl -H "$T" "$S/admin/videos?status=converting" # converting, held, live or hidden only
+curl -H "$T" $S/admin/videos/queue               # the held ones, oldest first, with their frames
+curl -H "$T" $S/admin/videos/media/<id>.mp4 -o v.mp4  # watch one, whatever its status (.jpg: poster)
+curl -H "$T" $S/admin/videos/frame/<id>-1.jpg -o f.jpg   # a frame the screening scored
+curl -H "$T" -X POST $S/admin/videos/<id>/release  # publish a held one
+curl -H "$T" -X POST $S/admin/videos/<id>/hold     # a live one back to held
+curl -H "$T" -X POST $S/admin/videos/<id>/hide     # out of the feed and its routes; unhide undoes it
+curl -H "$T" -X POST $S/admin/videos/<id>/delete   # gone (the same clip is not published again)
+curl -H "$T" -X POST $S/admin/videos/<id>/ban      # bans the video's owner
+```
+
+The operator panel has a Videos tab with the same actions, the poster, the frames and a player.
+A video that is still converting can only be deleted. A hidden one cannot be released (409):
+unhide it. The server's log names each clip it refused and why (`videos: ... not published: ...`),
+including clips whose picture is blank: the TU4 game, as recompiled in November 2026, records
+black frames with the sound, and such a clip is not published.
+
 ### Automatic screening
 
 [`screening/`](../screening/README.md) is that worker. Run it beside a server that has
@@ -269,7 +303,10 @@ the same way):
   slogans and codes).
 
 It then releases the photo, hides it with a note naming the rule (`screening: hide (nsfw-high:
-...)`), or leaves it held for you, logging why. Only a confident hit hides a photo. A race number
+...)`), or leaves it held for you, logging why. A [video](#community-videos) is scored frame by
+frame, the same way: one frame's hide hides it, and it is released only when every frame is
+clear. A doubtful frame hides the video too, so no video waits for you; you can unhide one in
+the panel (`[videos] doubtful = "hold"` in `screening.toml` leaves such a video held instead). Only a confident hit hides a photo. A race number
 such as 14, 18 or 88, or a badge such as SS, never hides one. The decision table, the measured
 cost (about 1.3 s and 1.4 GB at peak on 4 threads) and the known limits are in its README.
 

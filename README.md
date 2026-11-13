@@ -9,12 +9,12 @@ Forza Live is the online server of
 [Forza Horizon 1: ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined). It
 stands in for Xbox LIVE and Turn 10's title services, so the PC port can play online: sign-in,
 friends and chat, the Horizon World, the Co-op Festival, leaderboards and Rivals, car clubs,
-photos and designs. One Python 3 program, standard library only.
+photos, videos and designs. One Python 3 program, standard library only.
 
 - **UDP 21200**: sign-in, presence, rendezvous (UDP hole punching) and a relay for the players
   who cannot reach each other directly.
 - **TCP 21201**: the title services the game asks Turn 10's servers for, a JSON status page at
-  `/status`, and the community photos and designs the website shows.
+  `/status`, and the community photos, videos and designs the website shows.
 
 The launcher's default is the public server; in its **Online > Servers**, **This PC** runs this
 server on the player's own machine, and a server added by its address connects to one you host.
@@ -31,7 +31,7 @@ server on the player's own machine, and a server added by its address connects t
 | `forza_live/social/` | friends, chat, car clubs, Message Center notifications, the Discord status message |
 | `forza_live/competition/` | scores and leaderboards, Rivals ghosts, daily and weekly challenges (`objectives`), community events, head-to-head challenges, Xbox LIVE stats |
 | `forza_live/world/` | the Horizon World, who hosts it, clubs in it, the Co-op Festival and its results |
-| `forza_live/content/` | photos and community photos, designs and their previews, the Auction House and gifts, shader lists |
+| `forza_live/content/` | photos and community photos, community videos (`videos`), designs and their previews, the Auction House and gifts, shader lists |
 | `forza_live/panel/` | the operator panel: a web page for the operator's tools on the home network (`routes`, `audit`, `static/`) |
 | `tests/` | the unit tests, one folder per `forza_live/` folder (`tests/server/` for `server.py`); shared helpers in `tests/support.py` |
 | `docs/hosting.md` | the step-by-step guide to running a server |
@@ -44,7 +44,8 @@ server on the player's own machine, and a server added by its address connects t
 | `tools/xtsw_decode.py` | decodes the requests a server saved with `--dump-requests` |
 | `tools/event_admin.py` | manages community events on a server |
 | `accounts/` | the website accounts service for forza.dyotson.dev/api/ (Django, django-allauth, django-ninja): its own dependencies, image and tests ([`accounts/README.md`](accounts/README.md)) |
-| `screening/` | the screening worker for community photos and designs (its own Docker image, [`screening/README.md`](screening/README.md)) |
+| `screening/` | the screening worker for community photos, videos and designs (its own Docker image, [`screening/README.md`](screening/README.md)) |
+| `video/` | the video converter: the game's movie uploads to MP4 with ffmpeg, in a container with no network (its own Docker image, [`video/README.md`](video/README.md)) |
 | `Dockerfile`, `compose.yaml`, `.env.example` | the server's image and how to run it |
 
 ## Development
@@ -63,7 +64,8 @@ server's code with the game repository's `tools/` (`pipeline_list.py`, `fxobj_sh
 `FORZA_REPO_TOOLS=/path/to/ForzaHorizon1-ReImagined/tools`, and are skipped otherwise. The
 website accounts service has its own (`cd accounts && python manage.py test members`, with its
 `requirements.txt`), and so does the screening worker (`python3 -m unittest discover -s screening -p 'test_screen_*.py'`,
-with numpy and Pillow). CI (`.github/workflows/tests.yml`) runs them all on every push and pull
+with numpy and Pillow), and the video converter (`python3 -m unittest discover -s video -p 'test_*.py'`;
+its conversions, and `tests/content/test_videos.py`'s, need ffmpeg and are skipped without it). CI (`.github/workflows/tests.yml`) runs them all on every push and pull
 request, on Linux and Windows, and builds the Docker images; `server-probe.yml` checks the public
 server from outside every 6 hours.
 
