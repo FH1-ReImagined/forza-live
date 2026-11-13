@@ -72,6 +72,15 @@ be found (FH1 #517). Addresses can't do this job: behind a tunnel ([`configurati
 every HTTP connection and UDP datagram arrive from the tunnel agent's address, and a
 connection's TCP port says nothing about the player's UDP one.
 
+**The sign-in's own XUID.** `Logon2` also carries the player's XUID in its body
+(`loginData.qwXuid`). The server checks the caller for `X-UserId` and writes that XUID's record
+only: a `Logon2` whose body names another XUID is refused (failure 5), so nobody signs in "as"
+a player from a call checked for someone else. A player's record (`players/<XUID>.json`) is
+made by a call signed by the XUID's own key; callers with no key on record (a game older than
+the keys, or anyone) make at most 30 new records an hour between them and are answered all the
+same, so made-up XUIDs cannot fill the records up to `FORZA_MAX_PLAYERS`. A record that exists is
+kept up as before.
+
 **Banned players.** A call whose `X-UserId` is on the operator's ban list
 (`DATA_DIR/banned_xuids.json`, `forza_live/core/bans.py`; [operating](operating.md#banning-a-player))
 fails before anything else is looked at, signed or not and whatever its method (reads too):

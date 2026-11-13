@@ -11,7 +11,14 @@ Day-to-day running of a server other people play on: the operator endpoints and 
 Message Center notification for every player, new ones included, stored once), and `GET /world/event?session=all|<id>[&event=<id>]` are
 operator-only. They are answered for requests from the server's own machine (loopback, not
 through a reverse proxy), or with `FORZA_ADMIN_TOKEN` (header `X-Admin-Token: <token>` or
-`?token=<token>`); everything else gets 403. From the host's terminal:
+`?token=<token>`; prefer the header: the log leaves a token out of the URLs it prints, but a
+shell history or a browser does not); everything else gets 403. Each wrong token is a warning in
+the log with the address it came from. After 10 from one address in 5 minutes that address gets
+403 for every token, the right one too, until they have passed; all the requests through the
+tunnel without an address of their own count as one address, so nobody outside can lock out the
+LAN or this machine. The token must be long and random (`openssl rand -hex 32`): the placeholders
+of `.env.example` and of these pages are not taken as a token (the start says so, and the panel
+stays off), and the start warns about one under 16 characters. From the host's terminal:
 
     docker exec forza-live python3 -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:21201/gift?to=Name&credits=50000').read())"
 

@@ -48,11 +48,13 @@ served as they are for GET /storage/<path>.
 """
 
 import argparse
+import collections
 import contextvars
 import hmac
 import json
 import logging
 import os
+import re
 import time
 import urllib.parse
 
@@ -244,6 +246,7 @@ def configure(args):
                      for xml in load_playground_rounds()}
         PLAYGROUND_ROUNDS[:] = [by_preset[p] for p in wanted if p in by_preset]
     os.makedirs(DATA_DIR, exist_ok=True)
+    check_admin_token()
     bans.configure(DATA_DIR)
     limits.configure(DATA_DIR)
     scores.configure(DATA_DIR, args.server_id, scored=first_score)
@@ -308,6 +311,31 @@ def load_player(xuid):
         return durable.load(player_path(xuid))
     except (OSError, ValueError):
         return {}
+
+
+# New player records an hour (and at once) for callers that prove nothing: an XUID with no key
+# on record, from a game older than the keys (or from anyone: X-UserId is the caller's word). A
+# call signed by its player's own key makes its record whenever it comes; a record that exists
+# is kept up as before. Without it, calls that name made-up XUIDs filled the players' folder to
+# limits.MAX_PLAYERS, after which no new player's record was kept.
+NEW_UNVERIFIED = (30 / 3600.0, 30)
+_new_unverified = {}  # DATA_DIR -> token bucket
+
+
+def keep_player(xuid, record):
+    """save_player for a title service call: a new record only for a caller that proved the
+    XUID, or within NEW_UNVERIFIED. False when it was not kept (the call is answered all the
+    same)."""
+    if not caller_trusted() and not os.path.exists(player_path(xuid)):
+        bucket = _new_unverified.setdefault(DATA_DIR, [float(NEW_UNVERIFIED[1]), time.monotonic()])
+        if not auth.spend(bucket, NEW_UNVERIFIED):
+            auth.COUNTS["unverified records refused"] += 1
+            auth.told("unverified records", logging.WARNING, "title: more new players without a key "
+                      "on record than %d an hour: their records are not kept (calls that name "
+                      "made-up XUIDs, or many games older than signed requests)", NEW_UNVERIFIED[1])
+            return False
+    save_player(xuid, record)
+    return True
 
 
 def save_player(xuid, record):
@@ -416,9 +444,16 @@ def backfill_first_scores():
 def user_logon2(xuid, body):
     params, _ = x.decode(x.UserLogon2_Params, body)
     login = params["loginData"]
-    xuid = login["qwXuid"] or xuid
-    if bans.refused(xuid, "sign-in (Logon2)"):  # the body's XUID: an X-UserId may be another's
+    named = login["qwXuid"]
+    if named and bans.refused(named, "sign-in (Logon2)"):  # the body's XUID: an X-UserId may be another's
         return x.failure(5, BANNED)
+    if named and named != xuid:
+        # The call was checked for its X-UserId (verify_caller): the record it writes is that
+        # XUID's, never the one its body names, which may be anyone's.
+        who = auth.client()
+        log.warning("title: Logon2 for %016X names %016X in its body%s: refused", xuid, named,
+                    " (from %s)" % who.address if who is not None and who.address else "")
+        return x.failure(5, "not this player's call")
     login["wzGamerTag"] = limits.clean_gamertag(login["wzGamerTag"], xuid)
     record = load_player(xuid)
     now = int(time.time())
@@ -426,7 +461,7 @@ def user_logon2(xuid, body):
                   careerLevel=login["currentCareerLevel"], logons=record.get("logons", 0) + 1)
     if caller_signed():
         signed_logon(record, now)
-    save_player(xuid, record)
+    keep_player(xuid, record)
     log.info("title: Logon2 %016X '%s' level %d", xuid, login["wzGamerTag"],
              login["currentCareerLevel"])
     if TEST_NOTIFICATIONS["on"] and xuid not in TEST_NOTIFICATIONS["sent"]:
@@ -486,7 +521,7 @@ def user_write_race_stats(xuid, body):
                   races=record.get("races", 0) + 1, lastRace=dict(
                       {k: (v.hex() if isinstance(v, bytes) else v) for k, v in stats.items()},
                       verified=caller_trusted()))
-    save_player(xuid, record)
+    keep_player(xuid, record)
     log.info("title: race stats %016X: event %d hopper %d place %d/%d finished %d, level %d "
              "XP %d credits %d%s", xuid, stats["eventId"], stats["hopperId"],
              stats["userFinishPosition"], stats["maxPlaces"], stats["finished"],
@@ -536,7 +571,7 @@ def online_profile_update_all(xuid, body):
                      profile.get("onlineXP", 0), profile.get("onlineWristbandLevel", 0),
                      profile.get("numOnlineRaces", 0), profile.get("credits", 0))
         record.update(profile=profile, profileUpdated=int(time.time()))
-        save_player(xuid, record)
+        keep_player(xuid, record)
     return x.reply()
 
 
@@ -844,6 +879,8 @@ def service_call(headers, body, server=None, http_method="POST", path="/Services
         # fails as a forged one does, which the game shows as a server it cannot sign in to.
         return x.failure(5, BANNED)
     state = verify_caller(server, xuid, headers, http_method, path, body)
+    if state == TRUSTED and auth.client() is not None:
+        auth.client().proved = True  # a game's connection: never closed for a newer one (server.py)
     if state == BUSY and changes_state(short, method):
         return BUSY_REPLY  # auth.py counted and logged it
     if state == FORGED and changes_state(short, method):
@@ -878,16 +915,84 @@ def service_call(headers, body, server=None, http_method="POST", path="/Services
 
 
 ADMIN_TOKEN = os.environ.get("FORZA_ADMIN_TOKEN", "")
+# The values the documentation shows in place of a token: never one (anyone has read them).
+PLACEHOLDER_TOKENS = ("choose-a-long-random-token", "choose-another-long-random-token",
+                      "choose-a-token", "<token>", "changeme")
+SHORT_TOKEN = 16  # characters: shorter, the start warns
+# Wrong tokens: TOKEN_FAILS from one address in TOKEN_FAIL_WINDOW s, and that address gets 403
+# for every token, the right one too, until the window has passed. All the requests that come
+# through the tunnel without an address of their own count as one address, so nobody outside
+# can lock the operator's own (the LAN, this machine) out. Each wrong token is a warning in the
+# log with its address, never the token.
+TOKEN_FAILS, TOKEN_FAIL_WINDOW = 10, 300.0
+_token_fails = {}  # address -> deque of monotonic times
+TOKEN_IN_URL = re.compile(r"([?&]token=)[^&#\s]*", re.IGNORECASE)
+
+
+def admin_token():
+    """FORZA_ADMIN_TOKEN, or "" when it is unset or one of the documentation's placeholders."""
+    return "" if ADMIN_TOKEN.strip().lower() in PLACEHOLDER_TOKENS else ADMIN_TOKEN
+
+
+def check_admin_token():
+    """At the start: says so when the token is a placeholder (ignored) or short."""
+    if ADMIN_TOKEN and not admin_token():
+        log.error("FORZA_ADMIN_TOKEN is the documentation's placeholder: it is not taken as a token. "
+                  "Set a long random one (openssl rand -hex 32)")
+    elif ADMIN_TOKEN and len(ADMIN_TOKEN) < SHORT_TOKEN:
+        log.warning("FORZA_ADMIN_TOKEN has only %d characters: set a long random one (openssl rand "
+                    "-hex 32)", len(ADMIN_TOKEN))
+
+
+def loggable(path):
+    """A request's path for the log: without the value of a ?token= (the operator's token)."""
+    return TOKEN_IN_URL.sub(r"\1...", path)
+
+
+def token_source(peer):
+    """What a token is counted against: the client's address (auth.Client: the PROXY header's
+    behind the tunnel), "the tunnel" for a tunnelled request without one, else the peer's."""
+    who = auth.client()
+    if who is not None and who.address:
+        return who.address
+    ip = peer[0] if peer else "?"
+    return "the tunnel" if limits.is_trusted_proxy(ip) else ip
+
+
+def token_locked(source, now=None):
+    now = time.monotonic() if now is None else now
+    fails = _token_fails.get(source)
+    while fails and now - fails[0] > TOKEN_FAIL_WINDOW:
+        fails.popleft()
+    if fails is not None and not fails:
+        del _token_fails[source]
+    return bool(fails) and len(fails) >= TOKEN_FAILS
+
+
+def token_failed(source, what, now=None):
+    """A wrong operator token from source: counted and logged."""
+    now = time.monotonic() if now is None else now
+    if len(_token_fails) > 10000:
+        _token_fails.clear()
+    fails = _token_fails.setdefault(source, collections.deque())
+    fails.append(now)
+    log.warning("%s: a wrong admin token from %s%s", what, source,
+                " (%d in %d s: no token is taken from it for now)" % (len(fails), TOKEN_FAIL_WINDOW)
+                if len(fails) >= TOKEN_FAILS else "")
 
 
 def is_admin(peer, headers, query):
     """Operator endpoints (/gift, /notify, /broadcast, /world/event): requests from this machine, or
     carrying the FORZA_ADMIN_TOKEN (header X-Admin-Token or ?token=). A request that came
-    through a reverse proxy (X-Forwarded-For / X-Real-IP) counts as remote."""
-    if ADMIN_TOKEN:
-        given = headers.get("x-admin-token") or query.get("token", [""])[0]
-        if hmac.compare_digest(given.encode(), ADMIN_TOKEN.encode()):
-            return True
+    through a reverse proxy (X-Forwarded-For / X-Real-IP) counts as remote. Wrong tokens are
+    counted per address (token_failed): after TOKEN_FAILS, none is taken from it for a while."""
+    given = headers.get("x-admin-token") or query.get("token", [""])[0]
+    if given and admin_token():
+        source = token_source(peer)
+        if not token_locked(source):
+            if hmac.compare_digest(given.encode(), admin_token().encode()):
+                return True
+            token_failed(source, "operator endpoints")
     proxied = "x-forwarded-for" in headers or "x-real-ip" in headers or "forwarded" in headers
     # Behind a tunnel agent on this machine every internet request comes from loopback:
     # a trusted proxy's address is not "this machine", only the token admits then.
@@ -1023,7 +1128,7 @@ def handle(server, method, path, headers, body, peer):
         return 200, "bin/xtsw", service_call(headers, body, server, method, path)
     if url.path == online.PATH:  # players online now, for the website (online.py): polled,
         return online.handle(server, method, WORLD_HOPPERS)  # so not in the request log
-    log.info("LSP request %s %s (%d bytes)", method, path, len(body))
+    log.info("LSP request %s %s (%d bytes)", method, loggable(path), len(body))
     if url.path.startswith("/shader-lists"):  # players' shader lists (shader_lists.py)
         answer = shader_lists.handle(server, method, path, headers, body)
         if answer is not None:

@@ -37,7 +37,9 @@ Message FRIEND (UDP kind 22), body op u8 then (big endian; strings u8 length + U
 
 Limits: MAX_FRIENDS friends, MAX_PENDING requests waiting each way, MAX_BLOCKED blocks;
 REQUESTS_PER_MIN requests sent, ACTIONS_PER_MIN other changes, SEARCHES_PER_MIN searches
-per player. A request to a player who blocked you looks sent but is dropped.
+per player. A request to a player who blocked you looks sent but is dropped. The file holds at
+most limits.MAX_PLAYERS records (the cap of the player records), and new bindings come at a
+bounded rate (auth.FirstUse), so no sender can grow it without end.
 """
 
 import hashlib
@@ -71,7 +73,8 @@ REQUESTS_PER_MIN = 10
 ACTIONS_PER_MIN = 60
 SEARCHES_PER_MIN = 30
 LISTS = (0.5, 4)  # list answers per second and burst
-FORGET_DAYS = 180  # a player with no friends, requests or blocks is forgotten after this
+# A record with no key, friends, requests or blocks (a name someone blocked) is forgotten after this
+FORGET_DAYS = 180
 KEY_SIZE = 16
 STATUS_MAX = 60
 
@@ -96,6 +99,10 @@ def key_hash(key):
     return hashlib.sha256(bytes(key)).hexdigest()
 
 
+class Full(Exception):
+    """The store holds limits.MAX_PLAYERS records: no room for another."""
+
+
 class Store:
     """The players' relations: {xuid: {"name", "seen", "key", "friends", "in", "out",
     "blocked"}}, each relation a {xuid hex: since} map, kept symmetric (A's "out" is B's
@@ -107,15 +114,23 @@ class Store:
         self.dirty = False
         self.saved = 0.0
         self.on_rebind = []  # fn(xuid, old binding, new binding): auth.rebind
+        self.first_use = auth.FirstUse()  # the budgets of new bindings
+        self.checks = auth.Checks()  # and of signature checks per client address
 
     @staticmethod
     def hx(xuid):
         return "%016X" % xuid
 
+    def full(self):
+        """No room for a new record (records already here stay, and are all loaded)."""
+        return len(self.players) >= limits.MAX_PLAYERS
+
     def get(self, xuid, create=False):
         k = self.hx(xuid)
         p = self.players.get(k)
         if p is None and create:
+            if self.full():  # the message that asked for it is dropped (server.datagram_received)
+                raise Full("friends store full: %d records" % len(self.players))
             p = self.players[k] = {"name": "", "seen": time.time(), "key": "", "friends": {},
                                    "in": {}, "out": {}, "blocked": {}}
             self.dirty = True
@@ -151,7 +166,7 @@ class Store:
     def claim(self, xuid, key):
         """True if this raw friends key may use the XUID's friends (binding it on first use).
         Never for an XUID bound to a public key (auth.py)."""
-        if len(key) != KEY_SIZE:
+        if len(key) != KEY_SIZE or (self.full() and self.get(xuid) is None):
             return False
         p = self.get(xuid, create=True)
         if p.get("pub"):
@@ -222,9 +237,11 @@ class Store:
             data = durable.load(self.path)
             players = data["players"]
             cutoff = time.time() - FORGET_DAYS * 86400
+            # A record with a key stays however long its player is away: forgotten, its XUID
+            # would go to the first key that names it, with the player's record and scores.
             self.players = {k: p for k, p in players.items()
                             if p["friends"] or p["in"] or p["out"] or p["blocked"]
-                            or p["seen"] >= cutoff}
+                            or p.get("pub") or p.get("key") or p["seen"] >= cutoff}
             log.info("friends: %d player(s) from %s", len(self.players), self.path)
         except FileNotFoundError:
             pass
@@ -300,7 +317,8 @@ class Friends:
                 log.info("friends #%d %r: XUID %016X has another friends key", peer.id,
                          peer.name, peer.xuid)
             peer.friends_ok = ok
-        if getattr(peer, "auth_conflict", False) and not self.limited(peer.xuid, "linked", 1):
+        # Once a minute for each game: not for each XUID, which any other game can name.
+        if getattr(peer, "auth_conflict", False) and not self.limited(("game", peer.id), "linked", 1):
             self.tell(peer, auth.refusal(peer, "Friends and chat are off"))
 
     def came_or_went(self, xuid):

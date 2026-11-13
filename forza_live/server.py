@@ -124,8 +124,15 @@ def set_rate_limit(bytes_per_second):
 MAX_NAME = 15  # XUSER_NAME_SIZE minus the terminator
 MAX_ROOM = 64
 MAX_MOTD = 64  # keeps the WELCOME about as large as the HELLO that asks for it
-# Limits against abuse from the internet (every datagram is untrusted):
+# Limits against abuse from the internet (every datagram is untrusted). "One address" is the
+# sender's; behind a trusted proxy (a tunnel agent) the one its PROXY header gave the flow
+# (source_key). The tunnelled games without one cannot be told apart: with --proxy-protocol-udp
+# they share one pool of PROXY_POOL_SHARE of --max-peers, so their number never fills the server.
+# (They are the flows older than the server or than its first minutes, and those opened while
+# the flows' table was full: after a restart that lost its state, everyone who signs in first.)
 MAX_PEERS_PER_IP = 16  # registered players behind one public address (a LAN, a CGNAT)
+PROXY_POOL_SHARE = 0.5
+POOL = "tunnel"  # per_ip's key for them
 # datagrams/s and burst accepted from one address (a player in a world of 8 at 240 fps: 1680/s)
 PACKETS_PER_IP = (2500, 5000)
 HELLOS_PER_IP = (2, 20)  # new registrations/s and burst from one address
@@ -158,6 +165,12 @@ REMOVED = {"banned": "banned from this server",  # drop() reason -> error 4 text
 # sockets are remembered (or twice --max-peers); while full, a new socket gets no address.
 PROXY_FLOW_IDLE = 120.0
 PROXY_FLOWS_MAX = 16384
+# Flows one PROXY address may have at once (16 players, and the flows of games that were just
+# restarted): a flow over it is refused, and its datagrams are dropped until the agent closes
+# it (remembered apart, at most REFUSED_FLOWS_MAX of them: an agent has fewer sockets). So one
+# address cannot fill the flows' table, nor get flows without an address by opening many.
+FLOWS_PER_ADDRESS = 4 * MAX_PEERS_PER_IP
+REFUSED_FLOWS_MAX = 65536
 # How a socket's first datagram began: with the agent's header alone (agents from 0.16),
 # with a header in front of the payload (up to 0.15.26: every datagram has one), or with none.
 FLOW_HEADER, FLOW_PREFIXED, FLOW_PLAIN = "header", "prefixed", "plain"
@@ -213,6 +226,7 @@ class Peer:
         self.room = room
         self.local = local  # (ip, port) the client reports for its LAN side
         self.proxied = False  # connected through a trusted proxy (addr is the proxy's socket)
+        self.source = None  # what the per-address limits count it under (ForzaLive.source_key)
         # Behind a trusted proxy: the public (ip, port) its PROXY header gave, which other
         # players punch to; None without one (the relay carries its traffic).
         self.real_addr = None
@@ -242,11 +256,14 @@ class Peer:
 class ProxyFlow:
     """A trusted proxy's socket while PROXY protocol is on for UDP: how its first datagram
     began, when it was last heard, the public address its header gave and the (token, XUID)
-    of the first game whose HELLO on it was accepted, which alone gets that address."""
-    __slots__ = ("mode", "seen", "public", "owner")
+    of the first game whose HELLO on it was accepted, which alone gets that address. `source`:
+    the IP of the first address a header gave it, which the per-address limits count its games
+    under for as long as the flow lasts (whoever says HELLO on it)."""
+    __slots__ = ("mode", "seen", "public", "owner", "source")
 
     def __init__(self, mode, seen, public=None, owner=None):
         self.mode, self.seen, self.public, self.owner = mode, seen, public, owner
+        self.source = None
 
 
 def ip_to_u32(ip):
@@ -266,7 +283,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.error_buckets = {}
         self.removed = {}  # (ip, port) -> (error 4 text, monotonic time it is forgotten)
         self.refusals_logged = {}  # (limit key, reason) -> monotonic time last logged
-        self.per_ip = {}  # ip -> registered peers
+        self.per_ip = {}  # source_key's address (POOL for a tunnelled game without one) -> registered peers
         self.max_peers = max_peers
         self.epoch = random.randrange(1, 0x10000)  # changes when the server restarts
         self.peers = {}  # id -> Peer
@@ -286,6 +303,8 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.proxy_udp = self.proxy_tcp = False
         self.proxy_flows = {}  # (ip, port) of the agent's socket -> ProxyFlow
         self.proxy_flows_max = max(PROXY_FLOWS_MAX, 2 * max_peers)
+        self.flow_sources = {}  # PROXY address (IP) -> its flows in proxy_flows
+        self.refused_flows = {}  # agent socket of a flow over FLOWS_PER_ADDRESS -> last heard
         # Until then a socket heard for the first time may be mid-flow (older than this
         # server, or not remembered while the flows were full): its header is not taken.
         self.proxy_unsure_until = time.monotonic() + PROXY_FLOW_IDLE
@@ -314,9 +333,54 @@ class ForzaLive(asyncio.DatagramProtocol):
 
     @staticmethod
     def limit_key(addr):
-        """What the per-address limits count: the IP, but for a trusted proxy (one address
-        for all the players behind it) the IP and port, i.e. each tunnelled player."""
+        """What the rates of datagrams, error replies and logged refusals count: the IP, but
+        for a trusted proxy (one address for all the players behind it) the IP and port, i.e.
+        each tunnelled player's flow."""
         return addr if limits.is_trusted_proxy(addr[0]) else addr[0]
+
+    def source_key(self, addr):
+        """What a game's players-per-address cap, sign-in rate, first-use bindings and
+        signature checks count: its address, a string. Behind a trusted proxy the address its
+        flow's PROXY header gave, or without one the agent's socket, a tuple: no address of
+        its own (the pool)."""
+        if not limits.is_trusted_proxy(addr[0]):
+            return addr[0]
+        flow = self.proxy_flows.get(addr) if self.proxy_udp else None
+        return flow.source if flow is not None and flow.source else addr
+
+    @property
+    def pool_cap(self):
+        """The most tunnelled players without an address, or None for no cap: a tunnel that
+        sends no PROXY headers (no --proxy-protocol-udp) names nobody's, and its players are
+        limited as before, by --max-peers alone."""
+        if not self.proxy_udp:
+            return None
+        return max(MAX_PEERS_PER_IP, int(self.max_peers * PROXY_POOL_SHARE))
+
+    def room_for(self, key):
+        """Whether another player may register under source_key's key."""
+        if isinstance(key, tuple):
+            cap = self.pool_cap
+            return cap is None or self.per_ip.get(POOL, 0) < cap
+        return self.per_ip.get(key, 0) < MAX_PEERS_PER_IP
+
+    def count(self, peer, key):
+        """Counts the peer under key (and no longer under what it was counted)."""
+        self.uncount(peer)
+        peer.source = key
+        k = POOL if isinstance(key, tuple) else key
+        self.per_ip[k] = self.per_ip.get(k, 0) + 1
+
+    def uncount(self, peer):
+        if peer.source is None:
+            return
+        k = POOL if isinstance(peer.source, tuple) else peer.source
+        left = self.per_ip.get(k, 1) - 1
+        if left > 0:
+            self.per_ip[k] = left
+        else:
+            self.per_ip.pop(k, None)
+        peer.source = None
 
     def connection_made(self, transport):
         self.transport = transport
@@ -457,8 +521,9 @@ class ForzaLive(asyncio.DatagramProtocol):
     # address to the first game that says HELLO on it, in WELCOME, and to the others in
     # forward_header, as for a player connecting directly: they punch to it, and the relay
     # stays the fallback. A flow without a header (one older than the tunnel's setting or
-    # than this server) is relayed as before. The per-address limits stay those of the
-    # agent's socket.
+    # than this server) is relayed as before. The flow's games are counted under the header's
+    # address for the players-per-address cap and the sign-in rate (source_key); the rates of
+    # datagrams and error replies stay those of the agent's socket (limit_key).
 
     def tell_once(self, what, message):
         if what not in self.proxy_told:
@@ -473,9 +538,15 @@ class ForzaLive(asyncio.DatagramProtocol):
         """A datagram from a trusted proxy: learns its flow's player from the agent's header
         and returns what is left to handle (b"" for nothing)."""
         now = time.monotonic()
+        refused = self.refused_flows.get(addr)
+        if refused is not None:  # a flow over its address's FLOWS_PER_ADDRESS: nothing of it
+            if now - refused <= PROXY_FLOW_IDLE:
+                self.refused_flows[addr] = now
+                return b""
+            del self.refused_flows[addr]  # the agent closed that flow: this is a new one
         flow = self.proxy_flows.get(addr)
         if flow is not None and now - flow.seen > PROXY_FLOW_IDLE:
-            del self.proxy_flows[addr]  # the agent closed that flow: this is a new one
+            self.forget_flow(addr)  # the agent closed that flow: this is a new one
             flow = None
         header = data.startswith(proxy.SIGNATURE)
         if flow is not None:
@@ -525,6 +596,20 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.tell_once("udp", "proxy protocol: the tunnel agent sends PROXY v2 headers on UDP; "
                        "its new flows' players get their public address")
         public = proxy.client_address(source, ipv4=True)
+        if public and flow.source is None:  # the flow's first address: what its limits count
+            if self.flow_sources.get(public[0], 0) >= FLOWS_PER_ADDRESS:
+                self.forget_flow(addr)
+                if len(self.refused_flows) >= REFUSED_FLOWS_MAX:
+                    for a in [a for a, t in self.refused_flows.items()
+                              if time.monotonic() - t > PROXY_FLOW_IDLE]:
+                        del self.refused_flows[a]
+                if len(self.refused_flows) < REFUSED_FLOWS_MAX:
+                    self.refused_flows[addr] = time.monotonic()
+                self.refuse_header("flows", "refused the flows of an address that has %d already; "
+                                   "their datagrams are dropped" % FLOWS_PER_ADDRESS)
+                return b""
+            flow.source = public[0]
+            self.flow_sources[public[0]] = self.flow_sources.get(public[0], 0) + 1
         if flow.mode == FLOW_PREFIXED:
             # A restored legacy socket may now carry a newer agent's raw client bytes.
             # Repeated legacy headers may confirm the first address, never replace it.
@@ -559,7 +644,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         if flow is None:
             return None, None
         if not limits.is_trusted_proxy(addr[0]):
-            del self.proxy_flows[addr]
+            self.forget_flow(addr)
             return None, None
         if flow.owner is not None and flow.owner != identity:
             flow.public = flow.owner = None
@@ -567,11 +652,23 @@ class ForzaLive(asyncio.DatagramProtocol):
                            "a new header: its address is dropped, the flow is relayed")
         return flow, flow.public
 
+    def forget_flow(self, addr):
+        """Removes the flow from addr, and from the count of its address's flows."""
+        flow = self.proxy_flows.pop(addr, None)
+        if flow is not None and flow.source:
+            left = self.flow_sources.get(flow.source, 1) - 1
+            if left > 0:
+                self.flow_sources[flow.source] = left
+            else:
+                self.flow_sources.pop(flow.source, None)
+
     def expire_proxy_flows(self, now):
         """Forgets the agent's sockets not heard for PROXY_FLOW_IDLE s (the agent closed those
         flows). True when there is room for another."""
         for addr in [a for a, f in self.proxy_flows.items() if now - f.seen > PROXY_FLOW_IDLE]:
-            del self.proxy_flows[addr]
+            self.forget_flow(addr)
+        for addr in [a for a, t in self.refused_flows.items() if now - t > PROXY_FLOW_IDLE]:
+            del self.refused_flows[addr]
         return len(self.proxy_flows) < self.proxy_flows_max
 
     def public_of(self, peer):
@@ -629,13 +726,22 @@ class ForzaLive(asyncio.DatagramProtocol):
         if peer is None:
             peer = self.rebind_restored(addr, token, xuid)
         new = peer is None
+        key = self.source_key(addr)  # the player's own address, behind a tunnel too
+        if peer is not None and (peer.xuid != xuid or peer.source != key):
+            # A registered game that names another XUID (another profile), or is another
+            # address's now, registers again as far as the limits go: within its address's
+            # players and sign-in rate. So one registration is one XUID at a time, at a price.
+            if peer.source != key and not self.room_for(key):
+                self.refuse(addr, 3, "server full", xuid, name)
+                return
+            if not take(self.hello_buckets, key, HELLOS_PER_IP):
+                self.refuse(addr, ERR_SLOW_DOWN,
+                            "too many sign-ins from this address, trying again", xuid, name)
+                return
+            self.count(peer, key)
         if peer is None:
             proxied = limits.is_trusted_proxy(addr[0])
-            key = self.limit_key(addr)
-            # A trusted proxy has no per-address player cap (its players are many), but the
-            # whole-server cap and the per-tunnelled-player rates stay.
-            if len(self.peers) >= self.max_peers or (
-                    not proxied and self.per_ip.get(addr[0], 0) >= MAX_PEERS_PER_IP):
+            if len(self.peers) >= self.max_peers or not self.room_for(key):
                 self.refuse(addr, 3, "server full", xuid, name)
                 return
             if not take(self.hello_buckets, key, HELLOS_PER_IP):
@@ -654,7 +760,7 @@ class ForzaLive(asyncio.DatagramProtocol):
             peer.proxied = proxied
             self.peers[peer.id] = peer
             self.by_addr[addr] = peer
-            self.per_ip[addr[0]] = self.per_ip.get(addr[0], 0) + 1
+            self.count(peer, key)
             self.state_dirty = True
             log.info("%s  #%d %r xuid %016X room %r from %s:%d (lan %s:%d)%s",
                      "join" if back is None else "back", peer.id, name, xuid, room, addr[0],
@@ -1334,10 +1440,11 @@ class ForzaLive(asyncio.DatagramProtocol):
                 peer.standby_host = d["standby_host"]
                 self.peers[peer.id] = peer
                 self.by_addr[addr] = peer
-                self.per_ip[addr[0]] = self.per_ip.get(addr[0], 0) + 1
                 self.restored.add(peer.id)
             if self.proxy_udp:
                 self.load_proxy_flows(state.get("proxy_flows", []), now_m)
+            for pid in self.restored:  # counted as they were, whatever the caps say now
+                self.count(self.peers[pid], self.source_key(self.peers[pid].addr))
             self.epoch = state["epoch"]
             self.next_id = max([state["next_id"]] + [p + 1 for p in self.peers]) & 0xFFFFFF or 1
         except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
@@ -1358,8 +1465,12 @@ class ForzaLive(asyncio.DatagramProtocol):
                 owner = tuple(owner) if isinstance(owner, list) and len(owner) == 2 else None
                 if (public and mode in (FLOW_HEADER, FLOW_PREFIXED) and isinstance(port, int)
                         and owner is not None and limits.is_trusted_proxy(ip)
-                        and len(self.proxy_flows) < self.proxy_flows_max):
-                    self.proxy_flows[(ip, port)] = ProxyFlow(mode, now, public, owner)
+                        and len(self.proxy_flows) < self.proxy_flows_max
+                        and (ip, port) not in self.proxy_flows
+                        and self.flow_sources.get(public[0], 0) < FLOWS_PER_ADDRESS):
+                    flow = self.proxy_flows[(ip, port)] = ProxyFlow(mode, now, public, owner)
+                    flow.source = public[0]
+                    self.flow_sources[public[0]] = self.flow_sources.get(public[0], 0) + 1
         except (ValueError, TypeError, IndexError) as e:  # never lose the registrations for it
             log.warning("state file: PROXY flows not restored (%s)", e)
         for pid in self.restored:
@@ -1379,15 +1490,10 @@ class ForzaLive(asyncio.DatagramProtocol):
                 continue
             if self.by_addr.get(peer.addr) is peer:
                 del self.by_addr[peer.addr]
-                left = self.per_ip.get(peer.addr[0], 1) - 1
-                if left > 0:
-                    self.per_ip[peer.addr[0]] = left
-                else:
-                    self.per_ip.pop(peer.addr[0], None)
             log.info("rebind #%d %r %s:%d -> %s:%d", peer.id, peer.name, *peer.addr, *addr)
             peer.addr = addr
             self.by_addr[addr] = peer
-            self.per_ip[addr[0]] = self.per_ip.get(addr[0], 0) + 1
+            self.count(peer, self.source_key(addr))
             self.restored.discard(pid)
             self.state_dirty = True
             return peer
@@ -1416,11 +1522,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.state_dirty = True
         if self.by_addr.get(peer.addr) is peer:
             del self.by_addr[peer.addr]
-            left = self.per_ip.get(peer.addr[0], 1) - 1
-            if left > 0:
-                self.per_ip[peer.addr[0]] = left
-            else:
-                self.per_ip.pop(peer.addr[0], None)
+        self.uncount(peer)
         if why in REMOVED:  # its game's next packets are told why (error 4), not "not registered"
             self.remember_removed(peer.addr, REMOVED[why])
         log.info("leave #%d %r (%s)", peer.id, peer.name, why)
@@ -1517,7 +1619,9 @@ class ForzaLive(asyncio.DatagramProtocol):
                 "players": len(self.peers),
                 "via_proxy": sum(1 for p in self.peers.values() if p.proxied),
                 **({"via_proxy_address": sum(1 for p in self.peers.values() if p.real_addr),
-                    "proxy_protocol": {**self.proxy_stats, "flows": len(self.proxy_flows)}}
+                    "proxy_protocol": {**self.proxy_stats, "flows": len(self.proxy_flows),
+                                       **({"refused_flows": len(self.refused_flows)}
+                                          if self.refused_flows else {})}}
                    if proxy_on else {}),
                 "relayed_packets": self.relayed_packets,
                 "dropped_packets": self.dropped_packets, "rooms": rooms, "worlds": worlds,
@@ -1584,7 +1688,15 @@ MAX_BODY = 8388608  # bytes of one request body (uploads); larger requests are r
 MAX_HEADERS = 64
 HTTP_PER_IP = 32  # simultaneous connections from one address
 HTTP_TOTAL = 1024
+# Of them, the connections with no call signed by a player's own key (auth.Client.proved: every
+# new one, a browser's, the website's, a game older than the keys): the rest stays free for the
+# games'. A new connection over it, or over HTTP_TOTAL, takes the place of the one of them that
+# has waited longest (for its next request, or for its answer to be read), so connections that
+# cost their sender one request never keep anyone out, though they may idle KEEP_ALIVE_IDLE
+# like a game's while there is room (a game without a key needs that as much).
+HTTP_UNPROVEN = HTTP_TOTAL * 3 // 4
 http_conns = {}  # ip -> open connections
+http_open = {}  # each open connection's auth.Client -> [its writer, since when it waits (None: being answered)]
 
 
 def http_release(ip):
@@ -1593,6 +1705,20 @@ def http_release(ip):
         http_conns[ip] = left
     else:
         http_conns.pop(ip, None)
+
+
+def http_make_room():
+    """Whether a new connection may be taken: there is room, or the unproven connection that
+    has waited longest was closed for it."""
+    unproven = [c for c in http_open if not c.proved]
+    if len(http_open) < HTTP_TOTAL and len(unproven) < HTTP_UNPROVEN:
+        return True
+    waiting = [c for c in unproven if http_open[c][1] is not None]
+    if not waiting:
+        return False
+    oldest = min(waiting, key=lambda c: http_open[c][1])
+    http_open.pop(oldest)[0].close()  # its handler ends at once and gives its address's count back
+    return True
 
 
 async def read_proxy_header(server, reader, idle):
@@ -1640,13 +1766,18 @@ async def http_handler(server, reader, writer):
     peer = writer.get_extra_info("peername") or ("?", 0)
     ip = peer[0]
     trusted = limits.is_trusted_proxy(ip)
-    # A trusted proxy carries all its players' connections: no per-address cap for it.
-    if ((http_conns.get(ip, 0) >= HTTP_PER_IP and not trusted)
-            or sum(http_conns.values()) >= HTTP_TOTAL):
+    # A trusted proxy carries all its players' connections: no per-address cap for it (with
+    # --proxy-protocol-tcp each is counted under its player's address, below).
+    if (http_conns.get(ip, 0) >= HTTP_PER_IP and not trusted) or not http_make_room():
         writer.close()
         return
     http_conns[ip] = http_conns.get(ip, 0) + 1
     shown = peer  # who the log names: the client, or the player a PROXY header names
+    # Who the connection's signature checks and wrong operator tokens are counted against
+    # (auth.py): its address, or none for a tunnelled one whose address is not known.
+    who = auth.Client(None if trusted else ip, connection=True, checks=server.friends.store.checks)
+    entry = http_open[who] = [writer, time.monotonic()]
+    entered = auth.enter(who)
     try:
         idle = 15  # the first request
         if trusted and server.proxy_tcp:
@@ -1657,9 +1788,11 @@ async def http_handler(server, reader, writer):
                 http_release(ip)
                 ip, shown = client[0], client
                 http_conns[ip] = http_conns.get(ip, 0) + 1
+                who.address = ip
         while True:
             method, path, headers, body = await read_request(reader, idle)
             idle = KEEP_ALIVE_IDLE
+            entry[1] = None
             keep = headers.get("connection", "").lower() == "keep-alive"
             conn = ("Connection: Keep-Alive" if keep else "Connection: close",)
             if path in ("/", "/status"):
@@ -1740,23 +1873,20 @@ async def http_handler(server, reader, writer):
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
                 if not lsp.is_admin(peer, headers, query):
                     reply = response(403, b"forbidden", "text/plain", conn)
-                    writer.write(reply)
-                    await writer.drain()
-                    if not keep:
-                        break
-                    continue
-                event = int(query.get("event", ["0"])[0] or 0)
-                result = server.world_request(query.get("session", ["all"])[0], event)
-                reply = response(200, json.dumps(result, indent=2).encode(), "application/json",
-                                 conn)
+                else:
+                    event = int(query.get("event", ["0"])[0] or 0)
+                    result = server.world_request(query.get("session", ["all"])[0], event)
+                    reply = response(200, json.dumps(result, indent=2).encode(), "application/json",
+                                     conn)
             else:
                 answer = await lsp_answer(server, method, path, headers, body, peer)
                 status, content_type, data = answer[:3]
                 extra = tuple(answer[3]) if len(answer) > 3 else ()  # e.g. ETag, Cache-Control
                 if not online.quiet(path, status):  # the polled players-online feed: errors only
-                    log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, path, status,
-                             len(data))
+                    log.info("http  %s %s %s -> %d (%d bytes)", shown[0], method, lsp.loggable(path),
+                             status, len(data))
                 reply = response(status, data, content_type, conn + extra)
+            entry[1] = time.monotonic()  # answered: it waits again, while its answer is read too
             writer.write(reply)
             await writer.drain()
             if not keep:
@@ -1767,6 +1897,8 @@ async def http_handler(server, reader, writer):
     except Exception:  # never let one connection's task fail loudly or take the server down
         log.exception("http connection from %s failed", shown)
     finally:
+        auth.leave(entered)
+        http_open.pop(who, None)
         http_release(ip)
         writer.close()
 
