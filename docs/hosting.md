@@ -116,7 +116,7 @@ publishes are in the pages listed under [Going further](#going-further).
 
 10. **Backups.** Everything the server keeps (players, friends, clubs, scores, photos,
     designs) is in `data/`. Stop the server for a moment so every file is complete, and copy
-    the folder:
+    the whole folder (some files go together: [scores on disk](operating.md#scores-on-disk)):
 
         docker compose stop
         tar czf forza-live-data-$(date +%F).tar.gz data

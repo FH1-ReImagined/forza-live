@@ -516,7 +516,9 @@ callers:
 A row is `{position, rank, user (UserData), score, submittedTime, carId, carClassId,
 carPerformanceIndex, 6 assist flags, ghostFileId (-1 none), clanData, bounty}`.
 
-The server keeps each player's best score per board in `DATA_DIR/scoreboards.json`. A
+The server keeps each player's best score per board in `DATA_DIR/scoreboards.json`, and what
+changed since that file was last written in `scoreboards.journal` beside it
+([scores on disk](operating.md#scores-on-disk)). A
 board is the score type, `gameScoreboardId` and `isServerTimeTrial`: the ids of different
 types overlap (board 230 is the Rt. 29 speed trap and the event with Id 230), so they are
 kept apart (before 2026-10-15 boards were keyed by id alone; an old store is split by each

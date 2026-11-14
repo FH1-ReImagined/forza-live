@@ -2163,6 +2163,7 @@ async def main():
     challenge.configure(args)
     set_rate_limit(args.rate_limit)
     counting = asyncio.create_task(keep_counted())  # the disk totals, never on this loop (#64)
+    writing = asyncio.create_task(scores.keep_written())  # scoreboards.json whole: a thread's (#67)
 
     loop = asyncio.get_running_loop()
     transport, server = await loop.create_datagram_endpoint(
@@ -2219,12 +2220,14 @@ async def main():
                 await asyncio.to_thread(discord_status.update, server.status(), args.data_dir)
     finally:
         counting.cancel()
+        writing.cancel()
         limits.STORED.close()  # a count under way ends now: its thread does not hold the exit
         videos.STORED.close()
         server.save_state()  # a restart now keeps the players (#93)
+        scores.STORE.stop()  # scoreboards.json gets what only its journal had
         if coop_ledger.LEDGER.dirty:
             coop_ledger.LEDGER.save()
-        if server.friends.store.dirty:
+        if server.friends.store.dirty or server.friends.store.saving:
             server.friends.store.save()
         if discord_status.enabled():
             discord_status.offline(args.data_dir)

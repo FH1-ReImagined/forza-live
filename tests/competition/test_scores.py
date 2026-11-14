@@ -86,7 +86,7 @@ class Club1000Test(unittest.TestCase):
     def test_entry_without_xuid(self):
         self.complete(A_XUID, AVENTADOR, 0xAE6828D3)
         del scores.STORE.club["%016X" % A_XUID]["xuid"]
-        scores.STORE.save()
+        scores.STORE.write()  # the file as it was put back by hand
         scores.configure(self.dir.name)
         self.assertEqual(self.rows(B_XUID)["rows"][0]["user"]["wzGamerTag"], "DriverA")
 
@@ -315,7 +315,12 @@ class BoardsTest(unittest.TestCase):
         self.assertIn("from board 101 type 2, above 470.0 km/h", logs.output[1])
         self.assertEqual(self.rows(C_XUID, scores.SPEED_TRAP, 218)[0], [("DriverA", 121.0)])
         self.assertEqual(self.rows(A_XUID, scores.SPEED_ZONE, 101)[0], [])
-        # The cleaned store was saved: another restart removes (and logs) nothing.
+        # The cleaned store was saved (the journal, then the file at its next write): another
+        # restart removes (and logs) nothing.
+        scores.configure(self.dir.name)
+        with self.assertNoLogs("forza-live", "WARNING"):
+            scores.STORE.load()
+        scores.STORE.stop()
         with open(os.path.join(self.dir.name, "scoreboards.json")) as f:
             kept = json.load(f)["boards"]
         self.assertEqual(sorted(kept), ["1:206:0", "1:218:0"])
