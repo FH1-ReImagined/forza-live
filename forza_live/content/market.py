@@ -132,6 +132,7 @@ class Market:
         limits.accept(len(data))
         folder = self.path("market")
         os.makedirs(folder, exist_ok=True)
+        limits.replacing(os.path.join(folder, name))  # a file of that name is not counted twice
         with open(os.path.join(folder, name), "wb") as f:
             f.write(data)
         return name

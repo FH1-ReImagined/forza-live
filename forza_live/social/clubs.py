@@ -504,6 +504,7 @@ def blob_path(name):
 def write_blob(name, data):
     limits.accept(len(data))
     os.makedirs(os.path.dirname(blob_path(name)), exist_ok=True)
+    limits.replacing(blob_path(name))  # a shared car saved again: its old file is not counted twice
     with open(blob_path(name), "wb") as f:
         f.write(data)
     return name

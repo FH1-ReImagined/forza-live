@@ -8,6 +8,7 @@ on a clip ffmpeg makes from a test pattern; it is skipped when ffmpeg is not ins
 Run: python3 -m unittest discover -s tests -t .
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -29,7 +30,7 @@ from forza_live.competition import leaderboards
 from forza_live.core import limits
 from forza_live import server as srv
 from tests.content import test_community as tc
-from tests.support import ROOT
+from tests.support import ROOT, fill, fresh_count, no_walks_here
 
 ALICE, BOB = tc.ALICE, tc.BOB
 OWNER_TOKEN = "owner-test"
@@ -302,10 +303,11 @@ class UploadTest(Base):
         self.assertEqual(self.records(), {})
         self.assertIn("the videos' disk budget", " ".join(logs.output))
         self.published()
-        limits._cache[0] = float("-inf")
+        limits.count()
         before = limits.usage()
         self.published(title="another")  # videos do not grow the shared quota
-        limits._cache[0] = float("-inf")
+        self.assertEqual(limits.usage(), before)
+        limits.count()
         self.assertEqual(limits.usage(), before)
 
     @unittest.skipIf(os.name == "nt", "the converter runs on Linux only")
@@ -520,6 +522,136 @@ class ConvertedTest(Base):
         videos.collect()
         videos.configure(self.dir.name)
         self.assertEqual(self.records()[self.vid]["status"], "held")
+
+
+class BudgetTest(Base):
+    """The videos' own budget is kept in memory as the disk quota is (limits.Stored, #64)."""
+
+    def old_videos(self):
+        """Several thousand small files where the videos and their frames are kept: their bytes."""
+        return (fill(videos.folder("public"), 1500) + fill(videos.folder("frames"), 3000, size=9))
+
+    def test_the_budget_follows_the_files(self):
+        old = self.old_videos()
+        self.assertEqual(videos.STORED.count(), (4500, old, None))
+        self.assertEqual(videos.usage(), old)
+        vid = self.published()
+        v = self.records()[vid]
+        files = [videos.media_path(vid, ".mp4"), videos.media_path(vid, ".jpg")] + [
+            videos.frame_path(vid, n) for n in range(1, v["frames"] + 1)]
+        # the video, its poster and frames; the clip and its job went when it was converted
+        self.assertEqual(videos.usage(), old + sum(map(os.path.getsize, files)))
+        self.assertEqual(videos.usage(), fresh_count(videos.STORED))
+        videos.delete(vid)
+        self.assertEqual(videos.usage(), old)
+        videos.configure(self.dir.name)  # a restart: nothing known until the count
+        self.assertEqual(videos.usage(), 0)
+        videos.STORED.count()
+        self.assertEqual(videos.usage(), old)
+
+    def test_the_budget_refuses_when_full_and_a_delete_gives_the_room_back(self):
+        vid = self.published()
+        self.old_videos()
+        videos.STORED.count()
+        clip = make_asf(title="one more")
+        with mock.patch.object(videos, "VIDEOS_CAP", videos.usage() + len(clip) - 1):
+            with self.assertLogs("forza-live", "INFO") as logs:
+                self.clip(BOB, data=clip)
+            self.assertIn("the videos' disk budget", " ".join(logs.output))
+            self.assertEqual(list(self.records()), [vid])
+            used = videos.usage()
+            videos.delete(vid)
+            self.assertLess(videos.usage(), used)
+            self.clip(BOB, data=clip)  # the room the deleted video gave back
+            self.assertEqual([v["status"] for v in self.records().values()], ["converting"])
+
+    def test_before_the_first_count_clips_are_bounded_by_the_allowance(self):
+        self.old_videos()  # how much is there is not known yet
+        clip = make_asf()
+        with mock.patch.object(limits, "START_ALLOWANCE", 2 * len(clip) + 500):
+            self.clip(data=clip)
+            self.clip(BOB, data=make_asf(title="a second"))
+            with self.assertLogs("forza-live", "INFO") as logs:
+                self.clip(tc.CAROL, data=make_asf(title="a third"))
+            self.assertIn("still being counted", " ".join(logs.output))
+            self.assertEqual(len(self.records()), 2)
+            videos.STORED.count()
+            self.clip(tc.CAROL, data=make_asf(title="a third"))  # the budget alone from here on
+            self.assertEqual(len(self.records()), 3)
+
+    def test_a_converted_clip_is_not_dropped_for_the_start_s_allowance(self):
+        clip = make_asf()
+        with mock.patch.object(limits, "START_ALLOWANCE", len(clip) + 500):
+            self.clip(data=clip)
+            vid, _ = self.only()
+            self.converted(vid, mp4=make_mp4(payload=bytes(3 * len(clip))))  # larger than the allowance
+            videos.collect()
+            self.assertEqual(self.records()[vid]["status"], "held")
+        small = make_asf(title="another", data=10)
+        # the budget itself still holds: room for the clip and its job, not for its video
+        with mock.patch.object(videos, "VIDEOS_CAP", videos.usage() + len(small) + 600):
+            self.clip(BOB, data=small)
+            (other,) = set(self.records()) - {vid}
+            self.converted(other)
+            with self.assertLogs("forza-live", "INFO") as logs:
+                videos.collect()
+            self.assertIn("the videos' disk budget", " ".join(logs.output))
+            self.assertEqual(list(self.records()), [vid])
+
+    def test_a_count_corrects_a_wrong_total_and_sees_the_converter_s_files(self):
+        self.clip()
+        vid, _ = self.only()
+        videos.STORED.count()
+        right = videos.usage()
+        videos.STORED.add(5000)  # counted, never written
+        self.converted(vid)      # the converter's result: not written by the server
+        result = sum(os.path.getsize(os.path.join(videos.folder("converted", vid), name))
+                     for name in os.listdir(videos.folder("converted", vid)))
+        self.assertEqual(videos.usage(), right + 5000)
+        files, found, drift = videos.STORED.count()
+        self.assertEqual((found, drift), (right + result, 5000 - result))
+        self.assertEqual(videos.usage(), right + result)
+
+
+class BudgetLoopTest(Base, unittest.IsolatedAsyncioTestCase):
+    async def counted(self):
+        for _ in range(4000):
+            if videos.STORED.counted:
+                return
+            await asyncio.sleep(0.005)
+        self.fail("the videos were not counted")
+
+    async def test_a_clip_walks_no_folder_on_the_event_loop(self):
+        old = fill(videos.folder("public"), 1500) + fill(videos.folder("frames"), 3000, size=9)
+        first, second = make_asf(), make_asf(title="another")
+        with no_walks_here() as walks:
+            task = asyncio.create_task(srv.keep_counted((("videos", videos.STORED),), every=3600))
+            self.clip(data=first)  # before the first count
+            await self.counted()
+            self.clip(BOB, data=second)
+            with mock.patch.object(videos, "VIDEOS_CAP", videos.usage() + 100):
+                with self.assertLogs("forza-live", "INFO") as logs:
+                    self.clip(tc.CAROL, title="a third")  # full: still refused
+            task.cancel()
+        self.assertEqual(walks.here, [])
+        self.assertTrue(walks.elsewhere)  # the count did walk, in its thread
+        self.assertIn("the videos' disk budget", " ".join(logs.output))
+        self.assertEqual(len(self.records()), 2)
+        jobs = sum(os.path.getsize(videos.folder("incoming", vid + ".json")) for vid in self.records())
+        self.assertEqual(videos.usage(), old + len(first) + len(second) + jobs)
+
+    async def test_the_recount_corrects_a_wrong_total(self):
+        old = fill(videos.folder("public"), 300)
+        task = asyncio.create_task(srv.keep_counted((("videos", videos.STORED),), every=0.02))
+        await self.counted()
+        self.assertEqual(videos.usage(), old)
+        videos.STORED.add(7000)  # counted, never written
+        for _ in range(4000):
+            if videos.usage() == old:
+                break
+            await asyncio.sleep(0.005)
+        task.cancel()
+        self.assertEqual(videos.usage(), old)
 
 
 class FeedTest(Base):

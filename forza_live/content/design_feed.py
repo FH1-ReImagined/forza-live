@@ -154,6 +154,7 @@ def ensure_png(fid, f):
     with open(tmp, "wb") as out:
         out.write(png)
     durable.replace(tmp, png_path(fid))
+    limits.wrote(len(png))  # in the disk quota beside its design (a PNG it replaces stays as .bak)
     f["png"] = {"w": w, "h": h, "sha256": hashlib.sha256(png).hexdigest(), "size": len(png)}
     designs.save()
     return f["png"]

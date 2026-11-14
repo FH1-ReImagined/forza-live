@@ -2083,6 +2083,37 @@ async def http_handler(server, reader, writer):
         writer.close()
 
 
+DRIFT_LOGGED = 1 << 20  # a recount this far from the running total is in the log
+
+
+async def keep_counted(stores=None, every=None):
+    """The stored files' totals (limits.Stored: the videos' budget and the uploads' disk quota),
+    counted in a thread now and every limits.RESCAN_SECONDS. The count walks every stored file,
+    seconds on a big store: on the event loop it stopped everything else that long, about every
+    40 s while players raced (#64). Uploads meanwhile are answered from the running totals. The
+    videos first: they are few, and counted in a moment."""
+    if stores is None:
+        stores = (("videos", videos.STORED), ("uploads", limits.STORED))
+    while True:
+        for name, store in stores:
+            began = time.monotonic()
+            try:
+                found = await asyncio.to_thread(store.count)
+            except Exception:  # tried again at the next round; uploads stay within the allowance
+                log.exception("disk usage: counting the %s failed", name)
+                continue
+            if found is None:  # the store was configured again meanwhile
+                continue
+            files, nbytes, drift = found
+            if drift is None:
+                log.info("disk usage: %s: %d files, %.1f MB (counted in %.1f s, off the event loop)",
+                         name, files, nbytes / 1048576, time.monotonic() - began)
+            elif abs(drift) >= DRIFT_LOGGED:
+                log.info("disk usage: %s: %d files, %.1f MB; the running total was %+.1f MB off",
+                         name, files, nbytes / 1048576, drift / 1048576)
+        await asyncio.sleep(limits.RESCAN_SECONDS if every is None else every)
+
+
 async def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="0.0.0.0", help="address to listen on")
@@ -2164,6 +2195,7 @@ async def main():
     stats.on_skill_write = coop_ledger.LEDGER.host_score
     challenge.configure(args)
     set_rate_limit(args.rate_limit)
+    counting = asyncio.create_task(keep_counted())  # the disk totals, never on this loop (#64)
 
     loop = asyncio.get_running_loop()
     transport, server = await loop.create_datagram_endpoint(
@@ -2219,6 +2251,9 @@ async def main():
                 # urllib blocks: off the event loop, and never fatal (it catches everything)
                 await asyncio.to_thread(discord_status.update, server.status(), args.data_dir)
     finally:
+        counting.cancel()
+        limits.STORED.close()  # a count under way ends now: its thread does not hold the exit
+        videos.STORED.close()
         server.save_state()  # a restart now keeps the players (#93)
         if coop_ledger.LEDGER.dirty:
             coop_ledger.LEDGER.save()

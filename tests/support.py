@@ -1,13 +1,19 @@
 """What several test files share: the repository's paths, a fake UDP transport, the server's
-datagrams, a car club roster, a reference PNG decoder and the score tokens' clock."""
+datagrams, a car club roster, a reference PNG decoder, the score tokens' clock and the check
+that the stored files' running totals are right."""
 
+import contextlib
 import os
 import struct
+import threading
 import time
 import zlib
+from unittest import mock
 
 from forza_live import server as srv
 from forza_live.competition import score_token
+from forza_live.content import videos
+from forza_live.core import limits
 from forza_live.social import clubs
 
 # The repository's root (forza_live_server.py, the entry point, is there).
@@ -101,3 +107,77 @@ def decode_png(data):
         rows.append(bytes(out))
         prev = out
     return w, h, rows
+
+
+def fresh_count(store, folders=None):
+    """The bytes a count of the store's folders (or of `folders`) finds now; the store's own
+    running total is left as it is."""
+    return limits.Stored(folders or store._folders, store._stat).count()[1]
+
+
+class DiskTotals:
+    """The stored files' running totals against the files (#64). Made in a test's setUp, once
+    the data folder is configured; check(test) at its end, while the folder is still there:
+    the uploads' total (limits.STORED), and with with_videos the videos' (videos.STORED), must
+    be what a fresh count finds, so every file the test's calls wrote or deleted was counted.
+    The video converter's folder is left out: its files are not the server's, and only a count
+    sees them. A store configured again during the test (a restart) is left out too, as its
+    total then starts from the count the server makes; so is everything after skip(), for a
+    test that changes the files behind the server's back."""
+
+    def __init__(self, with_videos=False):
+        stores = (limits.STORED, videos.STORED) if with_videos else (limits.STORED,)
+        self.rounds = {store: store._round for store in stores}
+
+    def skip(self):
+        self.rounds = {}
+
+    def check(self, test):
+        if self.rounds.get(limits.STORED) == limits.STORED._round:
+            test.assertEqual(limits.usage(), fresh_count(limits.STORED),
+                             "the disk quota's running total is not what the files add up to")
+        if self.rounds.get(videos.STORED) == videos.STORED._round and not videos.STORED.counted:
+            own = fresh_count(videos.STORED, lambda: [videos.folder(sub) for sub in
+                                                      ("incoming", "public", "frames")])
+            test.assertEqual(videos.usage(), own,
+                             "the videos' running total is not what their files add up to")
+
+
+class Walks:
+    """What no_walks_here() saw: `here`, the folders the guarded thread tried to walk (none, in
+    a test that passes); `elsewhere`, those other threads walked."""
+
+    def __init__(self):
+        self.here, self.elsewhere = [], []
+
+
+@contextlib.contextmanager
+def no_walks_here():
+    """Inside it os.walk and os.scandir, what a count of the stored files is made of, fail on
+    the calling thread (an async test's event loop) and work on any other. The Walks it yields
+    says who walked what: a failure raised deep inside the server may be caught and logged
+    there, so tests look at `here` as well."""
+    thread, seen = threading.get_ident(), Walks()
+
+    def guarded(real):
+        def call(top=".", *args, **kw):
+            if threading.get_ident() == thread:
+                seen.here.append(top)
+                raise AssertionError("a folder walked on the event loop's thread: %r" % (top,))
+            seen.elsewhere.append(top)
+            return real(top, *args, **kw)
+        return call
+
+    with mock.patch.object(os, "walk", guarded(os.walk)), \
+            mock.patch.object(os, "scandir", guarded(os.scandir)):
+        yield seen
+
+
+def fill(folder, files, size=7):
+    """`files` small files in `folder` (made if need be), old-<n>.bin: names no upload gets.
+    The bytes they hold together."""
+    os.makedirs(folder, exist_ok=True)
+    for n in range(files):
+        with open(os.path.join(folder, "old-%d.bin" % n), "wb") as f:
+            f.write(bytes(size))
+    return files * size
