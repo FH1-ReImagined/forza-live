@@ -14,7 +14,7 @@ from django.test import override_settings
 
 from members import identity, views
 from members.models import User
-from members.tests.support import CODE_CONFIRM, CODE_REQUEST, AccountsTest, Browser
+from members.tests.support import CODE_CONFIRM, CODE_REQUEST, AccountsTest, Browser, fake_provider
 
 
 def code_of(message):
@@ -209,6 +209,7 @@ class Mailboxes(AccountsTest):
 
     SPELLINGS = ("victim@gmail.com", "victim+1@gmail.com", "v.ictim@gmail.com", "Vic.Tim+x@GoogleMail.com",
                  '"victim"@gmail.com')
+    EXOTIC = ('"vi\\ctim"@gmail.com', "victim@[192.0.2.7]")
 
     def test_what_a_mailbox_is(self):
         for address in self.SPELLINGS:
@@ -220,6 +221,20 @@ class Mailboxes(AccountsTest):
         for address in ("victim@\uff47mail.com", "victim@gm\u00adail.com", "victim@gmail\u3002com",
                         "victim@exa\u200dmple.com", "no-at-sign", "@example.com", "a@"):
             self.assertIsNone(identity.mailbox(address), ascii(address))
+        # spellings nobody types, which a mail server may deliver to somebody's mailbox all the same
+        for address in self.EXOTIC + ('"vic\\"tim"@gmail.com', '"vic tim"@gmail.com', "victim@192.0.2.7",
+                                      "victim@[IPv6:2001:db8::7]", 'vic"tim@gmail.com'):
+            self.assertIsNone(identity.mailbox(address), address)
+
+    def test_exotic_spellings_are_refused(self):
+        """A quoted local part with a backslash and a domain that is an address passed as
+        addresses of their own: each with its own budget of codes, an account and a mail."""
+        for i, address in enumerate(self.EXOTIC):
+            r = Browser(ip="198.51.100.%d" % (114 + i)).post_json(CODE_REQUEST, {"email": address})
+            self.assertEqual(r.status_code, 400, address)
+            self.assertEqual(json.loads(r.content)["errors"][0]["code"], "invalid")
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(User.objects.count(), 0)
 
     def test_every_spelling_shares_the_mailbox_s_three_an_hour(self):
         for i, address in enumerate(self.SPELLINGS):
@@ -258,6 +273,34 @@ class Mailboxes(AccountsTest):
             self.assertEqual(again.status_code, 401)
             self.assertEqual([m.to for m in mail.outbox], [["member@example.com"]])
             self.assertEqual(owner.post_json(CODE_CONFIRM, {"code": code_of(mail.outbox[-1])}).status_code, 200)
+
+    def test_a_member_s_browser_gets_the_cookie_at_its_next_visit(self):
+        """The cookie came with a sign-in by code only: every member from before it, signed in
+        or not, had none until the next code, and others' requests could use that one up."""
+        owner = Browser(ip="198.51.100.111")
+        self.email_sign_in(owner, "member@example.com")
+        del owner.cookies[views.KNOWN_COOKIE]  # a session from before the cookie
+        seen = owner.get_json("/api/me")
+        self.assertEqual(seen.status_code, 200)
+        self.assertIn(views.KNOWN_COOKIE, seen.cookies)
+        morsel = seen.cookies[views.KNOWN_COOKIE]
+        self.assertEqual((bool(morsel["secure"]), bool(morsel["httponly"]), morsel["samesite"], morsel["path"]),
+                         (True, True, "Strict", "/"))
+        self.assertNotIn(views.KNOWN_COOKIE, owner.get_json("/api/me").cookies)  # once: it has it now
+        owner.post_json("/api/logout-all", {})
+        later = self.spend("member@example.com", time.time() + 86400 * 2)
+        mail.outbox.clear()
+        with mock.patch("time.time", return_value=later):
+            self.assertEqual(owner.post_json(CODE_REQUEST, {"email": "member@example.com"}).status_code, 401)
+            self.assertEqual([m.to for m in mail.outbox], [["member@example.com"]])
+        # nobody else gets one: not a visitor, not an account that has no email address
+        self.assertNotIn(views.KNOWN_COOKIE, Browser(ip="198.51.100.112").get_json("/api/me").cookies)
+        other = Browser(ip="198.51.100.113")
+        with fake_provider() as fake:
+            self.oauth_sign_in(other, fake)
+        seen = other.get_json("/api/me")
+        self.assertEqual(seen.status_code, 200)
+        self.assertNotIn(views.KNOWN_COOKIE, seen.cookies)
 
     def test_the_owner_s_budget_is_for_that_address_only(self):
         owner = Browser(ip="198.51.100.112")

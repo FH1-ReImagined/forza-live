@@ -34,9 +34,11 @@ from members.models import AuditEvent, User
 
 log = logging.getLogger("members")
 
-# Set when a code signs a browser in: the stand-in of the address, signed. A code request that
-# carries it for the same address counts against request_login_code_known, not the mailbox's
-# public budget. It names no address and opens nothing.
+# Set when a code signs a browser in, and for a browser that holds a session of an account with
+# an email address (members.middleware.KnownBrowser: the members from before this cookie get it
+# at their next visit, not at their next code): the stand-in of the address, signed. A code
+# request that carries it for the same address counts against request_login_code_known, not the
+# mailbox's public budget. It names no address and opens nothing.
 KNOWN_COOKIE = "__Host-fh_known"
 KNOWN_SALT = "members.views.known"
 KNOWN_DAYS = 400
@@ -52,6 +54,17 @@ def known_stand_in(request):
         return signing.loads(value, salt=KNOWN_SALT, max_age=KNOWN_DAYS * 86400)
     except signing.BadSignature:
         return None
+
+
+def stand_in_of(user):
+    """The stand-in of the account's email address, or None for an account without one."""
+    stand_in = EmailAddress.objects.filter(user=user, verified=True).values_list("email", flat=True).first()
+    return stand_in if stand_in and identity.is_stand_in(stand_in) else None
+
+
+def set_known(response, stand_in):
+    response.set_cookie(KNOWN_COOKIE, signing.dumps(stand_in, salt=KNOWN_SALT), max_age=KNOWN_DAYS * 86400,
+                        path="/", secure=True, httponly=True, samesite="Strict")
 
 
 def warn_mails_out(which, message):
@@ -120,12 +133,9 @@ class CountedConfirmLoginCodeView(ConfirmLoginCodeView):
                                  "message": "Too many wrong codes. Try again later."}]}, status=429)
         response = super().dispatch(request, *args, **kwargs)
         if response.status_code == 200 and request.method == "POST" and request.user.is_authenticated:
-            stand_in = EmailAddress.objects.filter(user=request.user, verified=True) \
-                .values_list("email", flat=True).first()
-            if stand_in and identity.is_stand_in(stand_in):
-                response.set_cookie(KNOWN_COOKIE, signing.dumps(stand_in, salt=KNOWN_SALT),
-                                    max_age=KNOWN_DAYS * 86400, path="/", secure=True, httponly=True,
-                                    samesite="Strict")
+            stand_in = stand_in_of(request.user)
+            if stand_in:
+                set_known(response, stand_in)
         return response
 
     def handle_invalid_input(self, input):

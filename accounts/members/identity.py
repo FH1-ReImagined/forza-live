@@ -4,7 +4,9 @@ the request that mails the code."""
 
 import hashlib
 import hmac
+import ipaddress
 import os
+import re
 import secrets
 import threading
 import unicodedata
@@ -13,6 +15,8 @@ from django.conf import settings
 
 DOMAIN = "email.invalid"
 GMAIL = ("gmail.com", "googlemail.com")  # one mailbox whatever the dots, under either name
+# A local part as it is written without quotes (RFC 5322's dot-atom, lower case).
+PLAIN_LOCAL = re.compile(r"[-!#$%&'*+/=?^_`{}|~0-9a-z]+(\.[-!#$%&'*+/=?^_`{}|~0-9a-z]+)*")
 _lock = threading.Lock()
 _pepper = {}
 
@@ -65,10 +69,22 @@ def mailbox(address):
     differently after that mapping (full-width or other compatibility letters, a soft hyphen) is
     another spelling of someone's address and is refused, so there is one spelling per domain
     besides its xn-- form. The local part loses its quotes, its +tag and its compatibility
-    letters, and for Gmail its dots."""
+    letters, and for Gmail its dots.
+
+    Refused too, as spellings nobody types that a mail server may still deliver to somebody's
+    mailbox: a quoted local part that holds anything quotes are needed for (a backslash quotes
+    the character after it, which makes one more spelling of every address), and a domain that
+    is an address, in brackets or not."""
     local, at, domain = normalize(address).rpartition("@")
     if not at or not local or not domain:
         return None
+    if domain.startswith("[") or domain.endswith("]"):
+        return None
+    try:
+        ipaddress.ip_address(domain)
+        return None
+    except ValueError:
+        pass
     try:
         ascii_domain = domain.encode("idna").decode("ascii")
         shown = ascii_domain.encode("ascii").decode("idna")
@@ -79,6 +95,10 @@ def mailbox(address):
     local = unicodedata.normalize("NFKC", local).lower()
     if len(local) > 2 and local[0] == local[-1] == '"':
         local = local[1:-1]
+        if not PLAIN_LOCAL.fullmatch(local):
+            return None
+    if '"' in local or "\\" in local:
+        return None
     local = local.split("+", 1)[0]
     if ascii_domain in GMAIL:
         local, ascii_domain = local.replace(".", ""), GMAIL[0]
