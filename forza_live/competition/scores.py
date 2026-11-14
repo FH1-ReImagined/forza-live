@@ -39,7 +39,8 @@ seconds while the journal has changes it lacks (keep_written), and once more as 
 stops (Store.stop). A start reads the file and then the journal (core/journal.py). The file is
 the JSON it always was, so a previous version of the server reads it; it knows nothing of the
 journal, and after a stop that was not clean it lacks what only the journal held: at most the
-changes of the last FULL_EVERY seconds and of the write under way.
+changes of the last FULL_EVERY seconds and of the write under way (docs/operating.md, "Scores
+on disk", has what that costs and the command that folds the journal into the file first).
 """
 
 import asyncio
@@ -321,13 +322,20 @@ class Store:
 
     def stop(self):
         """The server is stopping: scoreboards.json gets what only its journal had, so the file
-        alone is complete (all a previous version of the server reads)."""
+        alone is complete (all a previous version of the server reads). The log says which it
+        was: written, nothing to write, or not written (the journal then has what it lacks)."""
         if not self.loaded:
             return
+        name = os.path.basename(self.path())
         try:
             self.save()
-            if self.journal.behind():
-                self.write(stopping=True)
+            if not self.journal.behind():
+                log.info("scoreboards: nothing to write at the stop: %s has every change", name)
+            else:
+                began = time.monotonic()
+                if self.write(stopping=True):
+                    log.info("scoreboards: %s written whole at the stop in %.2f s: it has every "
+                             "change", name, time.monotonic() - began)
         except OSError as e:
             log.warning("scoreboards: %s not written at the stop (%s); its journal has every "
                         "change", self.path(), e)
@@ -397,13 +405,14 @@ async def keep_written(every=None):
         began = time.monotonic()
         try:
             snapshot = store.snapshot()
-            await asyncio.to_thread(store.write, snapshot)
+            written = await asyncio.to_thread(store.write, snapshot)
         except Exception:
             log.exception("scoreboards: writing %s failed; the journal keeps every change",
                           store.path())
             continue
-        log.info("scoreboards: %s written whole in %.2f s, off the event loop",
-                 os.path.basename(store.path()), time.monotonic() - began)
+        if written:
+            log.info("scoreboards: %s written whole in %.2f s, off the event loop",
+                     os.path.basename(store.path()), time.monotonic() - began)
 
 
 def migrate(boards):

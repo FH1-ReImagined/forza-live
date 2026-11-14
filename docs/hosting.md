@@ -114,9 +114,15 @@ publishes are in the pages listed under [Going further](#going-further).
        git pull
        docker compose up -d --build
 
+   To go back to the version before, do not just check it out: stop the server and follow
+   [rolling back](operating.md#scores-on-disk) first (one command puts the scores' journal in
+   `scoreboards.json`, which is all an older version reads).
+
 10. **Backups.** Everything the server keeps (players, friends, clubs, scores, photos,
     designs) is in `data/`. Stop the server for a moment so every file is complete, and copy
-    the whole folder (some files go together: [scores on disk](operating.md#scores-on-disk)):
+    the whole folder. Some files go together, and one copied alone while the server runs may
+    not be complete (`scoreboards.json` without `scoreboards.journal`:
+    [scores on disk](operating.md#scores-on-disk)):
 
         docker compose stop
         tar czf forza-live-data-$(date +%F).tar.gz data

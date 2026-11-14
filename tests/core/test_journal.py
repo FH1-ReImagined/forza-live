@@ -1,13 +1,14 @@
 """journal: a change is a line appended and flushed, the file is written whole now and then
-(#67). A start reads the same store whatever moment the server was stopped at; a line or a
-file cut short costs nothing anyone was told was kept; a file the journal does not continue is
-left as it is.
+(#67). A start reads the same store whatever moment the server was stopped at, from the file or
+from its previous copy; a line or a file cut short costs nothing anyone was told was kept; a
+file the journal does not continue is left as it is, and the journal kept.
 
 Run: python3 -m unittest discover -s tests -t .
 """
 
 import json
 import os
+import random
 import shutil
 import tempfile
 import threading
@@ -90,6 +91,17 @@ class Base(unittest.TestCase):
         with open(self.path(name), "rb") as f:
             return f.read().split(b"\n")
 
+    def cut_short(self, folder):
+        """A copy of `folder` whose store.json is cut short, so that durable reads its .bak;
+        None when the folder has no .bak (the file is then all there is)."""
+        if not os.path.exists(os.path.join(folder, "store.json.bak")):
+            return None
+        cut = folder + "-cut"
+        shutil.copytree(folder, cut)
+        with open(os.path.join(cut, "store.json"), "r+") as f:
+            f.truncate(1)
+        return cut
+
 
 class JournalTest(Base):
     def test_a_change_is_a_line_and_the_file_is_not_written(self):
@@ -121,7 +133,7 @@ class JournalTest(Base):
         self.assertEqual(flushed[0], os.path.getsize(self.path("store.journal")))
         self.assertGreater(flushed[0], size[0])
 
-    def test_a_checkpoint_writes_the_file_and_the_journal_keeps_what_the_file_before_lacked(self):
+    def test_a_checkpoint_writes_the_file_and_the_journal_keeps_what_the_previous_copy_lacks(self):
         kv = self.kv()
         kv.set(a=1)
         self.assertTrue(kv.journal.behind())
@@ -134,14 +146,20 @@ class JournalTest(Base):
         kv.set(c=3)
         kv.checkpoint()
         second = durable.digest(self.path("store.json"))
-        head, *rest = self.lines()
-        # it starts at the file that is now the .bak: the two changes since, which the file has
-        self.assertEqual(json.loads(head)["continues"], {first: 0, second: 2})
-        self.assertEqual([json.loads(line) for line in rest[:-1]], [{"b": 2}, {"c": 3}])
         self.assertEqual(durable.digest(self.path("store.json.bak")), first)
         kv.set(d=4)
+        kv.checkpoint()
+        third = durable.digest(self.path("store.json"))
+        head, *rest = self.lines()
+        # the files named, the oldest first: the one that was the .bak while this was written,
+        # the .bak, the file. The lines start where the oldest stops.
+        self.assertEqual(list(json.loads(head)["continues"].items()),
+                         [(first, 0), (second, 2), (third, 3)])
+        self.assertEqual([json.loads(line) for line in rest[:-1]], [{"b": 2}, {"c": 3}, {"d": 4}])
+        self.assertEqual(durable.digest(self.path("store.json.bak")), second)
+        kv.set(e=5)
         again = self.kv()
-        self.assertEqual((again.data, again.applied), ({"a": 1, "b": 2, "c": 3, "d": 4}, 1))
+        self.assertEqual((again.data, again.applied), ({"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}, 1))
         self.assertFalse(os.path.exists(self.path("store.journal.bak")))  # the journal has no copy
 
     def test_a_big_file_is_flushed_as_it_is_written(self):
@@ -199,9 +217,13 @@ class JournalTest(Base):
             after = dict(kv.data)
             for folder in stops.copies[checked:]:
                 with self.subTest(step=what, stop=os.path.basename(folder)):
+                    cut = self.cut_short(folder)
                     found = self.kv(folder)
                     # a change being appended is there or not; one acknowledged always is
                     self.assertIn(found.data, (before, after))
+                    if cut:  # and the same from the previous copy, were the file unreadable
+                        with self.assertLogs("forza_live", "WARNING"):
+                            self.assertIn(self.kv(cut).data, (before, after))
                     was = dict(found.data)
                     found.set(z=9)  # and the server goes on from there
                     found.checkpoint()
@@ -210,6 +232,47 @@ class JournalTest(Base):
             checked = len(stops.copies)
         self.assertGreaterEqual(checked, 30)  # 43 where a folder can be flushed, 32 on Windows
         self.assertEqual(self.kv().data, {"a": 3, "b": 2, "c": 4, "d": 5})
+
+    def test_random_runs_stopped_at_every_flush_and_rename(self):
+        rnd = random.Random(67)
+        kv = self.kv()
+        stops, checked, cuts, failed, real = Stops(self.dir, self.tmp), 0, 0, 0, os.replace
+
+        def no_room(src, dst):  # the new file cannot take its place
+            if dst.endswith("store.json"):
+                raise OSError("no space left on the device")
+            return real(src, dst)
+
+        for step in range(90):
+            before, roll = dict(kv.data), rnd.random()
+            with stops:
+                if roll < 0.08:
+                    with mock.patch.object(os, "replace", no_room):
+                        self.assertRaises(OSError, kv.checkpoint)
+                    failed += 1
+                elif roll < 0.35:
+                    kv.checkpoint()
+                elif roll < 0.42:
+                    kv.journal.close()
+                    kv = self.kv()  # a restart
+                else:
+                    kv.set(**{rnd.choice("abcdef"): step})
+            after = dict(kv.data)
+            for folder in stops.copies[checked:]:
+                with self.subTest(step=step, stop=os.path.basename(folder)):
+                    self.assertIn(self.kv(folder).data, (before, after))
+                    cut = self.cut_short(folder)
+                    if cut:
+                        with self.assertLogs("forza_live", "WARNING"):
+                            self.assertIn(self.kv(cut).data, (before, after))
+                        cuts += 1
+                    shutil.rmtree(folder)
+                    shutil.rmtree(cut or folder, ignore_errors=True)
+            checked = len(stops.copies)
+            self.assertFalse(any(name.startswith("store.journal.unused")
+                                 for name in os.listdir(self.dir)))  # never put aside
+        self.assertGreater(min(checked, cuts, failed), 3)
+        self.assertEqual(self.kv().data, kv.data)
 
     def test_a_file_half_written_is_never_the_file(self):
         kv = self.kv()
@@ -271,9 +334,9 @@ class JournalTest(Base):
         kv.checkpoint()
         kv.set(d=4)
         kv.set(e=5)
-        head, b, c, d, e, end = self.lines()
+        head, a, b, c, d, e, end = self.lines()
         with open(self.path("store.journal"), "wb") as f:  # one the file has, one it lacks
-            f.write(b"\n".join([head, b, b"{\"c\": ", b"[1, 2]", e, end]))
+            f.write(b"\n".join([head, a, b, b"{\"c\": ", b"[1, 2]", e, end]))
         with self.assertLogs("forza-live", "WARNING") as logs:
             found = self.kv()
         self.assertIn("2 damaged lines skipped, 1 changes applied", logs.output[0])
@@ -293,13 +356,13 @@ class JournalTest(Base):
             found = self.kv()
         self.assertEqual((found.data, found.applied), ({"a": 1, "old": True}, 0))
         self.assertRegex(logs.output[0], "store.journal does not continue the store.json that is "
-                                         "here .* At least 1 of its changes were in no file")
+                                         "here .* At least 1 of its 2 changes were in no whole file")
         self.assertFalse(os.path.exists(self.path("store.journal")))
-        self.assertEqual(len(self.lines("store.journal.unused")), 4)  # kept, for the operator
+        self.assertEqual(len(self.lines("store.journal.unused.1")), 4)  # kept, for the operator
         found.set(c=3)  # and a new journal continues the file that is here
         self.assertEqual(self.kv().data, {"a": 1, "old": True, "c": 3})
 
-    def test_a_file_changed_after_a_clean_stop_loses_nothing(self):
+    def test_a_file_changed_after_a_clean_stop_and_what_the_log_may_say(self):
         kv = self.kv()
         kv.set(a=1)
         kv.checkpoint()
@@ -310,15 +373,54 @@ class JournalTest(Base):
         with self.assertLogs("forza-live", "INFO") as logs:
             found = self.kv()
         self.assertEqual(found.data, {"a": 1, "b": 2, "edited": True})
+        # every change was in the last file the server wrote; whether the file here was made
+        # from that one (as it was) or is an older copy, the server cannot know: it does not say
+        self.assertEqual([r.levelname for r in logs.records], ["WARNING"])
+        self.assertIn("had written its 2 changes to a whole file, but cannot tell whether the "
+                      "file here has them", logs.output[0])
+        self.assertNotIn("nothing is lost", logs.output[0])
+
+    def test_a_journal_put_aside_never_replaces_an_earlier_one(self):
+        kept = []
+        for n in range(1, 4):  # a kill, something else writes the file, a start: three times
+            kv = self.kv()
+            kv.set(**{"only-in-journal-%d" % n: n})
+            with open(self.path("store.journal"), "rb") as f:
+                kept.append(f.read())
+            kv.journal.close()
+            with open(self.path("store.json"), "w") as f:
+                json.dump({"written-by-something-else": n}, f)
+            with self.assertLogs("forza-live", "WARNING") as logs:
+                self.assertEqual(self.kv().data, {"written-by-something-else": n})
+            self.assertIn("Kept as %s" % self.path("store.journal.unused.%d" % n), logs.output[0])
+        for n, raw in enumerate(kept, 1):  # each is still there, as it was
+            with open(self.path("store.journal.unused.%d" % n), "rb") as f:
+                self.assertEqual(f.read(), raw)
+        os.remove(self.path("store.journal.unused.2"))  # the operator looked at one and removed it
+        kv = self.kv()
+        kv.set(more=1)
+        kv.journal.close()
+        with open(self.path("store.json"), "w") as f:
+            json.dump({}, f)
+        with self.assertLogs("forza-live", "WARNING"):
+            self.kv()
+        self.assertTrue(os.path.exists(self.path("store.journal.unused.4")))  # after the last
+
+    def test_a_journal_with_no_change_put_aside_is_no_warning(self):
+        with open(self.path("store.journal"), "wb") as f:  # made, and its first change never written
+            f.write(json.dumps({"journal": 1, "continues": {journal.NO_FILE: 0}}).encode() + b"\n")
+        with open(self.path("store.json"), "w") as f:
+            json.dump({"here": True}, f)
+        with self.assertLogs("forza-live", "INFO") as logs:
+            self.assertEqual(self.kv().data, {"here": True})
         self.assertEqual([r.levelname for r in logs.records], ["INFO"])
-        self.assertIn("nothing is lost", logs.output[0])
+        self.assertIn("It held no change", logs.output[0])
 
     def test_a_file_deleted_starts_empty_whatever_the_journal_has(self):
         kv = self.kv()
-        kv.set(a=1)
-        kv.checkpoint()
-        kv.set(b=2)
-        kv.checkpoint()
+        for n in range(3):  # three whole files: "no file" is no longer one the journal names
+            kv.set(**{"k%d" % n: n})
+            kv.checkpoint()
         kv.set(c=3)
         os.remove(self.path("store.json"))  # the journal continues that file, not no file
         with self.assertLogs("forza-live", "WARNING"):

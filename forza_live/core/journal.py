@@ -6,9 +6,9 @@ change costs one line appended to <file>.journal and flushed to disk: millisecon
 the file's size. The file itself is written whole only every so often, by a thread
 (checkpoint). A start reads the file, then the journal's lines the file does not hold yet.
 
-The journal's first line names the files it continues, each by the SHA-256 of its bytes, with
-how many of the journal's lines that file already holds. Every other line is one change, a
-JSON object whose meaning is its store's:
+The journal's first line names the files it continues, the oldest first, each by the SHA-256
+of its bytes, with how many of the journal's lines that file already holds. Every other line is
+one change, a JSON object whose meaning is its store's:
 
     {"journal": 1, "continues": {"<the .bak's SHA-256>": 0, "<the file's SHA-256>": 12}}
     {"boards": {"3:199:0": {"0009000000000A01": {...}}}}
@@ -16,18 +16,18 @@ JSON object whose meaning is its store's:
 
 A file that is none of those was written by something else: a previous version of the server,
 a restored backup, an edit by hand. The journal is not applied to it and is kept as
-<file>.journal.unused. NO_FILE and UNREADABLE stand for a file that is not there and for one
-that cannot be read.
+<file>.journal.unused.<n>, a new n each time. NO_FILE and UNREADABLE stand for a file that is
+not there and for one that cannot be read.
 
 A checkpoint, in this order: the new file is written beside the one in place (<file>.tmp) and
-flushed; the journal is rewritten to start where the file in place starts and to name both;
+flushed; the journal is rewritten to name it too, without the lines the .bak already holds;
 the new file takes the place of the old one, which durable.replace keeps as .bak. Stopped at
-any point, what is left is a file and a journal that continues it. As the journal reaches back
-to the .bak, the previous copy durable falls back to is made whole by it too.
+any point, the file in place and its .bak are both files the journal continues: the previous
+copy durable falls back to is made whole by it as the file itself is.
 
 Threads: append(), mark() and behind() are the event loop's, checkpoint() a thread's (or the
 stop's). A lock keeps the journal's file and what is known of it: the loop waits for it only
-while a checkpoint rewrites the journal, a file of two checkpoints' changes at most. And the
+while a checkpoint rewrites the journal, a file of three checkpoints' changes at most. And the
 new file is flushed as it is written (Paced), so that megabytes of it are never waiting for the
 disk at once: the journal's own flush, on the loop, would wait behind them.
 """
@@ -74,7 +74,8 @@ class Journal:
         self._whole = False     # the journal's file is whole; if not, the next append makes it anew
         self.closed = False
         self.base = NO_FILE     # the file in place, by its SHA-256
-        self.continues = {NO_FILE: 0}  # as the first line has it: how many of `lines` each file holds
+        # As the first line has it: how many of `lines` each file holds, the oldest file first
+        self.continues = {NO_FILE: 0}
         self.lines = []         # the changes in the journal's file, a line (bytes) each
         self.first = 0          # how many changes went before lines[0], dropped by checkpoints
 
@@ -136,23 +137,36 @@ class Journal:
         return changes
 
     def _put_aside(self, known, changes):
-        unused = self.name + ".unused"
+        """The journal's file renamed <name>.unused.<n>, n one more than the last there is (an
+        earlier one is never written over: it may be the only copy of changes that were
+        acknowledged), and the log told what the server knows of its changes. Whether the file
+        that is here has them it cannot know, and does not say."""
+        folder, start = os.path.split(self.name + ".unused.")
         try:
+            taken = [int(name[len(start):]) for name in os.listdir(folder or ".")
+                     if name.startswith(start) and name[len(start):].isdigit()]
+            unused = "%s%d" % (self.name + ".unused.", max(taken, default=0) + 1)
             os.replace(self.name, unused)
+            where = "Kept as %s" % unused
         except OSError as e:
-            log.warning("%s cannot be renamed (%s)", self.name, e)
+            where = "It could not be renamed (%s): the next change writes over it" % e
         if known is None:
-            log.warning("%s is damaged: its %d lines are not applied. Kept as %s", self.name,
-                        changes, unused)
+            log.warning("%s is damaged: its %d lines are not applied. %s", self.name, changes,
+                        where)
             return
         newer = changes - max(known.values(), default=0)
-        log.log(logging.WARNING if newer > 0 else logging.INFO,
+        if not changes:
+            told = "It held no change"
+        elif newer > 0:
+            told = "At least %d of its %d changes were in no whole file the server had written" \
+                % (newer, changes)
+        else:
+            told = "The server had written its %d changes to a whole file, but cannot tell " \
+                "whether the file here has them" % changes
+        log.log(logging.WARNING if changes else logging.INFO,
                 "%s does not continue the %s that is here (written by a previous version of the "
-                "server, restored or edited): it is not applied. %s. Kept as %s", self.name,
-                os.path.basename(self.path),
-                "At least %d of its changes were in no file it knew" % newer if newer > 0
-                else "Every change it had was in the last file it knew, so nothing is lost",
-                unused)
+                "server, restored or edited): it is not applied. %s. %s", self.name,
+                os.path.basename(self.path), told, where)
 
     def mark(self):
         """The changes appended so far, of all since load(): what a copy of the store made now
@@ -201,10 +215,23 @@ class Journal:
                 paced.flush()
             new = durable.digest(tmp)
             with self._lock:
-                # The file in place becomes the .bak: the journal starts where it starts.
+                # The journal names the new file too, and loses the lines the .bak holds (the
+                # file in place has them as well). Not the lines the file in place holds: it is
+                # not the .bak before the rename below, and a start that falls back to the
+                # .bak, at whatever moment this stopped, needs them.
+                names = list(self.continues)
+                at = names.index(self.base) if self.base in names else 0
+                before = names[at - 1] if at else None  # the .bak, as the first line names it
                 held = self.continues.get(self.base, 0)
-                self._rewrite({self.base: 0, new: mark - self.first - held}, self.lines[held:])
-                self.first += held
+                drop = min(self.continues[before], held) if before else 0
+                continues = {}
+                for name, count in ((before, self.continues[before] if before else 0),
+                                    (self.base, held), (new, mark - self.first)):
+                    if name is not None:
+                        continues.pop(name, None)  # the same bytes twice: once, as the later file
+                        continues[name] = count - drop
+                self._rewrite(continues, self.lines[drop:])
+                self.first += drop
             durable.replace(tmp, self.path)
             with self._lock:
                 self.base = new

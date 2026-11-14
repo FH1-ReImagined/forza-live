@@ -2,7 +2,8 @@
 score and a ghost cost the event loop milliseconds, and the whole file is only ever written by
 a thread; the server killed at any moment loses nothing a player was told was kept and always
 starts again; a restart reads the same boards; the previous version's file loads, and the file
-written is one the previous version reads; an operator's changes go the same way.
+written is one the previous version reads; an operator's changes go the same way; the stop
+writes the boards last and says in the log what it did.
 
 Run: python3 -m unittest discover -s tests -t .
 """
@@ -22,14 +23,17 @@ import time
 import unittest
 from unittest import mock
 
+from forza_live import server as srv
 from forza_live.competition import scores
 from forza_live.core import durable
 from forza_live.core import journal
 from forza_live.core import limits
 from forza_live.network import xtsw_all as A
+from forza_live.social import friends
+from forza_live.world import coop_ledger
 from tests.competition import test_ghost as tg
 from tests.competition import test_leaderboard_integrity as tli
-from tests.support import ROOT
+from tests.support import ROOT, FakeTransport
 
 A_XUID, B_XUID, C_XUID, BOARD = tli.A_XUID, tli.B_XUID, tli.C_XUID, tli.BOARD
 TRAP = "1:230:0"
@@ -658,7 +662,7 @@ class KillTest(Base):
             self.restart()
         self.assertIn("cannot be read", logs.output[0])
         self.assertEqual(tables(), {"boards": {}, "unranked": {}, "club1000": {}, "nextFileId": 1})
-        self.assertTrue(os.path.exists(self.path("scoreboards.journal.unused")))
+        self.assertTrue(os.path.exists(self.path("scoreboards.journal.unused.1")))
         self.trap(A_XUID, 50.0)  # and keeps what it is given from there
         with self.assertLogs("forza-live", "ERROR"):
             self.restart()
@@ -700,7 +704,7 @@ class RollbackTest(Base):
         self.assertRegex(logs.output[0], "scoreboards.journal does not continue the "
                                          "scoreboards.json that is here")
         self.assertEqual(tables(), old)  # as it left them: no row or ghost id of before comes back
-        self.assertTrue(os.path.exists(self.path("scoreboards.journal.unused")))
+        self.assertTrue(os.path.exists(self.path("scoreboards.journal.unused.1")))
         self.trap(B_XUID, 61.0)
         before = tables()
         self.restart()
@@ -714,9 +718,121 @@ class RollbackTest(Base):
         del edited["boards"][TRAP]["%016X" % B_XUID]
         with open(self.path("scoreboards.json"), "w") as f:
             json.dump(edited, f)
-        with self.assertNoLogs("forza-live", "WARNING"):
+        with self.assertLogs("forza-live", "WARNING") as logs:
             self.restart()
-        self.assertEqual(tables(), edited)
+        self.assertEqual(tables(), edited)  # the file as it was edited, the journal put aside
+        self.assertIn("cannot tell whether the file here has them. Kept as %s"
+                      % self.path("scoreboards.journal.unused.1"), logs.output[0])
+
+    def test_the_command_of_the_operator_s_guide_puts_the_journal_in_the_file(self):
+        guide = os.path.join(ROOT, "docs", "operating.md")
+        if not os.path.exists(guide):
+            self.skipTest("no docs here")
+        with open(guide) as f:
+            [line] = [line for line in f if "scores.STORE.stop()" in line]
+        code = line.strip().split(' -c "', 1)[1].rsplit('"', 1)[0]  # python3 -c "<this>"
+        self.assertEqual(code.count("'/data'"), 1)
+        code = code.replace("'/data'", repr(self.dir.name))
+        self.lap(A_XUID, 115.13)
+        scores.STORE.write()
+        self.trap(B_XUID, 60.0)   # what only the journal has when the server is killed
+        self.lap(A_XUID, 110.0)
+        self.medal(B_XUID, 1398, 1)
+        with self.assertLogs("forza-live", "WARNING"):
+            self.admin("POST", "/admin/scores/delete", player="%016X" % B_XUID, board=TRAP)
+        kept = tables()
+        self.assertNotEqual(as_a_previous_version_reads_it(self.dir.name), kept)
+        said = []
+        for _ in range(2):  # with the server stopped; the second time there is nothing to do
+            done = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True,
+                                  text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            said.append(done.stderr.strip().splitlines()[-1])
+        self.assertRegex(said[0], r"scoreboards\.json written whole at the stop in .* s: it has "
+                                  r"every change$")
+        self.assertRegex(said[1], r"nothing to write at the stop: scoreboards\.json has every "
+                                  r"change$")
+        self.assertEqual(as_a_previous_version_reads_it(self.dir.name), kept)
+        self.restart()
+        self.assertEqual(tables(), kept)
+
+    def test_the_previous_copy_put_back_needs_the_journal_gone_too(self):
+        self.trap(A_XUID, 50.0)
+        scores.STORE.write()
+        self.trap(B_XUID, 60.0)
+        with self.assertLogs("forza-live", "WARNING"):
+            self.admin("POST", "/admin/scores/delete", player="%016X" % A_XUID)  # by mistake
+        scores.STORE.stop()
+        with open(self.path("scoreboards.json.bak")) as f:
+            wanted = json.load(f)  # the boards before the mistake
+        self.assertIn("%016X" % A_XUID, wanted["boards"][TRAP])
+        shutil.copy(self.path("scoreboards.json.bak"), self.path("scoreboards.json"))
+        self.restart()  # the journal continues that copy: the delete is applied again
+        self.assertNotIn("%016X" % A_XUID, scores.STORE.boards[TRAP])
+        scores.configure(self.dir.name, "main-1")
+        shutil.copy(self.path("scoreboards.json.bak"), self.path("scoreboards.json"))
+        os.remove(self.path("scoreboards.journal"))  # as the operator's guide says
+        self.restart()
+        self.assertEqual(tables()["boards"], wanted["boards"])
+
+
+class StopTest(Base):
+    """The server's stop (server.save_at_stop): the boards last, and a line in the log."""
+
+    def server(self):
+        server = srv.ForzaLive("test", 4)
+        server.transport = FakeTransport()
+        server.state_path = self.path(srv.STATE_FILE)
+        server.friends.store.path = self.path(friends.FILE)
+        return server
+
+    def test_the_stores_without_a_journal_are_saved_before_the_boards(self):
+        server, ledger = self.server(), mock.Mock(dirty=True)
+        server.friends.store.seen(A_XUID, "DriverA")
+        self.trap(A_XUID, 50.0)
+        # a second signal while the boards' last write is under way
+        with mock.patch.object(coop_ledger, "LEDGER", ledger), \
+                mock.patch.object(scores.STORE, "write", side_effect=KeyboardInterrupt):
+            self.assertRaises(KeyboardInterrupt, srv.save_at_stop, server)
+        ledger.save.assert_called_once_with()
+        again = friends.Store(server.friends.store.path)
+        again.load()
+        self.assertEqual(again.name(A_XUID), "DriverA")
+        self.assertTrue(os.path.exists(server.state_path))
+        self.restart()  # and the boards lost nothing: the journal had the score
+        self.assertEqual(scores.STORE.boards[TRAP]["%016X" % A_XUID]["score"], 50.0)
+
+    def test_the_log_says_what_the_stop_did_with_the_file(self):
+        self.trap(A_XUID, 50.0)
+        with self.assertLogs("forza-live", "INFO") as logs:
+            srv.save_at_stop(self.server())
+        self.assertRegex(logs.output[-1], r"scoreboards: scoreboards\.json written whole at the "
+                                          r"stop in \d+\.\d\d s: it has every change$")
+        self.assertEqual(as_a_previous_version_reads_it(self.dir.name), tables())
+        with self.assertLogs("forza-live", "INFO") as logs:
+            scores.STORE.stop()  # stopped again with nothing new
+        self.assertEqual(logs.output, ["INFO:forza-live:scoreboards: nothing to write at the "
+                                       "stop: scoreboards.json has every change"])
+
+    def test_a_stop_that_cannot_write_the_file_says_so_and_loses_nothing(self):
+        self.trap(A_XUID, 50.0)
+        scores.STORE.stop()
+        self.trap(B_XUID, 60.0)
+        with mock.patch.object(scores, "dump", side_effect=OSError("no space left on the device")), \
+                self.assertLogs("forza-live", "INFO") as logs:
+            scores.STORE.stop()
+        self.assertEqual([r.levelname for r in logs.records], ["WARNING"])
+        self.assertIn("not written at the stop (no space left on the device); its journal has "
+                      "every change", logs.output[0])
+        self.assertNotIn("%016X" % B_XUID, as_a_previous_version_reads_it(self.dir.name)["boards"][TRAP])
+        self.restart()
+        self.assertEqual(scores.STORE.boards[TRAP]["%016X" % B_XUID]["score"], 60.0)
+
+    def test_a_store_that_was_never_read_writes_nothing_at_the_stop(self):
+        scores.configure(self.dir.name, "main-1")
+        with self.assertNoLogs("forza-live", "INFO"):
+            scores.STORE.stop()
+        self.assertEqual(os.listdir(self.dir.name), [])
 
 
 CHILD = r"""
