@@ -52,8 +52,10 @@ installation": recovery by hand). --rebind-legacy (a server only its operator us
 binds an XUID bound to a raw key to the first valid public key instead.
   First use has a price (FirstUse): a few new bindings an hour from one address, and so many a
 second for the whole server, far fewer for raw keys (one datagram binds them, and its source may
-be forged). Over them, or once the store holds limits.MAX_PLAYERS records, the XUID stays
-unbound and the game's next HELLOs try again.
+be forged: they have a budget apart, so they cannot spend an address's signed bindings) and for
+the games a tunnel names no address for (one small budget between them). Over them, or once
+limits.MAX_PLAYERS records have a key, the XUID stays unbound and the game's next HELLOs try
+again.
 
 Transition. Raw keys are taken for XUIDs still bound to them until --raw-key-cutoff (unix time;
 env FORZA_RAW_KEY_CUTOFF), and bind no new XUID after it; counters of their use are logged and on
@@ -67,12 +69,18 @@ nothing are checked once a minute (HELLO_RECHECK), not every 5 s. A check is cha
 for it before the server's own budget (VERIFY_RATE): to its TCP connection (CONN_CHECKS), to its
 player's HELLOs (HELLO_CHECKS) and to its address (SOURCE_CHECKS; one pool, POOL_CHECKS, for the
 clients of a tunnel that names no address). An address whose signatures keep failing (BAD_LIMIT
-in BAD_WINDOW s) gets no checks for BAD_SKIP s, and one warning in the log. Nothing is counted
-against the XUID a request names: anyone can name another player's. A HELLO is checked only
-when it could be right: one for an XUID bound to another key, or sent before its address was told
-its challenge, is refused without a check. So floods of bad signatures cannot take the CPU, nor
-one sender the checks of the others. A HELLO left unchecked proves nothing, unless it is an
-unchanged keep-alive."""
+in BAD_WINDOW s) gets no checks from its budget for BAD_SKIP s, and one warning in the log.
+  An address is not a player: a household, a carrier's NAT or a VPN exit is many, and behind a
+tunnel a UDP source may be forged. So what an address's budget and failures decide is only what
+the unproven get. A connection or registration whose signature for an XUID checked out (Client)
+has that key's own budget (KEY_CHECKS) for that XUID whenever its address's is spent or stopped,
+and one that has had no check yet gets its first from the server's reserve (FIRST_CHECKS), which
+a check that fails does not give back: whoever shares an address with a flood of bad signatures
+still proves its key and goes on. Nothing is counted against the XUID a request merely names:
+anyone can name another player's. A HELLO is checked only when it could be right: one for an XUID
+bound to another key, or sent before its address was told its challenge, is refused without a
+check. So floods of bad signatures cannot take the CPU, nor one sender the checks of the others.
+A HELLO left unchecked proves nothing, unless it is an unchanged keep-alive."""
 
 import collections
 import contextvars
@@ -84,6 +92,7 @@ import struct
 import time
 
 from forza_live.core import ed25519
+from forza_live.core import limits
 
 log = logging.getLogger("forza-live")
 
@@ -110,12 +119,18 @@ HELLO_CHECKS = (0.5, 6)  # HELLO signature checks per second and burst, one play
 SOURCE_CHECKS = (20, 100)
 CONN_CHECKS = (20, 100)
 POOL_CHECKS = (100, 200)
-# An address (or, for a client without one, a TCP connection) whose signatures fail BAD_LIMIT
-# times in BAD_WINDOW s gets no checks for BAD_SKIP s. A game signs with the challenge it was
-# told and the key it has, so its signatures fail only a few at a time (after a restart of the
-# server, or as another installation's XUID).
+# What a client that proved a key has of its own for that key's XUID when its address's budget is
+# spent or stopped (all the connections and registrations that proved the key together), and the
+# server's reserve for the first check of a client that finds its address's so: one each, which
+# comes back when the signature checks out.
+KEY_CHECKS = (2, 30)
+FIRST_CHECKS = (50, 100)
+# An address, a TCP connection or a key (KEY_CHECKS) whose signatures fail BAD_LIMIT times in
+# BAD_WINDOW s gets no checks from that budget for BAD_SKIP s. A game signs with the challenge it
+# was told and the key it has, so its signatures fail only a few at a time (after a restart of
+# the server, or as another installation's XUID).
 BAD_LIMIT, BAD_WINDOW, BAD_SKIP = 40, 60.0, 60.0
-MAX_SOURCES = 20000  # addresses remembered for it; beyond them a new one is charged to the pool
+MAX_SOURCES = 20000  # addresses (and keys) remembered for it; beyond them a new one is charged to the pool
 # First-use bindings (FirstUse): per second and burst. One address: as many at once as it may
 # have players (server.MAX_PEERS_PER_IP), then as many an hour. The whole server: signed games,
 # whose address answered a challenge, and games before signed requests, whose raw key binds
@@ -123,6 +138,9 @@ MAX_SOURCES = 20000  # addresses remembered for it; beyond them a new one is cha
 FIRST_USE_SOURCE = (16 / 3600.0, 16)
 FIRST_USE_SIGNED = (2.0, 60)
 FIRST_USE_RAW = (1 / 60.0, 10)
+# All the tunnelled games without an address together, in place of an address's: they cannot be
+# told apart (server.source_key), so each socket having a budget would be none at all.
+FIRST_USE_POOL = (1 / 30.0, 32)
 UPGRADE_GRACE = 30 * 86400  # seconds after --raw-key-cutoff that upgrades are still taken
 HELLO_RECHECK = 60.0  # seconds a proven peer's unchanged keep-alive HELLOs are not checked again
 LINKED_ELSEWHERE = ("this account is linked to another installation. To get it back, ask on "
@@ -281,10 +299,9 @@ def binding(record):
 
 
 def rebind(store, xuid, pub, why):
-    p = store.get(xuid, create=True)
+    p = store.get(xuid, create=True, own=True)
     old = binding(p)
-    p["pub"], p["key"] = pub.hex(), ""
-    store.dirty = True
+    store.bind(p, pub=pub.hex())
     COUNTS[why] += 1
     for fn in getattr(store, "on_rebind", ()):
         fn(xuid, old, binding(p))
@@ -327,11 +344,12 @@ def told(key, level, message, *args):
 
 
 class Source:
-    """One client address's signature checks: its budget, and its signatures that failed."""
+    """One budget of signature checks (an address's, a key's, a connection's count): its tokens,
+    and its signatures that failed."""
     __slots__ = ("bucket", "bad", "since", "skip", "seen")
 
-    def __init__(self, now):
-        self.bucket = [float(SOURCE_CHECKS[1]), now]
+    def __init__(self, now, burst=None):
+        self.bucket = [float(SOURCE_CHECKS[1] if burst is None else burst), now]
         self.bad, self.since, self.skip, self.seen = 0, now, 0.0, now
 
     def failed(self, now):
@@ -345,24 +363,50 @@ class Source:
         return True
 
 
+def remembered(sources, key, now, burst=None):
+    """The Source of `key` in `sources`, made when there is room (MAX_SOURCES); else None."""
+    found = sources.get(key)
+    if found is None:
+        if len(sources) >= MAX_SOURCES:
+            for old in [k for k, s in sources.items()
+                        if now - s.seen > 2 * BAD_WINDOW and now >= s.skip]:
+                del sources[old]
+            if len(sources) >= MAX_SOURCES:
+                return None
+        found = sources[key] = Source(now, burst)
+    found.seen = now
+    return found
+
+
 class Checks:
-    """One server's budgets of signature checks per client address, and the pool's (a
-    friends.Store has one)."""
+    """One server's budgets of signature checks: per client address, per proven key, the pool's
+    and the reserve for first checks (a friends.Store has one)."""
 
     def __init__(self):
+        now = time.monotonic()
         self.sources = {}  # client address -> Source
-        self.pool = [float(POOL_CHECKS[1]), time.monotonic()]
+        self.keys = {}  # XUID a client proved -> Source (KEY_CHECKS)
+        self.pool = [float(POOL_CHECKS[1]), now]
+        self.first = [float(FIRST_CHECKS[1]), now]
 
 
 CHECKS = Checks()  # for a Client made without one
 
+BY_ADDRESS, BY_KEY, BY_RESERVE = "address", "key", "reserve"  # what paid for a Client's check
+
 
 class Client:
-    """Who asks for signature checks. `address`: the client's own (a tunnelled one's from its
-    PROXY header), or None when it is unknown: a tunnel that names none, whose clients share
-    POOL_CHECKS. A TCP connection (`connection`) has a budget and a count of failed signatures
-    of its own besides, and remembers that a call on it was signed by its player's key
-    (`proved`: server.http_handler keeps such a connection open between calls)."""
+    """Who asks for signature checks: a TCP connection (`connection`), or a player's UDP
+    registration (checker). `address`: its own (a tunnelled one's from its PROXY header), or None
+    when it is unknown: a tunnel that names none, whose clients share POOL_CHECKS. A TCP
+    connection has a budget and a count of failed signatures of its own besides.
+
+    `keys`: the XUIDs it proved here, with a signature of the key each is bound to (prove). For
+    those it does not depend on its address, which others share or may claim: when the address's
+    budget is spent or stopped, their checks come from the key's own (KEY_CHECKS). Before it has
+    had any check, its first comes from the server's reserve in that case. `proved`, `player` and
+    `used`: a title call on it was signed by its player's key, whose, and when last
+    (server.http_handler keeps such a connection open between calls)."""
 
     def __init__(self, address=None, connection=False, checks=None):
         now = time.monotonic()
@@ -370,55 +414,103 @@ class Client:
         self.checks = CHECKS if checks is None else checks
         self.bucket = [float(CONN_CHECKS[1]), now] if connection else None
         self.own = Source(now) if connection else None
-        self.proved = False
+        self.keys = set()
+        self.tried = False  # it has had a check
+        self.paid = None  # what its last check was charged to (BY_ADDRESS, BY_KEY or BY_RESERVE)
+        # Its last check was refused for signatures that failed, not for a budget that refills
+        # in a moment: no use asking again at once (server.lsp_answer).
+        self.halted = False
+        self.proved, self.player, self.used = False, 0, 0.0
 
     def source(self, now):
         """The Source of its address; None for no address, or too many to remember."""
         if self.address is None:
             return None
-        sources = self.checks.sources
-        found = sources.get(self.address)
-        if found is None:
-            if len(sources) >= MAX_SOURCES:
-                for address in [a for a, s in sources.items()
-                                if now - s.seen > 2 * BAD_WINDOW and now >= s.skip]:
-                    del sources[address]
-                if len(sources) >= MAX_SOURCES:
-                    return None
-            found = sources[self.address] = Source(now)
-        found.seen = now
-        return found
+        return remembered(self.checks.sources, self.address, now)
 
-    def may_check(self):
-        """A check from its budgets, in front of the server's: False when it gets none."""
+    def may_check(self, xuid=0):
+        """A check of a signature for `xuid` from its budgets, in front of the server's: False
+        when it gets none."""
         now = time.monotonic()
+        self.paid, self.halted = None, False
         if self.own is not None and now < self.own.skip:
             COUNTS["checks skipped after bad signatures"] += 1
-            return False
-        source = self.source(now)
-        if source is not None and now < source.skip:
-            COUNTS["checks skipped after bad signatures"] += 1
+            self.halted = True
             return False
         if self.bucket is not None and not spend(self.bucket, CONN_CHECKS):
             COUNTS["checks over a connection's budget"] += 1
             return False
-        if not (spend(source.bucket, SOURCE_CHECKS) if source is not None
-                else spend(self.checks.pool, POOL_CHECKS)):
+        source = self.source(now)
+        stopped = source is not None and now < source.skip
+        if not stopped and (spend(source.bucket, SOURCE_CHECKS) if source is not None
+                            else spend(self.checks.pool, POOL_CHECKS)):
+            self.paid = BY_ADDRESS
+            return True
+        # Its address's budget is spent or stopped, by whoever is there (or says so). What it
+        # proved itself still counts: the key's own budget, or its first check from the reserve.
+        soon = False  # a budget that refills in a moment had none: asking again may do
+        if xuid in self.keys:
+            key = remembered(self.checks.keys, xuid, now, KEY_CHECKS[1])
+            if key is not None and now >= key.skip:
+                if spend(key.bucket, KEY_CHECKS):
+                    COUNTS["checks on a key's own budget"] += 1
+                    self.paid = BY_KEY
+                    return True
+                soon = True
+        elif not self.tried:
+            if spend(self.checks.first, FIRST_CHECKS):
+                COUNTS["first checks from the reserve"] += 1
+                self.paid = BY_RESERVE
+                return True
+            soon = True
+        if stopped:
+            COUNTS["checks skipped after bad signatures"] += 1
+            self.halted = not soon
+        else:
             COUNTS["checks over an address's budget" if source is not None
                    else "checks over the pool's budget"] += 1
-            return False
-        return True
+        return False
 
-    def failed(self):
+    def unchecked(self):
+        """The check it was given (may_check) was not made after all (the server's own budget
+        had none): what the reserve gave comes back."""
+        if self.paid == BY_RESERVE:
+            self.checks.first[0] = min(float(FIRST_CHECKS[1]), self.checks.first[0] + 1)
+
+    def checked(self, good, xuid=0):
+        """The check it was given (may_check) is done: a signature that did not check out is
+        counted against what paid for it."""
+        self.tried = True
+        if good:
+            self.unchecked()  # only those that fail cost the reserve
+            return
+        self.failed(xuid)
+
+    def failed(self, xuid=0):
         """One of its signatures did not check out."""
         now = time.monotonic()
-        source = self.source(now)
-        stopped = [s for s in (source, self.own) if s is not None and s.failed(now)]
-        if stopped:
+        what = []
+        if self.own is not None and self.own.failed(now):
+            what.append("this connection")
+        if self.paid == BY_KEY:
+            key = self.checks.keys.get(xuid)
+            if key is not None and key.failed(now):
+                what.append("the key's own budget")
+        else:
+            source = self.source(now)
+            if source is not None and source.failed(now):
+                what.append("its address's budget")
+        if what:
             COUNTS["bad signature sources"] += 1
-            log.warning("auth: %d signatures from %s did not check out within %d s: no checks for "
-                        "it for %d s", BAD_LIMIT, self.address or "a connection without an address",
-                        BAD_WINDOW, BAD_SKIP)
+            log.warning("auth: %d signatures from %s did not check out within %d s: no checks from "
+                        "%s for %d s", BAD_LIMIT, self.address or "a connection without an address",
+                        BAD_WINDOW, " and ".join(what), BAD_SKIP)
+
+    def prove(self, xuid):
+        """A signature of the key `xuid` is bound to checked out here (and was no replay)."""
+        if len(self.keys) >= 16:  # a game has one profile at a time
+            self.keys.clear()
+        self.keys.add(xuid)
 
 
 def client():
@@ -436,17 +528,19 @@ def leave(entered):
     _client.reset(entered)
 
 
-def checked_signature(pub, text, sig, who=None):
-    """ed25519.verify within the budgets of who asks (a Client, or None) and the server's: None
-    when over one."""
-    if who is not None and not who.may_check():
+def checked_signature(pub, text, sig, who=None, xuid=0):
+    """ed25519.verify of a signature for `xuid` within the budgets of who asks (a Client, or
+    None) and the server's: None when over one."""
+    if who is not None and not who.may_check(xuid):
         return None
     if not spend(_budget, VERIFY_RATE):
         COUNTS["checks over budget"] += 1
+        if who is not None:
+            who.unchecked()
         return None
     good = ed25519.verify(pub, text, sig)
-    if not good and who is not None:
-        who.failed()
+    if who is not None:
+        who.checked(good, xuid)
     return good
 
 
@@ -496,7 +590,7 @@ def check_request(store, method, target, headers, body, now=None):
         return None
     a = parse_header(value)
     if a is None:
-        refused("malformed", 0, "%s %s" % (method, target[:60]))
+        refused("malformed", 0, "%s %s" % (method, limits.loggable(target)[:60]))
         return Checked(False, 0, "malformed")
     now = time.time() if now is None else now
     xuid = a["xuid"]
@@ -512,15 +606,20 @@ def check_request(store, method, target, headers, body, now=None):
     else:
         text = request_canonical(method, target, a["server"], xuid, a["time"], a["nonce"],
                                  headers, body)
-        good = checked_signature(pub, text, a["signature"], _client.get())
+        who = _client.get()
+        good = checked_signature(pub, text, a["signature"], who, xuid)
         if good is None:
             why = "busy"
         elif not good:
             why = "signature"
         elif seen_nonce(a["nonce"]):
             why = "replay"
+            if who is not None:  # a call somebody else made: it cost a check all the same
+                who.failed(xuid)
+        elif who is not None:
+            who.prove(xuid)
     if why:
-        refused(why, xuid, headers.get("x-method") or target[:60], detail)
+        refused(why, xuid, headers.get("x-method") or limits.loggable(target)[:60], detail)
         return Checked(False, xuid, why)
     COUNTS["signed"] += 1
     return Checked(True, xuid)
@@ -604,10 +703,24 @@ def source_of(peer):
     return getattr(peer, "source", None) or peer.addr[0]
 
 
+def answered(peer):
+    """The peer's game answered the challenge the server sent to its address: a signature over it
+    by the key its XUID is bound to checked out. So it is where it says it is (a forged source
+    never sees the challenge) and whose XUID it names."""
+    was = getattr(peer, "auth_proved", None)
+    return (bool(getattr(peer, "friends_ok", False)) and was is not None
+            and was[3] == getattr(peer, "auth_challenge", None))
+
+
 def checker(store, peer):
-    """The Client a peer's HELLO checks are charged to: its address, or the pool without one."""
+    """The Client a peer's HELLO checks are charged to, kept with the registration: its address
+    (the pool without one), and for an XUID it signed for here (hello) that key's own budget."""
     source = source_of(peer)
-    return Client(source if isinstance(source, str) else None, checks=getattr(store, "checks", None))
+    who = getattr(peer, "auth_client", None)
+    if who is None:
+        who = peer.auth_client = Client(checks=getattr(store, "checks", None))
+    who.address = source if isinstance(source, str) else None
+    return who
 
 
 def origin(peer):
@@ -620,31 +733,40 @@ def origin(peer):
 
 class FirstUse:
     """The budgets of first-use bindings (friends.Store has one): each takes one from its source
-    (FIRST_USE_SOURCE) and one from the whole server's, for signed games or for raw keys."""
+    (FIRST_USE_SOURCE; FIRST_USE_POOL for all the games without an address together) and one
+    from the whole server's, for signed games or for raw keys. A raw key's source is charged
+    apart from a signed game's: one datagram with a forged source binds a raw key, and must not
+    spend what the games that are at that address have."""
 
     def __init__(self):
         now = time.monotonic()
         self.sources = {}
+        self.pool = [float(FIRST_USE_POOL[1]), now]
         self.signed = [float(FIRST_USE_SIGNED[1]), now]
         self.raw = [float(FIRST_USE_RAW[1]), now]
 
     def buckets(self, source, raw):
         now = time.monotonic()
-        mine = self.sources.get(source)
-        if mine is None:
-            if len(self.sources) > MAX_SOURCES:  # forged sources: only those not yet refilled stay
-                rate, burst = FIRST_USE_SOURCE
-                self.sources = {k: b for k, b in self.sources.items()
-                                if b[0] + (now - b[1]) * rate < burst}
-            mine = self.sources[source] = [float(FIRST_USE_SOURCE[1]), now]
-        return (mine, FIRST_USE_SOURCE), ((self.raw, FIRST_USE_RAW) if raw else (self.signed, FIRST_USE_SIGNED))
+        if not isinstance(source, str):  # a tunnelled game without an address: the pool
+            mine = (self.pool, FIRST_USE_POOL)
+        else:
+            key = ("raw", source) if raw else source
+            bucket = self.sources.get(key)
+            if bucket is None:
+                if len(self.sources) > MAX_SOURCES:  # forged sources: only those not yet refilled stay
+                    rate, burst = FIRST_USE_SOURCE
+                    self.sources = {k: b for k, b in self.sources.items()
+                                    if b[0] + (now - b[1]) * rate < burst}
+                bucket = self.sources[key] = [float(FIRST_USE_SOURCE[1]), now]
+            mine = (bucket, FIRST_USE_SOURCE)
+        return mine, ((self.raw, FIRST_USE_RAW) if raw else (self.signed, FIRST_USE_SIGNED))
 
     def short(self, source, raw=False):
-        """None when a binding is left for `source`, else the budget that has none: "source" or
-        "server"."""
+        """None when a binding is left for `source`, else the budget that has none: "source",
+        "pool" or "server"."""
         mine, server = self.buckets(source, raw)
         if not room(*mine):
-            return "source"
+            return "source" if isinstance(source, str) else "pool"
         return None if room(*server) else "server"
 
     def take(self, source, raw=False):
@@ -660,10 +782,11 @@ def first_use(store, peer, raw=False, take=True):
     """Whether the peer's XUID, which has no key on record, may be bound now: the store has room
     for its record and the budgets (FirstUse) have a binding left, which `take` spends."""
     full = getattr(store, "full", None)
-    if full is not None and full() and store.get(peer.xuid) is None:
+    if full is not None and full():
         COUNTS["first use refused"] += 1
-        told("store full", logging.WARNING, "auth: no room for another player's key (%d records, "
-             "FORZA_MAX_PLAYERS): new players stay unbound", len(store.players))
+        peer.auth_full = True
+        told("store full", logging.WARNING, "auth: no room for another player's key (%d records "
+             "have one, FORZA_MAX_PLAYERS): new players stay unbound", store.keyed)
         return False
     budgets = getattr(store, "first_use", None)
     if budgets is None:
@@ -677,6 +800,10 @@ def first_use(store, peer, raw=False, take=True):
     if why == "server":
         told(("first use", raw), logging.WARNING, "auth: more new %s than the server binds at once: "
              "the others are bound at a later HELLO", "raw friends keys" if raw else "players")
+    elif why == "pool":
+        told(("first use", "pool"), logging.WARNING, "auth: more new players without an address of "
+             "their own (through the tunnel) than the server binds at once: the others are bound "
+             "later")
     else:
         told(("first use", source), logging.WARNING, "auth: more new players from %s than one "
              "address binds in an hour: the others are bound later", origin(peer))
@@ -732,6 +859,7 @@ def hello(store, peer, data, signed, now=None):
     xuid = peer.xuid
     nonce = challenge(peer)
     peer.auth_checked = peer.auth_outdated = peer.auth_conflict = peer.auth_waiting = False
+    peer.auth_full = False
     # An empty slot: a game that signs, before it has the challenge (its first HELLO).
     peer.auth_pending = not data
     if len(data) == KEY_SIZE:  # a raw key: a game before signed requests
@@ -802,12 +930,16 @@ def hello(store, peer, data, signed, now=None):
     if not spend(budget, HELLO_CHECKS):
         COUNTS["hello checks skipped"] += 1
         return unchanged
-    good = checked_signature(pub, hello_text(name, xuid, when, nonce, signed), sig, checker(store, peer))
+    who = checker(store, peer)
+    good = checked_signature(pub, hello_text(name, xuid, when, nonce, signed), sig, who, xuid)
     if good is None:
         return unchanged
     if not good:
         refused("signature", xuid, what, " from %s" % origin(peer))
         return False
+    # Its key's signature for this XUID over its own challenge: whatever comes of this HELLO (a
+    # first use may have to wait), the registration's later checks for the XUID are its own.
+    who.prove(xuid)
     if have is not None:
         COUNTS["signed hello"] += 1
         return proved(peer, same)
@@ -835,6 +967,8 @@ def refusal(peer, off):
         return "%s: %s" % (off, LINKED_ELSEWHERE)
     if getattr(peer, "auth_outdated", False):
         return "%s: this version of the game is too old for this server. Update the game" % off
+    if getattr(peer, "auth_full", False):
+        return "%s for now: this server has no room for another new player. Try again later" % off
     if getattr(peer, "auth_waiting", False):
         return "%s for now: the server is signing in many new players and will get to this one" % off
     return None

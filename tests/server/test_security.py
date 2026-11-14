@@ -108,6 +108,48 @@ class AdminTokenTest(unittest.TestCase):
         self.assertFalse(self.ask(self.LONG, ip="192.0.2.10"))
         self.assertTrue(self.ask(self.LONG, ip="192.168.1.5"))
 
+    def test_the_agent_on_this_machine_cannot_lock_the_operator_out(self):
+        """With the tunnel's agent on this machine and no PROXY protocol, every request through
+        the tunnel comes from loopback, as the operator's own do: ten wrong tokens from outside
+        locked the operator's own requests out, five minutes at a time."""
+        limits.configure_proxies("127.0.0.1")
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            for i in range(lsp.TOKEN_FAILS + 5):
+                self.assertFalse(self.ask("guess-%d" % i, ip="127.0.0.1"))
+        self.assertEqual(len(logs.output), lsp.TOKEN_FAILS)  # counted and logged, then quiet
+        self.assertIn("a wrong admin token from this machine", logs.output[0])
+        self.assertIn("no more of them are logged", logs.output[-1])
+        self.assertNotIn("guess", "\n".join(logs.output))
+        self.assertTrue(self.ask(self.LONG, ip="127.0.0.1"))  # the operator's own request
+        self.assertTrue(self.ask(self.LONG, ip="127.0.0.1", query=True))
+        self.assertFalse(lsp.is_admin(("127.0.0.1", 1), {}, {}))  # and still none without the token
+        # an agent elsewhere is nobody's but the tunnel's: locked as before
+        limits.configure_proxies("127.0.0.1, 192.0.2.10")
+        with self.assertLogs("forza-live", "WARNING"):
+            for i in range(lsp.TOKEN_FAILS):
+                self.assertFalse(self.ask("guess-%d" % i, ip="192.0.2.10"))
+        self.assertFalse(self.ask(self.LONG, ip="192.0.2.10"))
+
+    def test_a_short_token_keeps_the_lock_there(self):
+        """A token short enough to be guessed is worth more than the operator's five minutes."""
+        limits.configure_proxies("127.0.0.1")
+        lsp.ADMIN_TOKEN = "s3cret"
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            lsp.check_admin_token()
+            for i in range(lsp.TOKEN_FAILS):
+                self.assertFalse(self.ask("guess-%d" % i, ip="127.0.0.1"))
+        self.assertIn("lock this machine's own requests out", logs.output[0])
+        self.assertIn("no token is taken from it", logs.output[-1])
+        self.assertFalse(self.ask("s3cret", ip="127.0.0.1"))
+
+    def test_ipv6_addresses_are_counted_by_their_64(self):
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            for i in range(lsp.TOKEN_FAILS):
+                self.assertFalse(self.ask("guess-%d" % i, ip="2a02:26f0:1:2::%x" % (1 + i)))
+        self.assertIn("from 2a02:26f0:1:2::/64", logs.output[0])
+        self.assertFalse(self.ask(self.LONG, ip="2a02:26f0:1:2:ffff::99"))
+        self.assertTrue(self.ask(self.LONG, ip="2a02:26f0:1:3::1"))
+
     def test_a_placeholder_is_no_token(self):
         for placeholder in ("choose-a-long-random-token", "choose-a-token", "Choose-A-Long-Random-Token "):
             lsp.ADMIN_TOKEN = placeholder
@@ -137,6 +179,10 @@ class AdminTokenTest(unittest.TestCase):
         self.assertEqual(lsp.loggable("/gift?to=x&token=%s&credits=5" % self.LONG), "/gift?to=x&token=...&credits=5")
         self.assertEqual(lsp.loggable("/world/event?TOKEN=abc"), "/world/event?TOKEN=...")
         self.assertEqual(lsp.loggable("/leaderboards?board=1"), "/leaderboards?board=1")
+        # however the name is written: the server reads it after decoding
+        self.assertEqual(lsp.loggable("/gift?%74oken=abc&to=x"), "/gift?%74oken=...&to=x")
+        self.assertEqual(lsp.loggable("/gift?to=x&tok%65n=abc#x"), "/gift?to=x&tok%65n=...#x")
+        self.assertEqual(lsp.loggable("/gift"), "/gift")
         with self.assertLogs("forza-live", "INFO") as logs:
             lsp.handle(None, "GET", "/gift?to=nobody&credits=1&token=" + self.LONG, {}, b"", ("203.0.113.9", 1))
         self.assertNotIn(self.LONG, "\n".join(logs.output))

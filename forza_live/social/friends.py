@@ -38,8 +38,11 @@ Message FRIEND (UDP kind 22), body op u8 then (big endian; strings u8 length + U
 Limits: MAX_FRIENDS friends, MAX_PENDING requests waiting each way, MAX_BLOCKED blocks;
 REQUESTS_PER_MIN requests sent, ACTIONS_PER_MIN other changes, SEARCHES_PER_MIN searches
 per player. A request to a player who blocked you looks sent but is dropped. The file holds at
-most limits.MAX_PLAYERS records (the cap of the player records), and new bindings come at a
-bounded rate (auth.FirstUse), so no sender can grow it without end.
+most limits.MAX_PLAYERS records with a key (the cap of the player records; new bindings come at a
+bounded rate, auth.FirstUse) and as many without one, which only other players' actions make (a
+name someone blocked, a request to a player who has not signed in with a key): those never take
+a new player's place, and the oldest that hold nothing but a name go when there are too many. So
+no sender can grow the file without end, nor keep new players out of it.
 """
 
 import hashlib
@@ -75,6 +78,9 @@ SEARCHES_PER_MIN = 30
 LISTS = (0.5, 4)  # list answers per second and burst
 # A record with no key, friends, requests or blocks (a name someone blocked) is forgotten after this
 FORGET_DAYS = 180
+# When the records without a key are at their cap and none of them can go (Store.spare), the
+# store is not searched again for this long: the search reads every record.
+SPARE_SEARCH = 60.0
 KEY_SIZE = 16
 STATUS_MAX = 60
 
@@ -100,7 +106,7 @@ def key_hash(key):
 
 
 class Full(Exception):
-    """The store holds limits.MAX_PLAYERS records: no room for another."""
+    """The store has no room for another record without a key (Store.get)."""
 
 
 class Store:
@@ -116,25 +122,77 @@ class Store:
         self.on_rebind = []  # fn(xuid, old binding, new binding): auth.rebind
         self.first_use = auth.FirstUse()  # the budgets of new bindings
         self.checks = auth.Checks()  # and of signature checks per client address
+        # The records with a key ("pub" or "key"): counted as they are bound (bind) and again
+        # at every load and save.
+        self.keyed = 0
+        self.searched = 0.0  # monotonic time until which spare() does not look for room again
 
     @staticmethod
     def hx(xuid):
         return "%016X" % xuid
 
-    def full(self):
-        """No room for a new record (records already here stay, and are all loaded)."""
-        return len(self.players) >= limits.MAX_PLAYERS
+    @staticmethod
+    def has_key(p):
+        return bool(p.get("pub") or p.get("key"))
 
-    def get(self, xuid, create=False):
+    def count(self):
+        self.keyed = sum(1 for p in self.players.values() if self.has_key(p))
+
+    def full(self):
+        """No room for another player's key: limits.MAX_PLAYERS records have one (records
+        already here stay, and are all loaded). Only a player's own first sign-in makes such a
+        record, so nothing anyone else does fills this."""
+        return self.keyed >= limits.MAX_PLAYERS
+
+    def spare(self):
+        """Whether a record without a key may be added: there are fewer than limits.MAX_PLAYERS
+        of them, once those that hold nothing but a name (the oldest first) have made room."""
+        cap = limits.MAX_PLAYERS
+        if len(self.players) - self.keyed < cap:
+            return True
+        now = time.monotonic()
+        if now < self.searched:  # looked a moment ago, and found none to drop
+            return False
+        self.count()  # exact, before anything is dropped for it
+        over = len(self.players) - self.keyed - cap
+        if over < 0:
+            return True
+        names = sorted((p["seen"], k) for k, p in self.players.items()
+                       if not self.has_key(p) and not (p["friends"] or p["in"] or p["out"]
+                                                       or p["blocked"] or p.get("muted")))
+        for _, k in names[:over + max(1, cap // 10)]:  # a tenth at once: not a scan for each
+            del self.players[k]
+            self.dirty = True
+        if len(self.players) - self.keyed < cap:
+            return True
+        self.searched = now + SPARE_SEARCH
+        return False
+
+    def get(self, xuid, create=False, own=False):
+        """The XUID's record, made when `create`. `own`: for the key its player is being bound
+        to (the caller saw to full()); else a record without a key, which Full refuses when
+        there is no room for one (the message that asked for it is dropped,
+        server.datagram_received, or answered without it)."""
         k = self.hx(xuid)
         p = self.players.get(k)
         if p is None and create:
-            if self.full():  # the message that asked for it is dropped (server.datagram_received)
-                raise Full("friends store full: %d records" % len(self.players))
+            if not own and not self.spare():
+                raise Full("friends store: no room for a record without a key (%d records)"
+                           % len(self.players))
             p = self.players[k] = {"name": "", "seen": time.time(), "key": "", "friends": {},
                                    "in": {}, "out": {}, "blocked": {}}
             self.dirty = True
         return p
+
+    def bind(self, p, pub="", key=""):
+        """Binds the record to a public key (hex), or to the SHA-256 of a raw friends key."""
+        if not self.has_key(p):
+            self.keyed += 1
+        if pub:
+            p["pub"], p["key"] = pub, ""
+        else:
+            p["key"] = key
+        self.dirty = True
 
     def relation(self, a, b):
         """What b is to a (FRIEND, INCOMING, OUTGOING, BLOCKED, or 0)."""
@@ -166,15 +224,18 @@ class Store:
     def claim(self, xuid, key):
         """True if this raw friends key may use the XUID's friends (binding it on first use).
         Never for an XUID bound to a public key (auth.py)."""
-        if len(key) != KEY_SIZE or (self.full() and self.get(xuid) is None):
+        if len(key) != KEY_SIZE:
             return False
-        p = self.get(xuid, create=True)
+        p = self.get(xuid)
+        if (p is None or not self.has_key(p)) and self.full():
+            return False
+        if p is None:
+            p = self.get(xuid, create=True, own=True)
         if p.get("pub"):
             return False
         h = key_hash(key)
         if not p["key"]:
-            p["key"] = h
-            self.dirty = True
+            self.bind(p, key=h)
             return True
         return p["key"] == h
 
@@ -242,7 +303,9 @@ class Store:
             self.players = {k: p for k, p in players.items()
                             if p["friends"] or p["in"] or p["out"] or p["blocked"]
                             or p.get("pub") or p.get("key") or p["seen"] >= cutoff}
-            log.info("friends: %d player(s) from %s", len(self.players), self.path)
+            self.count()
+            log.info("friends: %d player(s) from %s, %d with a key", len(self.players), self.path,
+                     self.keyed)
         except FileNotFoundError:
             pass
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
@@ -261,6 +324,7 @@ class Store:
             return False
         self.dirty = False
         self.saved = time.monotonic()
+        self.count()
         return True
 
     def maybe_save(self):
@@ -457,8 +521,13 @@ class Friends:
         if other == me:
             self.tell(peer, "That's you")
             return
-        for p in self.online(other):  # it may have signed in before it had the feature
-            self.store.seen(other, p.name)
+        try:
+            for p in self.online(other):  # it may have signed in before it had the feature
+                self.store.seen(other, p.name)
+            theirs = self.store.get(other, True)
+        except Full:  # a player with no record, and no room for one without a key
+            self.tell(peer, "%s can't take friend requests right now" % (name or "That player"))
+            return
         tag = self.store.name(other)
         rel = self.store.relation(me, other)
         if rel == FRIEND:
@@ -473,7 +542,7 @@ class Friends:
         if rel == OUTGOING:
             self.tell(peer, "You already asked %s" % tag)
             return
-        mine, theirs = self.store.get(me, True), self.store.get(other, True)
+        mine = self.store.get(me, True)
         if len(mine["friends"]) >= MAX_FRIENDS:
             self.tell(peer, "Your friends list is full (%d)" % MAX_FRIENDS)
             return
@@ -532,7 +601,10 @@ class Friends:
             self.tell(peer, "You blocked %d players already" % MAX_BLOCKED)
             return
         if name and not self.store.get(other):
-            self.store.seen(other, name[:15])
+            try:  # the name the blocker saw, for its list: a record nobody's key is bound to
+                self.store.seen(other, name[:15])
+            except Full:
+                pass  # no room for one: blocked all the same, under the name its XUID gives
         self.store.block(me, other)
         log.info("friends #%d %r blocked %r", peer.id, peer.name, self.store.name(other))
         self.tell(peer, "%s is blocked" % self.store.name(other))
@@ -570,6 +642,6 @@ class Friends:
 
     def status(self):
         players = self.store.players.values()
-        return {"friends": {"players": len(self.store.players),
+        return {"friends": {"players": len(self.store.players), "with_key": self.store.keyed,
                             "friendships": sum(len(p["friends"]) for p in players) // 2,
                             "requests": sum(len(p["out"]) for p in players)}}

@@ -10,6 +10,7 @@ import ipaddress
 import os
 import time
 import unicodedata
+import urllib.parse
 import zlib
 
 MAX_BLOB = 2 << 20
@@ -79,6 +80,42 @@ def is_trusted_proxy(ip):
     except ValueError:
         return False
     return any(addr in net for net in TRUSTED_PROXIES)
+
+
+def address_key(ip):
+    """What the per-address limits count an address under: an IPv4 address as it is, an IPv6
+    one by its /64 (a subscriber has all of it, so each of its addresses would be a new budget;
+    the website accounts service counts the same way). An IPv4-mapped IPv6 address is the IPv4
+    one. Anything else is returned unchanged."""
+    if ":" not in ip:
+        return ip
+    try:
+        addr = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return ip
+    if addr.version == 4:
+        return str(addr)
+    if addr.ipv4_mapped is not None:
+        return str(addr.ipv4_mapped)
+    if addr.is_loopback:
+        return str(addr)
+    return str(ipaddress.ip_network((int(addr) >> 64 << 64, 64)))
+
+
+def loggable(path):
+    """A request's path for the log: without the value of a token= in its query (the operator's
+    token, however the name is written or encoded)."""
+    head, mark, query = path.partition("?")
+    if not mark:
+        return path
+    query, hash_mark, fragment = query.partition("#")
+    parts = []
+    for part in query.split("&"):
+        name, eq, _ = part.partition("=")
+        if eq and urllib.parse.unquote_plus(name).strip().lower() == "token":
+            part = name + "=..."
+        parts.append(part)
+    return head + "?" + "&".join(parts) + hash_mark + fragment
 
 
 # ---- Player-chosen display strings: plain ASCII only ----

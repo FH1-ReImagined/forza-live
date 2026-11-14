@@ -51,10 +51,10 @@ import argparse
 import collections
 import contextvars
 import hmac
+import ipaddress
 import json
 import logging
 import os
-import re
 import time
 import urllib.parse
 
@@ -879,8 +879,10 @@ def service_call(headers, body, server=None, http_method="POST", path="/Services
         # fails as a forged one does, which the game shows as a server it cannot sign in to.
         return x.failure(5, BANNED)
     state = verify_caller(server, xuid, headers, http_method, path, body)
-    if state == TRUSTED and auth.client() is not None:
-        auth.client().proved = True  # a game's connection: never closed for a newer one (server.py)
+    who = auth.client()
+    if state == TRUSTED and who is not None:
+        # A game's connection: not closed for a newer one while it is its player's (server.py)
+        who.proved, who.player, who.used = True, xuid, time.monotonic()
     if state == BUSY and changes_state(short, method):
         return BUSY_REPLY  # auth.py counted and logged it
     if state == FORGED and changes_state(short, method):
@@ -924,9 +926,17 @@ SHORT_TOKEN = 16  # characters: shorter, the start warns
 # through the tunnel without an address of their own count as one address, so nobody outside
 # can lock the operator's own (the LAN, this machine) out. Each wrong token is a warning in the
 # log with its address, never the token.
+#   One source is the operator's and the outside's at once: this machine, when the tunnel's
+# agent runs on it and names no address (no --proxy-protocol-tcp), so that every request through
+# the tunnel comes from loopback as the operator's own do. A lock there would be the outside's to
+# turn on the operator. A token of SHORT_TOKEN characters or more cannot be guessed at any rate
+# the server answers, so there it is taken whatever came before, and wrong ones are only counted
+# and logged. A shorter one keeps the lock there too (the start says so): guessing it is the
+# greater harm.
 TOKEN_FAILS, TOKEN_FAIL_WINDOW = 10, 300.0
 _token_fails = {}  # address -> deque of monotonic times
-TOKEN_IN_URL = re.compile(r"([?&]token=)[^&#\s]*", re.IGNORECASE)
+LOOPBACK = ("127.0.0.1", "::1")
+TUNNEL, SHARED = "the tunnel", "this machine (the tunnel's agent runs on it)"
 
 
 def admin_token():
@@ -941,22 +951,27 @@ def check_admin_token():
                   "Set a long random one (openssl rand -hex 32)")
     elif ADMIN_TOKEN and len(ADMIN_TOKEN) < SHORT_TOKEN:
         log.warning("FORZA_ADMIN_TOKEN has only %d characters: set a long random one (openssl rand "
-                    "-hex 32)", len(ADMIN_TOKEN))
+                    "-hex 32). While it is this short, wrong tokens through a tunnel agent on this "
+                    "machine lock this machine's own requests out too", len(ADMIN_TOKEN))
 
 
-def loggable(path):
-    """A request's path for the log: without the value of a ?token= (the operator's token)."""
-    return TOKEN_IN_URL.sub(r"\1...", path)
+loggable = limits.loggable  # a request's path for the log: without the value of a token=
 
 
 def token_source(peer):
     """What a token is counted against: the client's address (auth.Client: the PROXY header's
-    behind the tunnel), "the tunnel" for a tunnelled request without one, else the peer's."""
+    behind the tunnel; an IPv6 one by its /64), else the peer's; for a tunnelled request
+    without one TUNNEL, or SHARED when the tunnel's agent is on this machine."""
     who = auth.client()
     if who is not None and who.address:
         return who.address
     ip = peer[0] if peer else "?"
-    return "the tunnel" if limits.is_trusted_proxy(ip) else ip
+    if not limits.is_trusted_proxy(ip):
+        return limits.address_key(ip)
+    try:
+        return SHARED if ipaddress.ip_address(ip).is_loopback else TUNNEL
+    except ValueError:
+        return TUNNEL
 
 
 def token_locked(source, now=None):
@@ -969,15 +984,18 @@ def token_locked(source, now=None):
     return bool(fails) and len(fails) >= TOKEN_FAILS
 
 
-def token_failed(source, what, now=None):
-    """A wrong operator token from source: counted and logged."""
+def token_failed(source, what, now=None, lock=True):
+    """A wrong operator token from source: counted and logged. `lock`: whether TOKEN_FAILS of
+    them stop every token from it (is_admin), or only their log lines."""
     now = time.monotonic() if now is None else now
     if len(_token_fails) > 10000:
         _token_fails.clear()
     fails = _token_fails.setdefault(source, collections.deque())
     fails.append(now)
     log.warning("%s: a wrong admin token from %s%s", what, source,
-                " (%d in %d s: no token is taken from it for now)" % (len(fails), TOKEN_FAIL_WINDOW)
+                " (%d in %d s: %s for now)" % (len(fails), TOKEN_FAIL_WINDOW,
+                                                "no token is taken from it" if lock
+                                                else "no more of them are logged")
                 if len(fails) >= TOKEN_FAILS else "")
 
 
@@ -989,14 +1007,18 @@ def is_admin(peer, headers, query):
     given = headers.get("x-admin-token") or query.get("token", [""])[0]
     if given and admin_token():
         source = token_source(peer)
-        if not token_locked(source):
+        locked = token_locked(source)
+        # SHARED is the operator's own source too: a long token is taken from it all the same
+        open_to_all = source == SHARED and len(admin_token()) >= SHORT_TOKEN
+        if not locked or open_to_all:
             if hmac.compare_digest(given.encode(), admin_token().encode()):
                 return True
-            token_failed(source, "operator endpoints")
+            if not locked:
+                token_failed(source, "operator endpoints", lock=not open_to_all)
     proxied = "x-forwarded-for" in headers or "x-real-ip" in headers or "forwarded" in headers
     # Behind a tunnel agent on this machine every internet request comes from loopback:
     # a trusted proxy's address is not "this machine", only the token admits then.
-    return (bool(peer) and peer[0] in ("127.0.0.1", "::1") and not proxied
+    return (bool(peer) and peer[0] in LOOPBACK and not proxied
             and not limits.is_trusted_proxy(peer[0]))
 
 
