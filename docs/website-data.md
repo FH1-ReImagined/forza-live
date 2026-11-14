@@ -222,6 +222,11 @@ routes are on the HTTP port with the rest.
   `GET /community/img/<id>.png`. The website's `pages` workflow (its `tools/build_gallery.py`,
   `GALLERY_FEED_URL=http://your.host:21201`) copies them, re-encoded, into the
   site; a photo hidden or deleted here leaves the site at its next build.
+- The image and video files are [limited per address](configuration.md#the-photo-and-video-files)
+  as well as for the whole server (429 with `Retry-After`). A builder or web server on the
+  server's own machine or home network has no budget of its own. One at a public address has
+  an address's budget, sized for a whole build with an empty cache: it fetches what was
+  answered 429 at its next build, and can be listed in `FORZA_WEBSITE_ADDRESSES` to have none.
 - Published at once, unless `FORZA_COMMUNITY_HOLD=1` (new photos wait as `held` for the
   [screening worker](operating.md#automatic-screening) or the operator to release them).
   `FORZA_COMMUNITY_MAX_WIDTH` (default 1920) is the width a big shot's copy is halved down to.
@@ -252,7 +257,8 @@ limits: [title services](title_services.md#community-videos-forza_livecontentvid
   height, the MP4's and the poster's SHA-256 and URLs; no XUID), `GET /community/video/<id>.mp4`
   (with byte ranges, which a browser's player needs) and `GET /community/video/<id>.jpg` (the
   poster). The website's `tools/build_videos.py` copies them into the site, checked against
-  their SHA-256.
+  their SHA-256. The files have the photos' [limits per address](configuration.md#the-photo-and-video-files),
+  counted together with them.
 - Caps: 5 videos a day and 50 in all per player, 20 an hour and 20 waiting for the converter on
   the server; the files have a disk budget of their own, `FORZA_VIDEOS_CAP_MB` (2048), apart
   from `FORZA_DISK_CAP_MB`.

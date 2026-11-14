@@ -4,19 +4,28 @@ what one address may take of them (#63).
 Sending. A photo is up to 16 MiB and a video up to 32 MiB. FileBody is such a file, or a byte
 range of one, as an answer's body: the HTTP handler (server.send) reads and writes it PIECE bytes
 at a time and waits for the reader to take each piece, so no file is in memory whole and a
-reader that takes nothing for server.DRAIN_SECONDS is dropped.
+reader that takes nothing for server.DRAIN_SECONDS is dropped. Only these answers have that
+time limit (the operator's views of the same files too): the game's title calls are written
+as they always were.
 
 Budgets. Each route has one budget for the whole server (community.IMAGES_PER_MINUTE,
-videos.MEDIA_PER_MINUTE). Alone it let one address use it up for everyone, so each address has
-its own besides, for the two routes together (Budget):
+videos.MEDIA_PER_MINUTE: 600 a minute each). Alone it let one address use it up for everyone,
+so each address has its own besides, for the two routes together (Budget):
 
-- REQUESTS: so many at once, then so many a second. An address over it gets 429 with
-  Retry-After before its request is looked at, and that request does not count in the server's
-  budget.
-- BYTES: so many at once, then so many a second, counted as they are sent: an answer is charged
+- REQUESTS: 300 at once, then 2 a second. An address over it gets 429 with Retry-After before
+  its request is looked at, and that request does not count in the server's budget: one address
+  takes at most 420 of a route's 600 in a minute, then 120.
+- BYTES: 2 GiB at once, then 512 KiB a second, counted as they are sent: an answer is charged
   whole when it starts and what was not sent (the reader left, or was dropped) is given back. An
   address with nothing left gets 429; one with anything left gets its answer, so the bucket can
   go below nothing by one answer at most.
+
+What is taken at once is a website build with an empty cache, the largest thing one address
+asks for in good faith: the builders fetch at most 500 photos and 100 videos with their posters
+(700 files one after another, all answered at up to 3.5 a second) and 700 MB of video beside
+the photos. An item refused with 429 is left for the next build. What comes back each second
+is above a visitor's or a later build's use (the items new since the last one) and a fifth of
+a route's budget.
 
 An address is what the server already counts connections and signature checks under
 (auth.Client.address): the peer's, an IPv6 one by its /64 (limits.address_key), and behind the
@@ -26,7 +35,8 @@ tunnel the one its PROXY header names. No budget of its own (the server's still 
   agent: the home network and this machine, where the website's own web server and builder
   fetch the feeds' files from one address for every visitor;
 - the addresses of --website-address (FORZA_WEBSITE_ADDRESSES), for a web server or builder
-  that reaches the server from a public address or through the tunnel;
+  that reaches the server from a public address or through the tunnel; an IPv6 one stands for
+  its /64, as it is counted;
 - the tunnel's connections that name no address (no --proxy-protocol-tcp): they cannot be told
   apart, as for every other per-address limit.
 
@@ -155,11 +165,13 @@ def configure(*specs):
 
 
 def listed(address):
+    """Whether `address` (an address, or address_key's /64) is one of --website-address: a /64
+    when a listed address is in it or a listed network holds it."""
     try:
-        ip = ipaddress.ip_address(address.split("%")[0].split("/")[0])
+        net = ipaddress.ip_network(address.split("%")[0], strict=False)
     except ValueError:
         return False
-    return any(ip in net for net in WEBSITE)
+    return any(net.version == w.version and net.overlaps(w) for w in WEBSITE)
 
 
 def source(peer):

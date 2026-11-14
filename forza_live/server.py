@@ -1906,34 +1906,42 @@ def response(status, body, content_type="application/octet-stream", extra=(), co
     return head if isinstance(body, media.FileBody) else head + body
 
 
-# An answer's reader has this long to take each piece of it (media.PIECE): the time between two
-# writes it accepts, never the whole answer's, as a web server's send timeout (nginx's is 60 s
-# too). A reader that is slower, or reads nothing, is dropped with what was buffered for it.
-# Before, an answer waited for its reader without end, a video of 32 MiB whole in memory.
+# The reader of a file's answer (media.FileBody: the community photos and videos) has this long
+# to take each piece of it (media.PIECE): the time between two writes it accepts, never the
+# whole answer's, as a web server's send timeout (nginx's is 60 s too). One piece in that time
+# is about 4 KiB a second, slower than anything that shows a picture or plays a video; a
+# reader that is slower, or reads nothing, is dropped with what was buffered for it. Before,
+# such an answer waited for its reader without end, a video of 32 MiB whole in memory.
+# Every other answer (the game's title calls, the feeds, the status page) is written as it
+# always was, with no time limit: a player's game on a slow line is never cut off by this.
 DRAIN_SECONDS = 60.0
 
 
 async def send(writer, reply, body=None):
-    """Writes an answer: `reply` (its head, and a body that is bytes), then the pieces of `body`
-    (a media.FileBody), each drained within DRAIN_SECONDS. asyncio.TimeoutError when the reader
-    did not take one in time: the connection is aborted, not closed, so nothing stays buffered
-    for it. What was not sent of a FileBody goes back to its address's budget."""
+    """Writes an answer: `reply`, its head and a body that is bytes. For a file (`body`, a
+    media.FileBody) `reply` is the head alone and the file follows in pieces, each drained
+    within DRAIN_SECONDS. asyncio.TimeoutError when the reader did not take one in time: the
+    connection is aborted, not closed, so nothing stays buffered for it; the same for a
+    connection closed meanwhile (http_make_room gave its place away), which gets no more of
+    the file. What was not sent of the file goes back to its address's budget."""
+    writer.write(reply)
+    if body is None:
+        await writer.drain()
+        return
     sent = 0
     try:
-        for start in range(0, len(reply), media.PIECE):
-            writer.write(reply[start:start + media.PIECE] if len(reply) > media.PIECE else reply)
+        await asyncio.wait_for(writer.drain(), DRAIN_SECONDS)
+        for piece in body.pieces():
+            if writer.transport.is_closing():
+                raise ConnectionResetError("closed while its answer was sent")
+            writer.write(piece)
             await asyncio.wait_for(writer.drain(), DRAIN_SECONDS)
-        if body is not None:
-            for piece in body.pieces():
-                writer.write(piece)
-                await asyncio.wait_for(writer.drain(), DRAIN_SECONDS)
-                sent += len(piece)
-    except asyncio.TimeoutError:
+            sent += len(piece)
+    except (asyncio.TimeoutError, ConnectionError):
         writer.transport.abort()
         raise
     finally:
-        if body is not None:
-            media.unsent(body, sent)
+        media.unsent(body, sent)
 
 
 async def http_handler(server, reader, writer):
