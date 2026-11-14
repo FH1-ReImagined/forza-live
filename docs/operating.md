@@ -304,6 +304,27 @@ unhide it. The server's log names each clip it refused and why (`videos: ... not
 including clips whose picture is blank: the TU4 game, as recompiled in November 2026, records
 black frames with the sound, and such a clip is not published.
 
+### Who may fetch the photos and videos
+
+The public files (`/community/img/*` and `/community/video/*`) have a budget for each address as
+well as the one for the whole server, and a reader that takes nothing is dropped after 60 s
+([configuration](configuration.md#the-photo-and-video-files) has the numbers). What that asks of
+the operator:
+
+- nothing, when the website's web server and builder reach the server from this machine or the
+  home network: private and loopback addresses have no budget of their own. (An address that is
+  a `--trusted-proxy` is the tunnel's, not the website's: with `--proxy-protocol-tcp` its
+  connections must start with the agent's header.)
+- a builder or web server of yours at a public address: put the address in
+  `FORZA_WEBSITE_ADDRESSES` (comma separated; or `--website-address`) and restart. The start
+  logs `website addresses (no media budget of their own): ...`. Without it, it has what any
+  address has, which is sized for a whole build that starts with an empty cache, and an item
+  answered 429 is fetched at the next build: a builder whose address changes with every run (a
+  hosted one) cannot be listed and does not need to be;
+- an address over its own budget is answered 429 with `Retry-After` and
+  `too many requests from this address`; the server-wide limit's 429 says
+  `too many requests, try again in a minute`. Both show as `-> 429` in the log's `http` lines.
+
 ### Automatic screening
 
 [`screening/`](../screening/README.md) is that worker. Run it beside a server that has

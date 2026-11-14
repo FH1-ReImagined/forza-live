@@ -39,6 +39,7 @@ from forza_live.social import discord_status
 from forza_live.social import friends
 from forza_live.competition import events
 from forza_live.core import limits
+from forza_live.core import media
 from forza_live.content import online
 from forza_live.title_services import lsp
 from forza_live.network import proxy
@@ -1900,7 +1901,47 @@ def response(status, body, content_type="application/octet-stream", extra=(), co
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
             f"Content-Length: {len(body)}", *(["Access-Control-Allow-Origin: *"] if cors else []),
             f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (auth.py)
-    return ("\r\n".join(head) + "\r\n\r\n").encode() + body
+    head = ("\r\n".join(head) + "\r\n\r\n").encode()
+    # a file's body (media.FileBody) is not in memory: send() writes it after the head
+    return head if isinstance(body, media.FileBody) else head + body
+
+
+# The reader of a file's answer (media.FileBody: the community photos and videos) has this long
+# to take each piece of it (media.PIECE): the time between two writes it accepts, never the
+# whole answer's, as a web server's send timeout (nginx's is 60 s too). One piece in that time
+# is about 4 KiB a second, slower than anything that shows a picture or plays a video; a
+# reader that is slower, or reads nothing, is dropped with what was buffered for it. Before,
+# such an answer waited for its reader without end, a video of 32 MiB whole in memory.
+# Every other answer (the game's title calls, the feeds, the status page) is written as it
+# always was, with no time limit: a player's game on a slow line is never cut off by this.
+DRAIN_SECONDS = 60.0
+
+
+async def send(writer, reply, body=None):
+    """Writes an answer: `reply`, its head and a body that is bytes. For a file (`body`, a
+    media.FileBody) `reply` is the head alone and the file follows in pieces, each drained
+    within DRAIN_SECONDS. asyncio.TimeoutError when the reader did not take one in time: the
+    connection is aborted, not closed, so nothing stays buffered for it; the same for a
+    connection closed meanwhile (http_make_room gave its place away), which gets no more of
+    the file. What was not sent of the file goes back to its address's budget."""
+    writer.write(reply)
+    if body is None:
+        await writer.drain()
+        return
+    sent = 0
+    try:
+        await asyncio.wait_for(writer.drain(), DRAIN_SECONDS)
+        for piece in body.pieces():
+            if writer.transport.is_closing():
+                raise ConnectionResetError("closed while its answer was sent")
+            writer.write(piece)
+            await asyncio.wait_for(writer.drain(), DRAIN_SECONDS)
+            sent += len(piece)
+    except (asyncio.TimeoutError, ConnectionError):
+        writer.transport.abort()
+        raise
+    finally:
+        media.unsent(body, sent)
 
 
 async def http_handler(server, reader, writer):
@@ -1942,6 +1983,7 @@ async def http_handler(server, reader, writer):
             entry[1] = None
             keep = headers.get("connection", "").lower() == "keep-alive"
             conn = ("Connection: Keep-Alive" if keep else "Connection: close",)
+            data = b""  # the answer's body, when it is a file to send in pieces (send)
             if path in ("/", "/status"):
                 reply = response(200, json.dumps(server.status(), indent=2, default=str).encode(),
                                  "application/json", conn)
@@ -2034,8 +2076,7 @@ async def http_handler(server, reader, writer):
                              status, len(data))
                 reply = response(status, data, content_type, conn + extra)
             entry[1] = time.monotonic()  # answered: it waits again, while its answer is read too
-            writer.write(reply)
-            await writer.drain()
+            await send(writer, reply, data if isinstance(data, media.FileBody) else None)
             if not keep:
                 break
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, ValueError,

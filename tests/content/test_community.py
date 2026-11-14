@@ -399,6 +399,8 @@ class Base(unittest.TestCase):
         answer = lsp.handle(self.server, method, path, {k.lower(): v for k, v in (headers or {}).items()},
                             body, peer)
         status, ctype, data = answer[:3]
+        if hasattr(data, "read"):  # a file sent in pieces (media.FileBody): its bytes
+            data = data.read()
         extra = dict(line.split(": ", 1) for line in (answer[3] if len(answer) > 3 else ()))
         return status, ctype, data, extra
 

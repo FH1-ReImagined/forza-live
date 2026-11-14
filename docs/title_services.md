@@ -964,7 +964,7 @@ the player does, from the website's account page ([owner routes](#a-players-own-
 | Route | |
 | --- | --- |
 | `GET /community/gallery.json` | `{"version":1,"generated":<unix>,"photos":[{"id","gamertag","owner","title","takenAt","approvedAt","w","h","sha256","image"}]}`: live photos, newest first, at most 500. `owner` is the photo owner's player id, the same opaque id the [leaderboards](website-data.md#leaderboards) publish (a hash of the XUID with the server's secret salt, 12 hex digits), so the website can show a player's photos and designs together; never the XUID. Built again only when a photo or the ban list changes; `ETag` (an `If-None-Match` gets 304), `Cache-Control: public, max-age=60`. The website's `tools/build_gallery.py` reads it |
-| `GET /community/img/<id>.png` | a live photo (`.jpg` for a JPEG), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 image requests a minute (then 429) |
+| `GET /community/img/<id>.png` | a live photo (`.jpg` for a JPEG), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, `Cache-Control: public, max-age=86400`; at most 600 image requests a minute (then 429), and each address within [its own budget](configuration.md#the-photo-and-video-files) for the photos and videos together (429 with `Retry-After`); sent 256 KiB at a time |
 | `/admin/photos...` | the operator's ([operating](operating.md#community-photos)) |
 
 Files: `DATA_DIR/community.json` (forza_live.core.durable) and `DATA_DIR/community/<id>.png`, in the disk
@@ -1013,7 +1013,7 @@ player again is the same video; a clip the operator deleted is not published aga
 | --- | --- |
 | `GET /community/videos.json` | `{"version":1,"generated":<unix>,"videos":[{"id","gamertag","owner","title","takenAt","approvedAt","seconds","w","h","size","sha256","video","poster","posterSha256"}]}`: live videos, newest first, at most 200; `owner` is the player id the leaderboards publish. `ETag`, `Cache-Control: public, max-age=60`. The website's `tools/build_videos.py` reads it |
 | `GET /community/video/<id>.mp4` | a live video: `Accept-Ranges: bytes`, one `Range` answered with 206 and `Content-Range` (`If-Range` honoured; an unsatisfiable one 416), `nosniff`, `Content-Security-Policy: default-src 'none'`, `ETag`, cached a day |
-| `GET /community/video/<id>.jpg` | its poster; with the MP4, at most 600 media requests a minute (then 429) |
+| `GET /community/video/<id>.jpg` | its poster; with the MP4, at most 600 media requests a minute (then 429), and each address within [its own budget](configuration.md#the-photo-and-video-files) for the photos and videos together (429 with `Retry-After`). Both are sent 256 KiB at a time, a range too, and a reader that takes no piece within 60 s is dropped |
 | `/admin/videos...` | the operator's ([operating](operating.md#community-videos)) |
 
 Files: `DATA_DIR/videos.json` and `DATA_DIR/videos/` (`public/<id>.mp4` and `.jpg`,
