@@ -69,6 +69,7 @@ from forza_live.content import design_feed
 from forza_live.content import designs
 from forza_live.social import friends
 from forza_live.core import limits
+from forza_live.core import media
 from forza_live.content import online
 from forza_live.content import owners
 from forza_live.core import relays
@@ -184,6 +185,12 @@ def add_arguments(parser):
                              "(default ./forza_live_data)")
     parser.add_argument("--dump-requests", action="store_true",
                         help="save every title server request to DATA_DIR/requests")
+    parser.add_argument("--website-address", action="append", default=[], metavar="IP[/BITS]",
+                        help="address of the website's web server or builder when it reaches "
+                             "this server from a public address or through the tunnel: no "
+                             "per-address budget for it on /community/img and /community/video "
+                             "(media.py; addresses on the home network and this machine never "
+                             "have one). Repeatable; env FORZA_WEBSITE_ADDRESSES, comma separated")
     parser.add_argument("--playground-games", default="",
                         help="the Playground Games playlist's rounds in turn, as game type "
                              "presets: 4 Infected, 5 Cat & Mouse, 6 King (default: all three, "
@@ -248,6 +255,10 @@ def configure(args):
     os.makedirs(DATA_DIR, exist_ok=True)
     check_admin_token()
     bans.configure(DATA_DIR)
+    media.configure(os.environ.get("FORZA_WEBSITE_ADDRESSES", ""), *args.website_address)
+    if media.WEBSITE:
+        log.info("website addresses (no media budget of their own): %s",
+                 ", ".join(map(str, media.WEBSITE)))
     limits.configure(DATA_DIR)
     scores.configure(DATA_DIR, args.server_id, scored=first_score)
     _scored.clear()
@@ -1173,13 +1184,13 @@ def handle(server, method, path, headers, body, peer):
             return answer
     if videos.handles(url.path):  # community videos (videos.py), ahead of /community/
         return videos.handle(method, path, headers, body,
-                             lambda: is_local_admin(peer, headers))
+                             lambda: is_local_admin(peer, headers), media.source(peer))
     if design_feed.handles(url.path):  # designs on the website (design_feed.py)
         return design_feed.handle(method, path, headers, body,
                                   lambda: is_local_admin(peer, headers))
     if community.handles(url.path):  # community photos (community.py)
         return community.handle(method, path, headers, body,
-                                lambda: is_local_admin(peer, headers))
+                                lambda: is_local_admin(peer, headers), media.source(peer))
     if owners.handles(url.path):  # a player's own photo or design, from the website (owners.py)
         return owners.handle(method, path, headers, body, came_through_proxy(peer, headers))
     if url.path in ("/notify", "/gift", "/broadcast"):

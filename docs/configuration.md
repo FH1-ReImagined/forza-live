@@ -19,6 +19,7 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--proxy-http-port PORT` | `FORZA_PROXY_HTTP_PORT` | the TCP port the tunnel publishes |
 | `--proxy-protocol-udp` | `FORZA_PROXY_PROTOCOL_UDP=1` | read [PROXY v2](#proxy-protocol-v2-hole-punching-through-the-tunnel) headers on UDP |
 | `--proxy-protocol-tcp` | `FORZA_PROXY_PROTOCOL_TCP=1` | read PROXY v2 headers on TCP |
+| `--website-address IP/CIDR` | `FORZA_WEBSITE_ADDRESSES` | addresses of the website's builder or web server when it reaches this server from a public address: no budget of its own on the [photo and video files](#the-photo-and-video-files) (repeatable; comma separated in the variable) |
 | `--rate-limit` | | the relay budget per player (256 KB/s), also the cap in a volunteer relay's tickets |
 | `--relay-after SECONDS` | | how long two players relay through this server before they get a [volunteer relay](operating.md#volunteer-relays) (default 8) |
 | `--relay-only` | | run as a [volunteer relay](operating.md#running-a-relay) of a main server, with `--relay-of HOST:PORT`, `--relay-id ID` and `--relay-secret-file FILE` |
@@ -245,6 +246,47 @@ that finds the running total 1 MB or more off logs the difference. Until the fir
 the uploads are taken up to 64 MB in all, so a store that was already full is passed by that
 much at most. Counting never happens on the server's event loop: a count of 25,000 files takes
 seconds on a slow disk, and nothing else was answered meanwhile.
+
+### The photo and video files
+
+`GET /community/img/*` and `GET /community/video/*` ([website data](website-data.md#community-photos))
+answer files of up to 16 MiB (a photo) and 32 MiB (a video). Each route answers at most 600
+requests a minute for the whole server (429 beyond). Besides that:
+
+- a file is read and sent 256 KiB at a time, a byte range too, so none is in memory whole. A
+  reader that does not take a piece within 60 s is dropped (the time between two pieces it
+  takes, never the whole file's, as a web server's send timeout): that is a reader slower than
+  about 4 KiB a second, or one that takes nothing. A browser's player that stopped reading asks
+  again with a `Range`. Only these files have the time limit: the game's title calls and every
+  other answer are written as before, however slow the player's line;
+- each address has a budget of its own for the two routes together, counted like the other
+  per-address limits (an IPv6 address under its /64, a tunnelled one under its own with
+  `--proxy-protocol-tcp`): 300 requests at once and then 2 a second, and 2 GiB at once and then
+  512 KiB a second. Over either it gets 429 with `Retry-After`, and what it is refused does not
+  count in the server-wide 600: one address takes at most 420 of a route's 600 in a minute, then
+  120, so it can no longer use a route up for everyone. Bytes that were not sent (the reader
+  left, or was dropped) are given back.
+
+What an address gets at once is a website build that starts with an empty cache, the largest
+thing one address asks for in good faith: the website's builders fetch at most 500 photos and
+100 videos with their posters (700 files, one after another) and 700 MB of video. A builder
+skips an item that is answered 429 and fetches it at its next build.
+
+No budget of its own (the server-wide 600 a minute still hold) for:
+
+- private, link-local and loopback addresses that are not a `--trusted-proxy`: this machine and
+  the home network. The website's own web server and builder ask from one such address for
+  every visitor, so they need nothing set;
+- the addresses of `--website-address` (`FORZA_WEBSITE_ADDRESSES`; IPs or CIDRs, an IPv6 address
+  standing for its /64): a builder or web server of yours that reaches the server from a public
+  address, directly or through the tunnel. Set it when such a builder's log shows `HTTP 429` for
+  photos or videos. Only list addresses you control. The start logs
+  `website addresses (no media budget of their own): ...`;
+- a tunnel's connections without `--proxy-protocol-tcp`: they all come from the agent and
+  cannot be told apart, so only the server-wide budget holds them, as before.
+
+When everything reaches the server from one private address that is not a `--trusted-proxy` (a
+NAT or a reverse proxy in front of it), nobody has a budget of its own either.
 
 Players are not authenticated (the XUID is whatever the client claims), except for the friends
 list, the shader lists and the title service writes, which need a signature by the key bound to

@@ -251,6 +251,25 @@ def address_key(ip):
     return str(ipaddress.ip_network((int(addr) >> 64 << 64, 64)))
 
 
+# Addresses that are never a client's on the internet: this machine and the home network. The
+# operator panel exists only for them (panel/routes.py), and the community media routes count
+# no budget of their own against them (media.py: the website's own web server and builder).
+LOCAL_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
+    "::1/128", "fc00::/7", "fe80::/10"))
+
+
+def local_address(ip):
+    """Whether ip (an address, or address_key's /64) is a private, link-local or loopback one."""
+    try:
+        a = ipaddress.ip_address(str(ip).split("%")[0].split("/")[0])
+    except ValueError:
+        return False
+    if a.version == 6 and a.ipv4_mapped is not None:
+        a = a.ipv4_mapped
+    return any(a in n for n in LOCAL_NETWORKS)
+
+
 def loggable(path):
     """A request's path for the log: without the value of a token= in its query (the operator's
     token, however the name is written or encoded)."""

@@ -35,7 +35,6 @@ owners' text)."""
 import asyncio
 import collections
 import hmac
-import ipaddress
 import json
 import logging
 import os
@@ -52,6 +51,7 @@ from forza_live.competition import objectives
 from forza_live.competition import score_token
 from forza_live.competition import scores
 from forza_live.core import durable
+from forza_live.core import limits
 from forza_live.core import relays
 from forza_live.core import server_list
 from forza_live.panel import audit
@@ -76,9 +76,7 @@ HEADERS = ("Content-Security-Policy: default-src 'none'; script-src 'self'; styl
            "X-Content-Type-Options: nosniff", "X-Frame-Options: DENY",
            "Referrer-Policy: no-referrer", "Cache-Control: no-store",
            "Cross-Origin-Opener-Policy: same-origin", "Cross-Origin-Resource-Policy: same-origin")
-LOCAL_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
-    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
-    "::1/128", "fc00::/7", "fe80::/10"))
+LOCAL_NETWORKS = limits.LOCAL_NETWORKS  # private, link-local and loopback addresses
 FAIL_WINDOW = 600.0
 FAILS_PER_IP = 10
 FAILS_TOTAL = 100
@@ -109,14 +107,7 @@ def handles(path):
 
 # ---- who may use it ----
 
-def local_address(ip):
-    try:
-        a = ipaddress.ip_address(str(ip).split("%")[0])
-    except ValueError:
-        return False
-    if a.version == 6 and a.ipv4_mapped is not None:
-        a = a.ipv4_mapped
-    return any(a in n for n in LOCAL_NETWORKS)
+local_address = limits.local_address
 
 
 def reachable(peer, headers):
