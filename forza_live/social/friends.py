@@ -45,11 +45,14 @@ a new player's place, and the oldest that hold nothing but a name go when there 
 no sender can grow the file without end, nor keep new players out of it.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
+import pickle
 import struct
+import threading
 import time
 import zlib
 
@@ -126,6 +129,9 @@ class Store:
         # at every load and save.
         self.keyed = 0
         self.searched = 0.0  # monotonic time until which spare() does not look for room again
+        self.saving = False  # a thread is writing the file (maybe_save)
+        self._file = threading.Lock()  # one writer of the file at a time
+        self._saves = self._written = 0  # saves begun, and the latest of them that is on disk
 
     @staticmethod
     def hx(xuid):
@@ -311,16 +317,34 @@ class Store:
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             log.warning("cannot read %s: %s", self.path, e)
 
+    def write(self, save, players):
+        """The file written and flushed. players: the records, or a pickle of them (a thread's
+        own copy). False, logged, when it could not be written. A save older than the one on
+        disk writes nothing: a thread's copy never lands on a later save()."""
+        with self._file:
+            if save < self._written:
+                return True
+            if isinstance(players, bytes):
+                players = pickle.loads(players)
+            try:
+                tmp = self.path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({"version": 1, "players": players}, f)
+                durable.replace(tmp, self.path)
+            except OSError as e:
+                log.warning("cannot write %s: %s", self.path, e)
+                return False
+            self._written = save
+            return True
+
     def save(self):
+        """The file written here and now: True when it is on disk. On the event loop only where
+        the caller needs that answer (an event's enrollment, the server's stop): the file is
+        megabytes, see maybe_save."""
         if not self.path:
             return False
-        try:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"version": 1, "players": self.players}, f)
-            durable.replace(tmp, self.path)
-        except OSError as e:
-            log.warning("cannot write %s: %s", self.path, e)
+        self._saves += 1
+        if not self.write(self._saves, self.players):
             return False
         self.dirty = False
         self.saved = time.monotonic()
@@ -328,8 +352,32 @@ class Store:
         return True
 
     def maybe_save(self):
-        if self.dirty and time.monotonic() - self.saved >= 2:
-            self.save()
+        """Every second from the main loop: a changed store is written, at most every 2 s, by
+        a thread, from a copy made here. The copy (a pickle) takes 3 ms for a file of 1.7 MB on
+        a fast desktop, where writing the JSON on the loop took 45 ms, and more on a slower
+        server (#67). A write that fails leaves the store changed, for the next round."""
+        if not self.dirty or self.saving or time.monotonic() - self.saved < 2:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.save()  # no event loop (a tool, a test): here
+            return
+        if not self.path:
+            return
+        self._saves += 1
+        copy = pickle.dumps(self.players, pickle.HIGHEST_PROTOCOL)
+        self.dirty, self.saving, self.saved = False, True, time.monotonic()
+        self.count()
+
+        def done(written):
+            self.saving = False
+            if written.cancelled() or written.exception() or not written.result():
+                self.dirty = True
+                if not written.cancelled() and written.exception():  # write() logs an OSError
+                    log.error("cannot write %s: %r", self.path, written.exception())
+
+        loop.run_in_executor(None, self.write, self._saves, copy).add_done_callback(done)
 
 
 class Friends:

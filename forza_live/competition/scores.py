@@ -31,8 +31,19 @@ before the tags stay as they are.
 Everything is kept in DATA_DIR/scoreboards.json (the best score of each player on each
 scoreboard, the unranked ones, the 1000 Club medals), DATA_DIR/ghosts/<id>.bin and
 DATA_DIR/ghosts/review/<scoreId>.bin (refused ghosts, kept with their unranked rows).
+
+scoreboards.json is megabytes (26 MB on the public server), so it is not written at every
+change (#67): a change is a line in DATA_DIR/scoreboards.journal, flushed to disk before the
+game is answered (Store.save), and the file is written whole by a thread every FULL_EVERY
+seconds while the journal has changes it lacks (keep_written), and once more as the server
+stops (Store.stop). A start reads the file and then the journal (core/journal.py). The file is
+the JSON it always was, so a previous version of the server reads it; it knows nothing of the
+journal, and after a stop that was not clean it lacks what only the journal held: at most the
+changes of the last FULL_EVERY seconds and of the write under way (docs/operating.md, "Scores
+on disk", has what that costs and the command that folds the journal into the file first).
 """
 
+import asyncio
 import contextvars
 import json
 import logging
@@ -46,6 +57,7 @@ import uuid
 from forza_live.competition import ghost as ghostfile
 from forza_live.competition import score_token
 from forza_live.core import bans
+from forza_live.core import journal
 from forza_live.core import limits
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
@@ -107,6 +119,7 @@ SPEED_TRAP_LIMIT_KMH = {
     230: 348.3,   # Rt. 29
 }
 MAX_BOARDS = 4096   # boards on the server (the game has about 160)
+FULL_EVERY = 60.0   # seconds between two writes of the whole of scoreboards.json (keep_written)
 MAX_PENDING_GHOSTS = 4096  # new bests waiting for their ghost (UploadFile follows at once)
 
 # The server that takes a row (--server-id; without it an id made at the first start and kept
@@ -165,9 +178,16 @@ def board_key(kind, sbid, stt):
 
 
 class Store:
-    """Best score per player per scoreboard, and the ghosts."""
+    """Best score per player per scoreboard, and the ghosts.
+
+    boards, unranked and club change through put(), drop() and put_club() only, and a row (or a
+    club entry) is never changed once it is there: a change puts a new one. That is what lets a
+    change be one line of the journal (save), and what lets a thread write the whole file while
+    the event loop goes on (snapshot)."""
 
     def __init__(self):
+        if getattr(self, "journal", None) is not None:
+            self.journal.close()  # configured again: the journal of the folder before
         self.boards = {}       # "type:sbid:stt" -> {xuid hex: entry}
         self.unranked = {}     # the same, of the results kept off the boards (for review)
         # scoreId hex -> (board key, xuid hex, the row it replaced or None): waiting for UploadFile
@@ -175,6 +195,8 @@ class Store:
         self.club = {}         # 1000 Club: xuid hex -> {gamertag, cars: {carId: [thumbprints]}}
         self.next_file = 1
         self.loaded = False
+        self.journal = None    # scoreboards.journal (load)
+        self.changes = {}      # since the last save(), as the journal's line will have them
 
     def path(self):
         return os.path.join(DATA_DIR, "scoreboards.json")
@@ -183,29 +205,140 @@ class Store:
         if self.loaded:
             return
         self.loaded = True
-        try:
-            data = durable.load(self.path())
+        self.journal = journal.Journal(self.path())
+        data, changes = self.journal.load()
+        if data is not None:
             self.boards = migrate(data.get("boards", {}))
             self.unranked = data.get("unranked", {})
             self.club = data.get("club1000", {})
-            # Entries put back by hand after the 2026-10-27 outage had no "xuid".
-            for key, entry in self.club.items():
-                entry.setdefault("xuid", key)
             self.next_file = data.get("nextFileId", 1)
-        except (OSError, ValueError):
-            return
+        skipped = 0
+        for change in changes:
+            try:
+                self.apply(change)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                skipped += 1
+        if changes:
+            log.log(logging.WARNING if skipped else logging.INFO,
+                    "scoreboards: %d changes from %s on top of %s%s", len(changes) - skipped,
+                    os.path.basename(self.journal.name), os.path.basename(self.path()),
+                    ", %d that cannot be read skipped" % skipped if skipped else "")
+        # Entries put back by hand after the 2026-10-27 outage had no "xuid".
+        for key, entry in self.club.items():
+            entry.setdefault("xuid", key)
         # Speeds kept before the limits (or by --no-trap-limits) would otherwise stay the
         # players' bests and block their real ones (#349).
-        if drop_impossible_speeds(self.boards):
-            self.save()
+        for key, xuid in drop_impossible_speeds(self.boards):
+            self.changes.setdefault("boards", {}).setdefault(key, {})[xuid] = None
+        self.save()
+
+    def apply(self, change):
+        """A line of the journal on the tables. It has the file's own names, with only what
+        changed: {"boards" or "unranked": {board: {xuid: row, or null for a row that went}},
+        "club1000": {xuid: entry or null}, "nextFileId": n}. Applied twice, or on a file that
+        already has it, it changes nothing."""
+        for table in ("boards", "unranked"):
+            for key, rows in change.get(table, {}).items():
+                for xuid, row in rows.items():
+                    self._set(table, key, xuid, row)
+        for xuid, entry in change.get("club1000", {}).items():
+            if entry is None:
+                self.club.pop(xuid, None)
+            else:
+                self.club[xuid] = entry
+        self.next_file = int(change.get("nextFileId", self.next_file))
+
+    def _set(self, table, key, xuid, row):
+        boards = getattr(self, table)
+        if row is not None:
+            boards.setdefault(key, {})[xuid] = row
+        elif key in boards:
+            boards[key].pop(xuid, None)
+            if not boards[key]:
+                del boards[key]
+
+    def put(self, table, key, xuid, row):
+        """The player's row on a board (table "boards") or kept off it ("unranked"): in memory
+        now, on disk at the next save(). The row is not to be changed afterwards."""
+        self.load()
+        self._set(table, key, xuid, row)
+        self.changes.setdefault(table, {}).setdefault(key, {})[xuid] = row
+
+    def drop(self, table, key, xuid):
+        """The player's row goes, and the board with its last row."""
+        self.put(table, key, xuid, None)
+
+    def put_club(self, xuid, entry):
+        """The player's 1000 Club entry: as put()."""
+        self.load()
+        self.club[xuid] = entry
+        self.changes.setdefault("club1000", {})[xuid] = entry
+
+    def new_file(self):
+        """The id of the next ghost file."""
+        self.load()
+        file_id = self.next_file
+        self.next_file += 1
+        self.changes["nextFileId"] = self.next_file
+        return file_id
 
     def save(self):
+        """The changes since the last save, on disk when this returns: one line appended to the
+        journal and flushed, milliseconds whatever the boards' size. OSError when they could
+        not be written: they stay in memory and go with the next save."""
+        if not self.changes:
+            return
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = self.path() + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"boards": self.boards, "unranked": self.unranked, "club1000": self.club,
-                       "nextFileId": self.next_file}, f, indent=1)
-        durable.replace(tmp, self.path())
+        self.journal.append(self.changes)
+        self.changes = {}
+
+    def snapshot(self):
+        """What a write of the whole file needs, taken on the event loop in a millisecond or two
+        for 50,000 rows: the journal, the place in it, and a copy of the tables down to the
+        rows. The rows are not copied: they never change (put), so the thread that writes them
+        reads nothing the loop is changing."""
+        self.load()
+        return self.journal, self.journal.mark(), {
+            "boards": {key: dict(board) for key, board in self.boards.items()},
+            "unranked": {key: dict(board) for key, board in self.unranked.items()},
+            "club1000": dict(self.club), "nextFileId": self.next_file}
+
+    def write(self, snapshot=None, stopping=False):
+        """scoreboards.json written whole and flushed, its journal cut back to what the file
+        before it lacked (journal.checkpoint). The slow one, a thread's work (keep_written): on
+        an event loop it runs only as the server stops. Without a snapshot it takes one, which
+        is right only where nothing changes the boards meanwhile (the stop, a tool, a test)."""
+        if not stopping:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError("Store.write() writes the whole of scoreboards.json: run it "
+                                   "in a thread (asyncio.to_thread), never on the event loop")
+        beside, mark, tables = snapshot or self.snapshot()
+        os.makedirs(os.path.dirname(beside.path) or ".", exist_ok=True)
+        return beside.checkpoint(mark, lambda f: dump(f, tables))
+
+    def stop(self):
+        """The server is stopping: scoreboards.json gets what only its journal had, so the file
+        alone is complete (all a previous version of the server reads). The log says which it
+        was: written, nothing to write, or not written (the journal then has what it lacks)."""
+        if not self.loaded:
+            return
+        name = os.path.basename(self.path())
+        try:
+            self.save()
+            if not self.journal.behind():
+                log.info("scoreboards: nothing to write at the stop: %s has every change", name)
+            else:
+                began = time.monotonic()
+                if self.write(stopping=True):
+                    log.info("scoreboards: %s written whole at the stop in %.2f s: it has every "
+                             "change", name, time.monotonic() - began)
+        except OSError as e:
+            log.warning("scoreboards: %s not written at the stop (%s); its journal has every "
+                        "change", self.path(), e)
 
     def board(self, kind, sbid, stt, create=False):
         """A board's entries by player: {} for a board nobody is on, or with create the
@@ -225,6 +358,61 @@ class Store:
         bigger = kind in BIGGER_IS_BETTER
         entries.sort(key=lambda e: (-e["score"] if bigger else e["score"], e["submitted"]))
         return entries, bigger
+
+
+# scoreboards.json: its tables, and how deep their rows are.
+LAYOUT = (("boards", 2), ("unranked", 2), ("club1000", 1), ("nextFileId", 0))
+
+
+def dump(f, tables):
+    """The tables as scoreboards.json, to the text file f: plain JSON, as json.dump gave with
+    an indent down to the rows, and a row to a line. Each row is one call of the C encoder: the
+    whole file in one call would hold the interpreter that long (and the event loop with it,
+    thread or not), and json.dump with an indent is two and a half times the work."""
+    def rows(table, pad):
+        return ",\n".join("%s%s: %s" % (pad, json.dumps(str(key)), json.dumps(row))
+                          for key, row in table.items())
+
+    def block(table, pad, inside):
+        return "{\n%s\n%s}" % (inside(table, pad + " "), pad) if table else "{}"
+
+    f.write("{")
+    for n, (name, depth) in enumerate(LAYOUT):
+        f.write("%s\n %s: " % ("," if n else "", json.dumps(name)))
+        if depth == 0:
+            f.write(json.dumps(tables[name]))
+        elif depth == 1:
+            f.write(block(tables[name], " ", rows))
+        else:
+            f.write("{")
+            for m, (key, board) in enumerate(tables[name].items()):
+                f.write("%s\n  %s: %s" % ("," if m else "", json.dumps(str(key)),
+                                         block(board, "  ", rows)))
+            f.write("\n }" if tables[name] else "}")
+    f.write("\n}\n")
+
+
+async def keep_written(every=None):
+    """The server's task: every FULL_EVERY seconds, when the journal has changes that
+    scoreboards.json lacks, the file is written whole by a thread from a snapshot taken here.
+    A write that fails is logged and made again at the next round; nothing is lost meanwhile,
+    the journal has every change."""
+    while True:
+        await asyncio.sleep(FULL_EVERY if every is None else every)
+        store = STORE
+        if not store.loaded or not store.journal.behind():
+            continue
+        began = time.monotonic()
+        try:
+            snapshot = store.snapshot()
+            written = await asyncio.to_thread(store.write, snapshot)
+        except Exception:
+            log.exception("scoreboards: writing %s failed; the journal keeps every change",
+                          store.path())
+            continue
+        if written:
+            log.info("scoreboards: %s written whole in %.2f s, off the event loop",
+                     os.path.basename(store.path()), time.monotonic() - began)
 
 
 def migrate(boards):
@@ -338,8 +526,8 @@ def implausible_speed(xuid, kind, sbid, score):
 def drop_impossible_speeds(boards):
     """Removes the kept speeds a submission would not be kept with now (speed_over_limit,
     enforced): the store's scores from before the limits, or kept with --no-trap-limits.
-    Logs each one; returns how many went."""
-    removed = 0
+    Logs each one; returns those that went, as (board key, xuid hex)."""
+    removed = []
     for key in list(boards):
         try:
             kind, sbid = (int(p) for p in key.split(":")[:2])
@@ -352,7 +540,7 @@ def drop_impossible_speeds(boards):
             if over is None or not over[1]:
                 continue
             del board[xuid_hex]
-            removed += 1
+            removed.append((key, xuid_hex))
             log.warning("title: scoreboards: removed %s's %.1f km/h from board %d type %d, above "
                         "%.1f km/h", public_id(xuid_hex), score * 3.6, sbid, kind,
                         over[0])
@@ -383,7 +571,7 @@ def unrank(key, entry, reason, ghost=None):
     if review is None:
         if len(STORE.unranked) >= MAX_BOARDS:
             return False
-        review = STORE.unranked[key] = {}
+        review = {}
     old = review.get(entry["xuid"])
     if old and not better(entry["score"], old["score"], int(key.split(":")[0]) in BIGGER_IS_BETTER):
         return False
@@ -407,7 +595,7 @@ def unrank(key, entry, reason, ghost=None):
             entry["reviewGhost"] = True
         except (OSError, ValueError) as e:
             log.info("title: refused ghost of score %s not kept: %s", entry["scoreId"], e)
-    review[entry["xuid"]] = entry
+    STORE.put("unranked", key, entry["xuid"], entry)
     return True
 
 
@@ -516,7 +704,7 @@ def submit(xuid, gamertag, kind, data, extra=None):
         return nothing
     if not old and len(board) >= limits.MAX_PLAYERS:
         return nothing
-    board[key] = entry
+    STORE.put("boards", board_key(kind, sbid, stt), key, entry)
     ghost = kind in GHOST_TYPES
     if ghost:
         # The row it replaces stays (with its ghost) until the new one's ghost passes: a refused
@@ -602,12 +790,7 @@ def upload_file(xuid, body):
                 remove_ghost(previous["ghostFileId"])
             raise
     else:
-        if previous:
-            board[player] = previous
-        else:
-            del board[player]
-            if not board:
-                del STORE.boards[key]
+        STORE.put("boards", key, player, previous)  # the row before it is back, or none
         unrank(key, entry, "ghost: " + problem, data)
         STORE.save()
         log.warning("title: ghost from %016X for board %s refused (%d bytes): %s; the score "
@@ -616,10 +799,9 @@ def upload_file(xuid, body):
         return x.failure(2, "ghost refused: " + problem)
     if previous and previous.get("ghostFileId", -1) >= 0:
         remove_ghost(previous["ghostFileId"])
-    file_id = STORE.next_file
-    STORE.next_file += 1
+    file_id = STORE.new_file()
     write_ghost(file_id, kept, len(data))
-    entry["ghostFileId"] = file_id
+    STORE.put("boards", key, player, dict(entry, ghostFileId=file_id))
     STORE.save()
     log.info("title: ghost %d from %016X for board %s (%d bytes, %d kept)", file_id, xuid, key,
              len(data), len(kept))
@@ -706,16 +888,20 @@ def challenge_completed(gamertag_of):
             scored(xuid)
         STORE.load()
         key = "%016X" % xuid
-        entry = STORE.club.setdefault(key, {"xuid": key, "cars": {}})
-        entry["gamertag"] = gamertag_of(xuid)
+        kept = STORE.club.get(key)
+        # a copy: the entry that is kept never changes (Store)
+        entry = dict(kept or {"xuid": key, "cars": {}}, gamertag=gamertag_of(xuid))
         cars = entry["cars"]
         done = cars.get(str(car), [])
         new = thumb not in done and car != 0 and len(done) < CLUB_MAX_PER_CAR and \
             (str(car) in cars or len(cars) < CLUB_MAX_CARS)
         if new:
-            cars[str(car)] = done + [thumb]
-            entry.update(carId=car, submitted=int(time.time()), server=server_id(), build=build,
+            entry.update(cars={**cars, str(car): done + [thumb]}, carId=car,
+                         submitted=int(time.time()), server=server_id(), build=build,
                          verified=True)  # only signed-in players' medals count
+        if entry != kept:
+            STORE.put_club(key, entry)  # a new name alone is saved with the next change
+        if new:
             STORE.save()
         log.info("title: 1000 Club %016X '%s': challenge %08X in car %d%s, %d medals", xuid,
                  entry["gamertag"], thumb, car, "" if new else " (already counted)",
@@ -1137,11 +1323,8 @@ def read_file(path):
 
 def take_off_board(key, entry):
     """Removes a ranked row (and a pending ghost of it); returns its ghost's bytes."""
-    board = STORE.boards.get(key, {})
-    if board.get(entry["xuid"]) is entry:
-        del board[entry["xuid"]]
-        if not board:
-            del STORE.boards[key]
+    if STORE.boards.get(key, {}).get(entry["xuid"]) is entry:
+        STORE.drop("boards", key, entry["xuid"])
     STORE.ghosts.pop(entry.get("scoreId"), None)
     data = None
     if entry.get("ghostFileId", -1) >= 0:
@@ -1165,9 +1348,7 @@ def admin_change(action, key, where, entry):
         bigger = int(key.split(":")[0]) in BIGGER_IS_BETTER
         if old and not better(entry["score"], old["score"], bigger):
             return False
-        del STORE.unranked[key][entry["xuid"]]
-        if not STORE.unranked[key]:
-            del STORE.unranked[key]
+        STORE.drop("unranked", key, entry["xuid"])
         data = read_file(review_ghost_path(entry["scoreId"])) if entry.get("reviewGhost") else None
         remove_review_ghost(entry)
         if old:
@@ -1177,18 +1358,15 @@ def admin_change(action, key, where, entry):
         problem, kept = ghostfile.check(data, row["score"], row["carId"], tracks_of(key)) \
             if data is not None else ("none", None)
         if problem is None:
-            row["ghostFileId"] = STORE.next_file
-            STORE.next_file += 1
+            row["ghostFileId"] = STORE.new_file()
             write_ghost(row["ghostFileId"], kept, 0)  # its review copy went just above
-        board[entry["xuid"]] = row
+        STORE.put("boards", key, entry["xuid"], row)
         return True
     if action == "delete":
         if where == "ranked":
             take_off_board(key, entry)
         else:
-            del STORE.unranked[key][entry["xuid"]]
-            if not STORE.unranked[key]:
-                del STORE.unranked[key]
+            STORE.drop("unranked", key, entry["xuid"])
             remove_review_ghost(entry)
         return True
     return False

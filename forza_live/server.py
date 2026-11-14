@@ -2122,6 +2122,18 @@ async def keep_counted(stores=None, every=None):
         await asyncio.sleep(limits.RESCAN_SECONDS if every is None else every)
 
 
+def save_at_stop(server):
+    """What the server writes as it stops, the boards last: their last write is megabytes, and
+    whatever ends it early (a second signal, the stop's time running out) costs the boards
+    nothing, their journal has every change (#67). The stores before them have no journal."""
+    server.save_state()  # a restart now keeps the players (#93)
+    if coop_ledger.LEDGER.dirty:
+        coop_ledger.LEDGER.save()
+    if server.friends.store.dirty or server.friends.store.saving:
+        server.friends.store.save()
+    scores.STORE.stop()  # scoreboards.json gets what only its journal had
+
+
 async def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="0.0.0.0", help="address to listen on")
@@ -2204,6 +2216,7 @@ async def main():
     challenge.configure(args)
     set_rate_limit(args.rate_limit)
     counting = asyncio.create_task(keep_counted())  # the disk totals, never on this loop (#64)
+    writing = asyncio.create_task(scores.keep_written())  # scoreboards.json whole: a thread's (#67)
 
     loop = asyncio.get_running_loop()
     transport, server = await loop.create_datagram_endpoint(
@@ -2260,13 +2273,10 @@ async def main():
                 await asyncio.to_thread(discord_status.update, server.status(), args.data_dir)
     finally:
         counting.cancel()
+        writing.cancel()
         limits.STORED.close()  # a count under way ends now: its thread does not hold the exit
         videos.STORED.close()
-        server.save_state()  # a restart now keeps the players (#93)
-        if coop_ledger.LEDGER.dirty:
-            coop_ledger.LEDGER.save()
-        if server.friends.store.dirty:
-            server.friends.store.save()
+        save_at_stop(server)
         if discord_status.enabled():
             discord_status.offline(args.data_dir)
         transport.close()

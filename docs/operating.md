@@ -635,4 +635,88 @@ the routes are off and the account page cannot delete.
 
 Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it.
 
-To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
+To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, put the journal in the file first ([scores on disk](#scores-on-disk) has the command). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
+
+### Scores on disk
+
+The boards are more than one file in the data folder:
+
+- `scoreboards.json`: every board, the unranked rows and the 1000 Club, as plain JSON with a
+  row to a line. It grows with the boards (26 MB on the public server), so the server does not
+  write it at every score, which stopped everything else for as long as the write took. A
+  thread writes it whole once a minute while there is something new (`scoreboards:
+  scoreboards.json written whole in 0.41 s, off the event loop` in the log), and the server
+  writes it one last time as it stops.
+- `scoreboards.json.bak`: the file before that one.
+- `scoreboards.journal`: the latest changes, a line each (a new best, a ghost's id, a 1000 Club
+  medal, an operator's unrank or delete), flushed to disk before the game is answered. It has
+  every change `scoreboards.json` lacks, and those its `.bak` lacks. Its first line names the
+  files it continues, by SHA-256.
+- `ghosts/`: the Rivals ghosts, a file each, as before.
+
+A start reads `scoreboards.json` and then the journal's lines it lacks (`scoreboards: 37 changes
+from scoreboards.journal on top of scoreboards.json`). So a kill, a crash or a power cut at any
+moment loses no score or ghost a player was told was kept; a line the stop cut in half was
+never acknowledged and is dropped.
+
+The stop says in the log what it did with the file, in one of three lines:
+
+- `scoreboards: scoreboards.json written whole at the stop in 0.32 s: it has every change`
+- `scoreboards: nothing to write at the stop: scoreboards.json has every change`
+- `scoreboards: ... not written at the stop (...); its journal has every change`, a warning (a
+  full disk, for example).
+
+After one of the first two, `scoreboards.json` alone is complete. After the third, or with none
+of them (a kill, a crash, a stop that ran out of its 20 s), it is complete only together with
+`scoreboards.journal`. This version loses nothing either way; a version from before the journal
+does (rolling back, below).
+
+What that means for you:
+
+- **Stopping**: one `docker compose stop`, and let it end. The boards are written last, after
+  everything else the server saves.
+- **Backups**: the whole data folder, with the server stopped. A copy of `scoreboards.json`
+  taken while the server runs is not complete without `scoreboards.journal` beside it: by
+  itself it lacks up to a minute of scores. If you must copy from a running server, copy
+  `scoreboards.json` first and `scoreboards.journal` right after it, and keep the two together.
+- **Restoring or editing `scoreboards.json`**: with the server stopped. A journal that
+  continues another file than the one it finds (a file restored without its journal, or edited)
+  is not applied: the file is taken as it is, and the journal is renamed
+  `scoreboards.journal.unused.1` (the next one `.2`, and so on: none is written over; delete
+  them once you have looked). The log says so, with what the server knows of the journal's
+  changes; whether the file it found has them, it cannot know.
+- **Going back to an older `scoreboards.json`** (its `.bak`, or the file of a backup, to undo
+  something): remove `scoreboards.journal` as well. The journal continues the `.bak` too, so
+  left in place it is applied again on top of the copy you put back, and what you wanted to
+  undo is done again.
+- **Rolling back to a version from before the journal**: that version reads `scoreboards.json`
+  alone. So before any rollback, with the server stopped and the image still this version's,
+  put the journal's changes in the file. It takes a second and needs no ports:
+
+      docker compose stop
+      docker compose run --rm --entrypoint python3 forza-live -c "import logging; logging.basicConfig(level=logging.INFO); from forza_live.competition import scores; scores.configure('/data'); scores.STORE.load(); scores.STORE.stop()"
+
+  It must end with one of the first two lines above; after a clean stop it finds nothing to
+  write, and that is how you know. Then check out the previous version and run
+  `docker compose up -d --build`. Without Docker, run the same `python3 -c "..."` from the
+  repository's folder with your data folder in place of `/data`.
+
+  A rollback without that step, after a stop that was not clean, costs what only the journal
+  had:
+  - the scores, ghosts and 1000 Club medals of the last minute;
+  - where a best was improved in that minute, the row before it comes back, naming a ghost file
+    the server already deleted: rivals get no ghost for that row until its player sets a new
+    best;
+  - rows an operator unranked or deleted in that minute are on the boards again;
+  - the ghost id counter goes back, so the previous version gives its next ghosts ids that were
+    already used.
+
+  And it is for good once the previous version has written `scoreboards.json`, which it does at
+  its first new score: at the next update the journal no longer continues the file, so it is
+  put aside and not applied. As long as the previous version has not written the file, starting
+  this version once more still applies the journal.
+- **Starting the boards from nothing**: delete `scoreboards.json`, `scoreboards.json.bak` and
+  `scoreboards.journal` with the server stopped.
+
+`friends.json` is one file as before, written whole at most every 2 s after a change: by a
+thread too, from a copy the server takes in a few milliseconds.
