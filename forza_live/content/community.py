@@ -46,7 +46,9 @@ Public routes, on the title services port (no side effects, never a XUID):
                                 (leaderboards.player_id, salted: never the XUID), so the website
                                 can show a player's items together
   GET /community/img/<id>.png   a live photo (.jpg for a JPEG): nosniff, CSP default-src 'none',
-                                cached for IMAGE_SECONDS; at most IMAGES_PER_MINUTE a minute
+                                cached for IMAGE_SECONDS; at most IMAGES_PER_MINUTE a minute on
+                                the whole server, and each address within its own budget of
+                                requests and bytes (core/media.py); sent in pieces
 
 Operator routes (lsp.is_local_admin: X-Admin-Token in its header, never ?token=, and never
 through the tunnel or a reverse proxy; requests with an Origin header are refused):
@@ -78,6 +80,7 @@ from forza_live.competition import objectives
 from forza_live.content import designs
 from forza_live.core import durable
 from forza_live.core import limits
+from forza_live.core import media
 
 log = logging.getLogger("forza-live")
 
@@ -641,17 +644,26 @@ SAFE = ("X-Content-Type-Options: nosniff", "Content-Security-Policy: default-src
 
 
 def image_reply(pid, p, headers, cache):
+    """A photo's file as a media.FileBody: the HTTP handler sends it in pieces. Its ETag is the
+    record's SHA-256 of the published file, so nothing is read to answer If-None-Match."""
     kind = p.get("type", "jpeg")
     try:
         with open(image_path(pid, kind), "rb") as src:
-            data = src.read()
+            size = os.fstat(src.fileno()).st_size
     except OSError:
         return reply(404, {"error": "no such photo"})
-    etag = '"%s"' % hashlib.sha256(data).hexdigest()
+    etag = '"%s"' % p["sha256"]
     extra = SAFE + ("ETag: " + etag, "Cache-Control: " + cache)
     if headers.get("if-none-match") == etag:
         return 304, TYPES[kind][1], b"", extra
-    return 200, TYPES[kind][1], data, extra
+    return 200, TYPES[kind][1], media.FileBody(image_path(pid, kind), 0, size), extra
+
+
+def too_many(wait):
+    """429 for an address over its own budget on the media routes (media.Budget): when it may
+    come back, as Retry-After."""
+    return reply(429, {"error": "too many requests from this address, try again in %d s" % wait},
+                 ("Retry-After: %d" % wait,))
 
 
 def image_budget():
@@ -676,9 +688,11 @@ def image_of(path):
     return m.group(1), p
 
 
-def handle(method, path, headers, body, admin):
+def handle(method, path, headers, body, admin, source=None):
     """(status, content type, body, extra headers) for /community/... and /admin/photos...;
-    None for another path. admin(): the request may use the operator's routes."""
+    None for another path. admin(): the request may use the operator's routes. source: the
+    address an image request is counted under (media.source), None for one with no budget of
+    its own."""
     if not handles(path):
         return None
     url = urllib.parse.urlsplit(path)
@@ -693,12 +707,16 @@ def handle(method, path, headers, body, admin):
             return 304, "application/json", b"", extra
         return 200, "application/json", data, extra
     if url.path.startswith("/community/img/"):
+        wait = media.admit(source)  # its own budget first: what that refuses costs nobody else
+        if wait:
+            return too_many(wait)
         found = image_of(url.path[len("/community"):])
         if found is None or not public(found[1], designs.banned_xuids()):
             return reply(404, {"error": "no such photo"})
         if not image_budget():
             return reply(429, {"error": "too many requests, try again in a minute"})
-        return image_reply(*found, headers, "public, max-age=%d" % IMAGE_SECONDS)
+        return media.charge(source, image_reply(*found, headers,
+                                                "public, max-age=%d" % IMAGE_SECONDS))
     return reply(404, {"error": "not found"})
 
 

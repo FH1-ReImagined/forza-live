@@ -58,7 +58,9 @@ Public routes, on the title services port (no side effects, never a XUID):
                                      videos newest first, at most FEED_MAX; ETag, Cache-Control
   GET /community/video/<id>.mp4      a live video (byte ranges: 206 Partial Content, which a
                                      browser's player needs), nosniff, CSP default-src 'none'
-  GET /community/video/<id>.jpg      its poster; both at most MEDIA_PER_MINUTE a minute
+  GET /community/video/<id>.jpg      its poster; both at most MEDIA_PER_MINUTE a minute on the
+                                     whole server, and each address within its own budget of
+                                     requests and bytes (core/media.py); sent in pieces
 
 Operator routes (lsp.is_local_admin, as the photos': X-Admin-Token in its header, never
 through the tunnel or a reverse proxy, never with an Origin header):
@@ -95,6 +97,7 @@ from forza_live.content import photos
 from forza_live.competition import leaderboards
 from forza_live.core import durable
 from forza_live.core import limits
+from forza_live.core import media
 
 log = logging.getLogger("forza-live")
 
@@ -826,24 +829,24 @@ def byte_range(header, size):
 
 
 def media_reply(path, ext, headers, cache, etag):
-    """A video (with byte ranges), a poster or a frame; only the bytes asked for are read."""
+    """A video (with byte ranges), a poster or a frame, as a media.FileBody: the HTTP handler
+    reads and sends it in pieces, a range too, and only the bytes asked for."""
     extra = community.SAFE + ("ETag: " + etag, "Cache-Control: " + cache, "Accept-Ranges: bytes")
     try:
         with open(path, "rb") as src:
             size = os.fstat(src.fileno()).st_size
-            if headers.get("if-none-match") == etag:
-                return 304, TYPES[ext], b"", extra
-            r = byte_range(headers.get("range"), size) if ext == ".mp4" else None
-            if r == "bad":
-                return 416, "text/plain", b"", extra + ("Content-Range: bytes */%d" % size,)
-            if r is not None and headers.get("if-range", etag) == etag:
-                start, end = r
-                src.seek(start)
-                return (206, TYPES[ext], src.read(end + 1 - start),
-                        extra + ("Content-Range: bytes %d-%d/%d" % (start, end, size),))
-            return 200, TYPES[ext], src.read(), extra
     except OSError:
         return reply(404, {"error": "no such video"})
+    if headers.get("if-none-match") == etag:
+        return 304, TYPES[ext], b"", extra
+    r = byte_range(headers.get("range"), size) if ext == ".mp4" else None
+    if r == "bad":
+        return 416, "text/plain", b"", extra + ("Content-Range: bytes */%d" % size,)
+    if r is not None and headers.get("if-range", etag) == etag:
+        start, end = r
+        return (206, TYPES[ext], media.FileBody(path, start, end + 1 - start),
+                extra + ("Content-Range: bytes %d-%d/%d" % (start, end, size),))
+    return 200, TYPES[ext], media.FileBody(path, 0, size), extra
 
 
 def media_budget():
@@ -866,9 +869,10 @@ def media_of(path):
     return m.group(1), v, m.group(2), '"%s"' % sha
 
 
-def handle(method, path, headers, body, admin):
+def handle(method, path, headers, body, admin, source=None):
     """(status, content type, body, extra headers) for the videos' routes; None for another
-    path. admin(): the request may use the operator's routes."""
+    path. admin(): the request may use the operator's routes. source: the address a media
+    request is counted under (media.source), None for one with no budget of its own."""
     if not handles(path):
         return None
     url = urllib.parse.urlsplit(path)
@@ -883,13 +887,17 @@ def handle(method, path, headers, body, admin):
         if headers.get("if-none-match") == etag:
             return 304, "application/json", b"", extra
         return 200, "application/json", data, extra
+    wait = media.admit(source)  # its own budget first: what that refuses costs nobody else
+    if wait:
+        return community.too_many(wait)
     found = media_of(url.path[len("/community/video"):])
     if found is None or not public(found[1], designs.banned_xuids()):
         return reply(404, {"error": "no such video"})
     if not media_budget():
         return reply(429, {"error": "too many requests, try again in a minute"})
     vid, _, ext, etag = found
-    return media_reply(media_path(vid, ext), ext, headers, "public, max-age=%d" % MEDIA_SECONDS, etag)
+    return media.charge(source, media_reply(media_path(vid, ext), ext, headers,
+                                            "public, max-age=%d" % MEDIA_SECONDS, etag))
 
 
 def admin_handle(method, url, headers, body, admin):

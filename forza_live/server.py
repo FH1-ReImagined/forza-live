@@ -39,6 +39,7 @@ from forza_live.social import discord_status
 from forza_live.social import friends
 from forza_live.competition import events
 from forza_live.core import limits
+from forza_live.core import media
 from forza_live.content import online
 from forza_live.title_services import lsp
 from forza_live.network import proxy
@@ -1900,7 +1901,39 @@ def response(status, body, content_type="application/octet-stream", extra=(), co
     head = [f"HTTP/1.1 {status} {reason.get(status, 'OK')}", f"Content-Type: {content_type}",
             f"Content-Length: {len(body)}", *(["Access-Control-Allow-Origin: *"] if cors else []),
             f"X-Forza-Time: {int(time.time())}", *extra]  # signed requests' clock (auth.py)
-    return ("\r\n".join(head) + "\r\n\r\n").encode() + body
+    head = ("\r\n".join(head) + "\r\n\r\n").encode()
+    # a file's body (media.FileBody) is not in memory: send() writes it after the head
+    return head if isinstance(body, media.FileBody) else head + body
+
+
+# An answer's reader has this long to take each piece of it (media.PIECE): the time between two
+# writes it accepts, never the whole answer's, as a web server's send timeout (nginx's is 60 s
+# too). A reader that is slower, or reads nothing, is dropped with what was buffered for it.
+# Before, an answer waited for its reader without end, a video of 32 MiB whole in memory.
+DRAIN_SECONDS = 60.0
+
+
+async def send(writer, reply, body=None):
+    """Writes an answer: `reply` (its head, and a body that is bytes), then the pieces of `body`
+    (a media.FileBody), each drained within DRAIN_SECONDS. asyncio.TimeoutError when the reader
+    did not take one in time: the connection is aborted, not closed, so nothing stays buffered
+    for it. What was not sent of a FileBody goes back to its address's budget."""
+    sent = 0
+    try:
+        for start in range(0, len(reply), media.PIECE):
+            writer.write(reply[start:start + media.PIECE] if len(reply) > media.PIECE else reply)
+            await asyncio.wait_for(writer.drain(), DRAIN_SECONDS)
+        if body is not None:
+            for piece in body.pieces():
+                writer.write(piece)
+                await asyncio.wait_for(writer.drain(), DRAIN_SECONDS)
+                sent += len(piece)
+    except asyncio.TimeoutError:
+        writer.transport.abort()
+        raise
+    finally:
+        if body is not None:
+            media.unsent(body, sent)
 
 
 async def http_handler(server, reader, writer):
@@ -1942,6 +1975,7 @@ async def http_handler(server, reader, writer):
             entry[1] = None
             keep = headers.get("connection", "").lower() == "keep-alive"
             conn = ("Connection: Keep-Alive" if keep else "Connection: close",)
+            data = b""  # the answer's body, when it is a file to send in pieces (send)
             if path in ("/", "/status"):
                 reply = response(200, json.dumps(server.status(), indent=2, default=str).encode(),
                                  "application/json", conn)
@@ -2034,8 +2068,7 @@ async def http_handler(server, reader, writer):
                              status, len(data))
                 reply = response(status, data, content_type, conn + extra)
             entry[1] = time.monotonic()  # answered: it waits again, while its answer is read too
-            writer.write(reply)
-            await writer.drain()
+            await send(writer, reply, data if isinstance(data, media.FileBody) else None)
             if not keep:
                 break
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, ValueError,
