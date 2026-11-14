@@ -222,7 +222,7 @@ def remove(fid):
     load()["files"].pop(str(fid), None)
     for suffix in (".bin", ".prev", ".png"):
         try:
-            os.remove(file_path(fid, suffix))
+            limits.remove(file_path(fid, suffix))  # the disk quota gets its bytes back
         except OSError:
             pass
 

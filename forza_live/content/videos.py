@@ -137,7 +137,11 @@ _feed = {"key": None, "body": b"", "etag": ""}
 _version = [0]
 _media = []        # times of the media requests of the last minute
 _collected = [0.0]
-_usage = {"at": float("-inf"), "bytes": 0, "added": 0}
+# The bytes under DATA_DIR/videos, kept in memory as the other uploads' are (limits.Stored): a
+# link is counted as the link, never as what it names. The server's own writes and deletes are
+# followed as they happen; what the converter puts in converted/ is seen at the next count
+# (limits.RESCAN_SECONDS), and by then collect() has usually taken it in already.
+STORED = limits.Stored(lambda: [folder()], stat=os.lstat)
 
 
 def configure(data_dir):
@@ -150,7 +154,7 @@ def configure(data_dir):
     _version[0] += 1
     _media.clear()
     _collected[0] = 0.0
-    _usage.update({"at": float("-inf"), "bytes": 0, "added": 0})
+    STORED.reset()
 
 
 def index_path():
@@ -197,25 +201,17 @@ def write(path, data):
 
 
 def usage():
-    """Bytes under DATA_DIR/videos (counted again at most every 30 s)."""
-    now = time.monotonic()
-    if now - _usage["at"] > 30:
-        total = 0
-        for root, _, names in os.walk(folder()):
-            for name in names:
-                try:
-                    total += os.lstat(os.path.join(root, name)).st_size
-                except OSError:
-                    pass
-        _usage.update({"at": now, "bytes": total, "added": 0})
-    return _usage["bytes"] + _usage["added"]
+    """Bytes under DATA_DIR/videos, from memory (STORED): never a walk."""
+    return STORED.total()
 
 
-def accept(nbytes):
-    """The videos' own budget (FORZA_VIDEOS_CAP_MB): ValueError when nbytes more do not fit."""
-    if usage() + nbytes > VIDEOS_CAP:
-        raise ValueError("the videos' disk budget (%d MB) is full" % (VIDEOS_CAP >> 20))
-    _usage["added"] += nbytes
+def accept(nbytes, upload=True):
+    """The videos' own budget (FORZA_VIDEOS_CAP_MB): ValueError when nbytes more do not fit.
+    upload: False for a converted clip's files. Before the first count they are not held to
+    the start's allowance (limits.Stored.take): a video refused for it would be dropped for
+    good, and they are bounded already, by the clips that wait (MAX_WAITING) and their caps."""
+    STORED.take(nbytes, VIDEOS_CAP, "the videos' disk budget (%d MB) is full" % (VIDEOS_CAP >> 20),
+                upload)
 
 
 def frames_for(seconds):
@@ -227,7 +223,7 @@ def frames_for(seconds):
 
 def remove_file(path):
     try:
-        os.remove(path)
+        STORED.remove(path)  # the videos' budget gets its bytes back
     except OSError:
         pass
 
@@ -406,7 +402,9 @@ def clip_uploaded(fid, rec, path, signed):
     # seed: where in each interval the screened frames are taken; only the converter reads it
     job = {"version": 1, "id": vid, "maxSeconds": MAX_SECONDS, "maxWidth": OUT_WIDTH,
            "maxBytes": MAX_MP4, "seed": secrets.token_hex(16)}
-    write(folder("incoming", vid + ".json"), json.dumps(job).encode())  # last: the job is whole
+    job = json.dumps(job).encode()
+    write(folder("incoming", vid + ".json"), job)  # last: the job is whole
+    STORED.add(len(job))
     d["videos"][vid] = {
         "owner": xuid, "fileId": fid, "gamertag": gamertag, "title": clean_title(info["title"]),
         "status": CONVERTING, "created": now, "takenAt": int(now), "approvedAt": None,
@@ -594,7 +592,8 @@ def _finish(vid, v, r):
         frames.append(clean)
     poster = frames[poster_frame - 1]  # a screened frame, byte for byte
     w, h = size
-    accept(len(video) + len(poster) + sum(map(len, frames)))  # ValueError: the videos' budget
+    # ValueError: the videos' budget
+    accept(len(video) + len(poster) + sum(map(len, frames)), upload=False)
     write(media_path(vid, ".mp4"), video)
     write(media_path(vid, ".jpg"), poster)
     for n, f in enumerate(frames, 1):
@@ -608,7 +607,9 @@ MAX_RESULTS = 50  # results taken in by one pass (the rest wait for the next)
 
 
 def remove_result(path):
-    """A result folder gone, whatever the converter put there (a link is removed, not followed)."""
+    """A result folder gone, whatever the converter put there (a link is removed, not followed).
+    Nothing is given back to the budget for it: the converter's files were never added to the
+    running total, and where a count saw them the next count puts it right."""
     try:
         if os.path.islink(path) or not os.path.isdir(path):
             os.remove(path)

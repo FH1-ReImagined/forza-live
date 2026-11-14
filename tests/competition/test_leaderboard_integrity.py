@@ -11,6 +11,7 @@ import struct
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from forza_live.core import auth
 from forza_live.competition import leaderboards as lb
@@ -22,7 +23,7 @@ from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
 from tests.core import test_auth as ta
 from tests.competition import test_ghost as tg
-from tests.support import RaceClock
+from tests.support import DiskTotals, RaceClock
 
 ALL = srv.FEATURE_INVITE_PICK | srv.FEATURE_FRIENDS | srv.FEATURE_CHAT
 KEY = bytes(15) + bytes([7])
@@ -52,12 +53,12 @@ class Base(unittest.TestCase):
         lb.configure()
         self.svc = scores.services(lambda xuid: TAGS.get(xuid, "%016X" % xuid))
         self.addCleanup(self.dir.cleanup)
-        # the ghosts count toward the disk quota: scanned here, forgotten after
+        # the ghosts count toward the disk quota: counted here, forgotten after
         self.addCleanup(limits.configure, limits._data_dir)
-        self.addCleanup(limits._added.__setitem__, 0, 0)
-        self.addCleanup(limits._cache.__setitem__, 0, 0)
         limits.configure(self.dir.name)
-        limits._cache[0] = limits._added[0] = 0
+        limits.count()
+        # every ghost written, moved or deleted is counted: checked at each test's end
+        self.addCleanup(DiskTotals().check, self)
         self.addCleanup(setattr, scores, "RACE_TRACKS", scores.RACE_TRACKS)
         scores.RACE_TRACKS = {199: {156}}   # GoPro Millennia Masters: Clear Springs Circuit
         self.addCleanup(setattr, scores, "EVENTS", scores.EVENTS)
@@ -255,6 +256,37 @@ class GhostTest(Base):
                                                       tg.replay_data(lap=110.0)))
         self.assertFalse(os.path.isfile(first))
         self.assertEqual(self.rows(), [("DriverA", 110.0, 2)])
+
+
+    def test_the_disk_quota_follows_a_ghost_off_the_board_and_back(self):
+        self.best(A_XUID, 115.13)
+        kept = os.path.getsize(scores.ghost_path(1))
+        self.assertEqual(limits.usage(), kept)  # what is kept of the upload, not the upload
+        player = "%016X" % A_XUID
+        self.admin("POST", "/admin/scores/unrank", player=player)  # its ghost goes to review
+        review = scores.review_ghost_path(scores.STORE.unranked[BOARD][player]["scoreId"])
+        self.assertFalse(os.path.exists(scores.ghost_path(1)))
+        self.assertEqual(limits.usage(), os.path.getsize(review))
+        self.admin("POST", "/admin/scores/rank", player=player)  # and back, as a new file
+        self.assertEqual(self.rows(), [("DriverA", 115.13, 2)])
+        self.assertFalse(os.path.exists(review))
+        self.assertEqual(limits.usage(), os.path.getsize(scores.ghost_path(2)))
+        self.best(A_XUID, 110.0)  # a better lap: its ghost in the old one's place
+        self.assertEqual(limits.usage(), os.path.getsize(scores.ghost_path(3)))
+        self.admin("POST", "/admin/scores/delete", player=player)
+        self.assertEqual(limits.usage(), 0)
+
+    def test_a_full_quota_keeps_the_row_without_its_ghost(self):
+        self.best(B_XUID, 120.0)
+        used = limits.usage()
+        reply = self.submit(A_XUID, 115.13)
+        data = tg.ghost(tg.replay_init(lap=115.13, name="DriverA"), tg.replay_data(lap=115.13))
+        with mock.patch.object(limits, "DISK_CAP", used + len(data) - 1):
+            # the title services answer a ValueError with "bad parameters": the game carries on
+            with self.assertRaisesRegex(ValueError, "disk quota reached"):
+                self.upload(A_XUID, reply["scoreId"], data)
+        self.assertEqual(self.rows(), [("DriverA", 115.13, -1), ("DriverB", 120.0, 1)])
+        self.assertEqual(limits.usage(), used)
 
 
 class AdminTest(Base):

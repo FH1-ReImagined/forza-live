@@ -33,7 +33,7 @@ from forza_live.title_services import lsp
 from forza_live import server as srv
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
-from tests.support import GAME_TOOLS, decode_png
+from tests.support import GAME_TOOLS, DiskTotals, decode_png
 
 ALICE, BOB, CAROL, DAVE, EVE = (0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03,
                                0x0009000000000D04, 0x0009000000000E05)
@@ -216,8 +216,10 @@ class Base(unittest.TestCase):
         self.server = SimpleNamespace(friends=SimpleNamespace(store=store))
         self.token = mock.patch.object(lsp, "ADMIN_TOKEN", TOKEN)
         self.token.start()
+        self.totals = DiskTotals(with_videos=True)
 
     def tearDown(self):
+        self.totals.check(self)  # every file written or removed was counted (#64)
         self.token.stop()
         limits.configure_proxies()
         lsp.DATA_DIR = self.old_dir
@@ -717,6 +719,7 @@ class FeedTest(Base):
         self.release(fid)
         sha = self.site()["designs"][0]["sha256"]
         os.remove(designs.file_path(fid, ".png"))
+        self.totals.skip()  # deleted behind the server's back: the next count's to put right
         _, _, png, _ = self.http("GET", "/community/design-img/%s.png" % self.wid(fid))
         self.assertEqual(hashlib.sha256(png).hexdigest(), sha)
 
