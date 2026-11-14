@@ -396,9 +396,14 @@ def unrank(key, entry, reason, ghost=None):
     if ghost and len(ghost) <= GHOST_MAX:
         try:
             limits.accept(len(ghost))
-            os.makedirs(os.path.dirname(review_ghost_path(entry["scoreId"])), exist_ok=True)
-            with open(review_ghost_path(entry["scoreId"]), "wb") as f:
-                f.write(ghost)
+            try:
+                os.makedirs(os.path.dirname(review_ghost_path(entry["scoreId"])), exist_ok=True)
+                limits.replacing(review_ghost_path(entry["scoreId"]))
+                with open(review_ghost_path(entry["scoreId"]), "wb") as f:
+                    f.write(ghost)
+            except OSError:
+                limits.release(len(ghost))  # not written: not counted
+                raise
             entry["reviewGhost"] = True
         except (OSError, ValueError) as e:
             log.info("title: refused ghost of score %s not kept: %s", entry["scoreId"], e)
@@ -541,7 +546,7 @@ def review_ghost_path(score_id):
 
 def remove_ghost(file_id):
     try:
-        os.remove(ghost_path(file_id))
+        limits.remove(ghost_path(file_id))  # the disk quota gets its bytes back
     except OSError:
         pass
 
@@ -549,9 +554,23 @@ def remove_ghost(file_id):
 def remove_review_ghost(entry):
     if entry.get("reviewGhost") and re.fullmatch(r"[0-9a-f]{32}", entry.get("scoreId", "")):
         try:
-            os.remove(review_ghost_path(entry["scoreId"]))
+            limits.remove(review_ghost_path(entry["scoreId"]))
         except OSError:
             pass
+
+
+def write_ghost(file_id, kept, accepted):
+    """A checked ghost's file. accepted: the bytes limits.accept counted for it (the upload,
+    which is larger than what is kept of it), or 0 for one that was not asked about (a ghost
+    put back on the board from review): the disk quota's total ends up with the file's size."""
+    os.makedirs(os.path.dirname(ghost_path(file_id)), exist_ok=True)
+    limits.replacing(ghost_path(file_id))
+    with open(ghost_path(file_id), "wb") as f:
+        f.write(kept)
+    if accepted >= len(kept):
+        limits.release(accepted - len(kept))
+    else:
+        limits.wrote(len(kept) - accepted)
 
 
 def upload_file(xuid, body):
@@ -599,9 +618,7 @@ def upload_file(xuid, body):
         remove_ghost(previous["ghostFileId"])
     file_id = STORE.next_file
     STORE.next_file += 1
-    os.makedirs(os.path.dirname(ghost_path(file_id)), exist_ok=True)
-    with open(ghost_path(file_id), "wb") as f:
-        f.write(kept)
+    write_ghost(file_id, kept, len(data))
     entry["ghostFileId"] = file_id
     STORE.save()
     log.info("title: ghost %d from %016X for board %s (%d bytes, %d kept)", file_id, xuid, key,
@@ -1162,9 +1179,7 @@ def admin_change(action, key, where, entry):
         if problem is None:
             row["ghostFileId"] = STORE.next_file
             STORE.next_file += 1
-            os.makedirs(os.path.dirname(ghost_path(row["ghostFileId"])), exist_ok=True)
-            with open(ghost_path(row["ghostFileId"]), "wb") as f:
-                f.write(kept)
+            write_ghost(row["ghostFileId"], kept, 0)  # its review copy went just above
         board[entry["xuid"]] = row
         return True
     if action == "delete":

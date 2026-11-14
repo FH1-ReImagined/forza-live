@@ -235,6 +235,17 @@ that was requested but not taken.
 - shader lists ([website data](website-data.md#shader-lists-from-players)): 1 MiB and 500 pipelines per upload, 5000 pipelines per player and UTC day,
   8 storage versions and 200000 pipelines per version.
 
+The two disk totals (`FORZA_DISK_CAP_MB` and the videos' `FORZA_VIDEOS_CAP_MB`) are kept in
+memory. The server counts the stored files once as it starts, in a thread, and says so in the
+log (`disk usage: uploads: 25001 files, 930.4 MB (counted in 4.6 s, off the event loop)`); from
+then on every upload adds to the total and every delete takes from it, and the files are counted
+again every 5 minutes, in a thread too, to put right what the server could not see: a file
+copied into the data folder or deleted from it by hand, the video converter's results. A recount
+that finds the running total 1 MB or more off logs the difference. Until the first count is done
+the uploads are taken up to 64 MB in all, so a store that was already full is passed by that
+much at most. Counting never happens on the server's event loop: a count of 25,000 files takes
+seconds on a slow disk, and nothing else was answered meanwhile.
+
 Players are not authenticated (the XUID is whatever the client claims), except for the friends
 list, the shader lists and the title service writes, which need a signature by the key bound to
 the XUID ([signed requests](#signed-requests)).

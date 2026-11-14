@@ -24,6 +24,7 @@ from forza_live.title_services import lsp
 from forza_live.content import photos
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
+from tests.support import DiskTotals
 
 ALICE, BOB, CAROL, DAVE, EVE = (0x0009000000000A01, 0x0009000000000B02, 0x0009000000000C03,
                                0x0009000000000D04, 0x0009000000000E05)
@@ -69,8 +70,10 @@ class Base(unittest.TestCase):
         for xuid, seed in SEEDS.items():
             store.get(xuid, create=True)["pub"] = ed25519.public_key(seed).hex()
         self.server = SimpleNamespace(friends=SimpleNamespace(store=store))
+        self.totals = DiskTotals()
 
     def tearDown(self):
+        self.totals.check(self)  # every file written or removed was counted (#64)
         lsp.DATA_DIR = self.old_dir
         self.dir.cleanup()
 

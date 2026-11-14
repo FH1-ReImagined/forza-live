@@ -527,7 +527,7 @@ def drop(pid, why):
     if p is None:
         return None
     try:
-        os.remove(image_path(pid, p.get("type", "jpeg")))
+        limits.remove(image_path(pid, p.get("type", "jpeg")))  # the disk quota gets its bytes back
     except OSError:
         pass
     log.info("community: photo %s (%016X) removed: %s", pid, p["owner"], why)

@@ -33,7 +33,7 @@ from forza_live import server as srv
 from forza_live.content import photos
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
-from tests.support import decode_png
+from tests.support import DiskTotals, decode_png
 
 try:
     from PIL import Image
@@ -337,8 +337,10 @@ class Base(unittest.TestCase):
         self.server = SimpleNamespace(friends=SimpleNamespace(store=store))
         self.token = mock.patch.object(lsp, "ADMIN_TOKEN", TOKEN)
         self.token.start()
+        self.totals = DiskTotals(with_videos=True)
 
     def tearDown(self):
+        self.totals.check(self)  # every file written or removed was counted (#64)
         self.token.stop()
         limits.configure_proxies()
         lsp.DATA_DIR = self.old_dir
@@ -606,6 +608,7 @@ class UploadTest(Base):
         size = self.only_photo()[1]["size"]
         self.assertEqual(os.path.getsize(community.image_path(self.only_photo()[0])), size)
         limits.configure(self.dir.name)
+        limits.count()
         self.assertGreaterEqual(limits.usage(), len(data) + size)
         with mock.patch.object(limits, "DISK_CAP", limits.usage() + len(data) + size // 2):
             self.upload(BOB, data)  # the private file fits, its community copy does not

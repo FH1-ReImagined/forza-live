@@ -13,6 +13,7 @@ from forza_live.title_services import lsp
 from forza_live.content import photos
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
+from tests.support import DiskTotals
 
 ALICE, BOB = 0x0009000000000A01, 0x0009000000000B02
 
@@ -52,8 +53,10 @@ class PhotoTest(unittest.TestCase):
         limits.configure(self.dir.name)
         photos.configure(self.dir.name)
         clubs.configure(self.dir.name, lambda xuid: {"gamertag": {ALICE: "Alice", BOB: "Bob"}.get(xuid, "")})
+        self.totals = DiskTotals()
 
     def tearDown(self):
+        self.totals.check(self)  # every file written or removed was counted (#64)
         self.dir.cleanup()
 
     def test_upload_in_chunks_completes(self):
@@ -121,7 +124,9 @@ class PhotoTest(unittest.TestCase):
         limits.DISK_CAP = 100
         try:
             self.assertIsNotNone(large_create(ALICE, 60))
-            limits._cache[0] = 0  # rescan
+            self.assertIsNone(large_create(ALICE, 60))
+            limits.count()  # a fresh count says the same
+            self.assertEqual(limits.usage(), 60)
             self.assertIsNone(large_create(ALICE, 60))
         finally:
             limits.DISK_CAP = old
@@ -160,8 +165,10 @@ class StorefrontTest(unittest.TestCase):
         limits.configure(self.dir.name)
         photos.configure(self.dir.name)
         clubs.configure(self.dir.name, lambda xuid: {"gamertag": {ALICE: "Alice", BOB: "Bob"}.get(xuid, "")})
+        self.totals = DiskTotals()
 
     def tearDown(self):
+        self.totals.check(self)  # every file written or removed was counted (#64)
         self.dir.cleanup()
 
     def test_empty_storefront_has_all_slots_free(self):
