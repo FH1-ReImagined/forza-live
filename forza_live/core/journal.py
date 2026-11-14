@@ -71,7 +71,7 @@ class Journal:
         self.name = os.path.splitext(path)[0] + ".journal"
         self._lock = threading.Lock()     # the journal's file and everything below
         self._writing = threading.Lock()  # one checkpoint at a time
-        self._file = None       # the journal, open to append; None: made anew at the next append
+        self._whole = False     # the journal's file is whole; if not, the next append makes it anew
         self.closed = False
         self.base = NO_FILE     # the file in place, by its SHA-256
         self.continues = {NO_FILE: 0}  # as the first line has it: how many of `lines` each file holds
@@ -132,11 +132,7 @@ class Journal:
                 log.info("%s: its last line was cut short by the stop (a change nobody was told "
                          "was kept); %d changes applied", self.name, len(changes))
             return changes
-        self.continues, self.lines = known, [line + b"\n" for line in rest]
-        try:
-            self._file = open(self.name, "ab")
-        except OSError:
-            pass  # made anew at the next append
+        self.continues, self.lines, self._whole = known, [line + b"\n" for line in rest], True
         return changes
 
     def _put_aside(self, known, changes):
@@ -175,14 +171,17 @@ class Journal:
         file is made anew at the next append (whatever part of the line got there goes)."""
         line = json.dumps(change, separators=(",", ":")).encode() + b"\n"
         with self._lock:
-            if self._file is None:
+            if not self._whole:
                 self._rewrite(self.continues, self.lines)
             try:
-                self._file.write(line)
-                self._file.flush()
-                os.fsync(self._file.fileno())
+                # opened for each line: nothing holds the file between two (Windows renames
+                # and deletes no file that is open)
+                with open(self.name, "ab") as f:
+                    f.write(line)
+                    f.flush()
+                    os.fsync(f.fileno())
             except OSError:
-                self._shut()
+                self._whole = False
                 raise
             self.lines.append(line)
 
@@ -218,21 +217,11 @@ class Journal:
         tmp = self.name + ".tmp"
         with open(tmp, "wb") as f:
             f.write(head + b"".join(lines))
-        self._shut()  # Windows renames nothing over an open file
         durable.replace(tmp, self.name, backup=False)
-        self._file = open(self.name, "ab")
-        self.continues, self.lines = continues, lines
-
-    def _shut(self):
-        file, self._file = self._file, None
-        if file is not None:
-            try:
-                file.close()
-            except OSError:
-                pass
+        self.continues, self.lines, self._whole = continues, lines, True
 
     def close(self):
-        """No more appends or checkpoints (the store is configured again)."""
+        """No more checkpoints (the store is configured again: a thread still writing the file
+        of the folder before stops at its next step)."""
         with self._lock:
             self.closed = True
-            self._shut()
