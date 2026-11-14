@@ -73,10 +73,10 @@ email-management and other routes answer 404.
 | `GET /api/auth/browser/v1/config` | the sign-in methods on offer; sets the CSRF cookie |
 | `GET /api/auth/browser/v1/auth/session` | 200 when signed in, 401 when not |
 | `DELETE /api/auth/browser/v1/auth/session` | sign out in this browser |
-| `POST /api/auth/browser/v1/auth/provider/redirect` | a plain form (`provider`, `callback_url`, `process=login`, `csrfmiddlewaretoken`) that sends the browser to Discord or GitHub |
+| `POST /api/auth/browser/v1/auth/provider/redirect` | a plain form (`provider`, `callback_url`, `process=login`, `csrfmiddlewaretoken`) that sends the browser to Discord or GitHub. Any other `process` is 400: allauth's `connect` (add the provider's account to the signed-in account) is not offered |
 | `GET /api/auth/{discord,github}/login/callback/` | where the provider sends the browser back |
-| `POST /api/auth/browser/v1/auth/code/request` | `{"email"}`: mails a code. Known and unknown addresses get the same answer (401, a code login pending) |
-| `POST /api/auth/browser/v1/auth/code/confirm` | `{"code"}`: signs in |
+| `POST /api/auth/browser/v1/auth/code/request` | `{"email"}`: mails a code. Known and unknown addresses get the same answer (401, a code login pending). 400 for an address written as nobody types one: a domain that is another spelling of a domain (full-width letters, a soft hyphen) or an address in place of a name (`user@[192.0.2.1]`), a quoted local part that holds more than a plain one |
+| `POST /api/auth/browser/v1/auth/code/confirm` | `{"code"}`: signs in, and sets the `__Host-fh_known` cookie (see "Limits") |
 
 Our own endpoints (django-ninja, session auth, CSRF checked on every change, JSON bodies only):
 
@@ -280,11 +280,13 @@ Rules:
   mailbox makes a new account and moves the link to it.
 - The website can unlink too (with a sign-in in the past 10 minutes).
 - **Pinning.** The link keeps the public key it was made with. When `friends.json` binds the XUID
-  to another key (the operator re-keyed it, or someone bound a recycled XUID), the link is
-  **frozen**: the new key cannot see the account, unlink or sign it out. The operator checks
-  with the player and unfreezes it in the admin (GameLink, "Unfreeze, pinning the key the XUID
-  is bound to now"). When the game server has forgotten the XUID (`FORGET_DAYS`), the link
-  **waits**; the same identity's next sign-in binds the same key again, and the link works.
+  to another key (the operator re-keyed it), the link is **frozen**: the new key cannot see the
+  account, unlink it, sign it out or put a new link in its place (starting or confirming one is
+  409 `this link needs the operator`). The operator checks with the player and unfreezes it in
+  the admin (GameLink, "Unfreeze, pinning the key the XUID is bound to now"). When the game
+  server has no key for the XUID (the operator cleared it; the game server itself never forgets
+  one), the link **waits**; the same identity's next sign-in binds the same key again, and the
+  link works.
 - A banned XUID cannot start a link, and its account shows the link as banned.
 - Deleting the account removes its link.
 
@@ -345,7 +347,7 @@ file (mode 600) that only this container reads. Never commit it.
 | `FORZA_SMTP_PORT` | `587` | 465 means TLS from the start; anything else means STARTTLS |
 | `FORZA_SMTP_USER`, `FORZA_SMTP_PASSWORD` (`_FILE`) | none | the relay's SMTP credentials (often a user name and an API key) |
 | `FORZA_SMTP_FROM` | `signin@<site host>` | the sender |
-| `FORZA_ACCOUNTS_EMAIL_DAILY` | `200` | code mails a day in all; then email sign-in pauses until the day has passed. Keep it under the relay's own daily cap |
+| `FORZA_ACCOUNTS_EMAIL_DAILY` | `200` | code mails a day in all; then email sign-in pauses until the day has passed. Half of them at most go to addresses that never finished a sign-in. Keep it under the relay's own daily cap |
 | `FORZA_POTM_FROM` | none | the first Photo of the Month, `YYYY-MM` (UTC). Without it there is no contest and its routes answer 404 |
 | `FORZA_POTM_ACCOUNT_DAYS` | `0` | how old an account must have been when it liked for the like to be a vote (`0`: no age rule) |
 | `FORZA_HUB` | off | `1` turns the mods and texture packs hub on |
@@ -557,24 +559,35 @@ a day when the past day's new links reach half of `FORZA_ACCOUNTS_LINKS_DAILY`.
 - **Audit events:** sign-ins, sign-outs, account creation, links made, moved and removed, items
   deleted (with their title); 90 days, with no IP address.
 - **Rate-limit counters:** in the cache table. They hold IP addresses and address hashes for an
-  hour or a day.
+  hour or a day; `nightly` deletes the ones that have run out.
+- **In the browser:** besides the session and CSRF cookies, `__Host-fh_known` after a sign-in by
+  email (a browser already signed in to an account with an email address gets it when it next
+  opens its account page): the address's stand-in (the HMAC above), signed, for 400 days. It
+  names no address and signs nobody in; it only tells the code request that this browser has
+  signed in with that address before (see "Limits").
 - Deleting the account removes all of it at once. Backups age out in 7 days.
 
 ## Limits
 
 | Who | Limit |
 |-----|-------|
-| per IP | 20 Discord or GitHub sign-in starts an hour; 5 new accounts a day; 5 code mails an hour; 20 wrong codes an hour |
-| per email address | 3 codes an hour, 5 a day; one live code per browser; 5 tries per code; a code lasts 10 minutes |
+| per IP | 20 Discord or GitHub sign-in starts an hour; 5 new accounts a day; 5 code requests an hour and 20 a day; 20 wrong codes an hour |
+| per mailbox | 3 codes an hour, 5 a day, for every spelling of the address together (`members.identity.mailbox`: upper case, `+tag`, quotes, and for Gmail the dots and `googlemail.com`); the same again for a browser that signed in with the address before (its `__Host-fh_known` cookie, which a signed-in browser also gets when it opens its account page), which nobody else's requests use up; one live code per browser; 5 tries per code; a code lasts 10 minutes |
 | per account | 5 new hub items a day (20 per address), 3 waiting per key, 20 hub reports a day; 20 sessions; 10 link claims (and link peeks that find nothing) per 10 minutes; one new link a day; 120 likes an hour and 500 a day (given or taken back); 20 items deleted a day |
 | per XUID (signed) | 600 calls an hour; 5 link starts an hour; one new link a day |
-| whole service | `FORZA_ACCOUNTS_EMAIL_DAILY` code mails a day (then email sign-in pauses); 1,000 new accounts a day; `FORZA_ACCOUNTS_LINKS_DAILY` new links a day; 100 link codes that find nothing a minute, after which codes stop for 10 minutes (the browser's token still works) |
+| whole service | `FORZA_ACCOUNTS_EMAIL_DAILY` code mails a day (then email sign-in pauses), of which half at most to addresses that never finished a sign-in; 1,000 new accounts a day; `FORZA_ACCOUNTS_LINKS_DAILY` new links a day; 100 link codes that find nothing a minute, after which codes stop for 10 minutes (the browser's token still works) |
 
-The limits are allauth rate limits (`ACCOUNT_RATE_LIMITS` in the settings). Over a limit:
+The limits are allauth rate limits (`ACCOUNT_RATE_LIMITS` in the settings), kept as rows of the
+cache table (`CACHES`: room for 200,000, so no counter is dropped to make room for another;
+`nightly` deletes the expired ones). Over a limit:
 - a Discord or GitHub start goes back to the page with `?error=busy`;
 - a code request or confirm gets an error answer;
 - a new account over the new-account limits is not made. The code request then gets the
-  same answer as for any address, and no mail is sent.
+  same answer as for any address, and no mail is sent;
+- an address that never finished a sign-in, once the strangers' half of the day's mails is used
+  up, gets that same answer and no mail either. Accounts that have signed in before still get
+  their codes, so requests for made-up addresses cannot pause email sign-in for the members. The
+  log warns once a day when a share runs out.
 
 Differences from the design (community accounts, M1):
 - **The session cookie is `SameSite=Lax`, not Strict.** allauth keeps the OAuth state in the

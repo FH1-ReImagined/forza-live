@@ -10,7 +10,7 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 |--------|----------------------|--------------|
 | `--host ADDR` | | the address to listen on (`0.0.0.0` for all) |
 | `--http-port PORT` | | the TCP port of the title services and status page (default 21201) |
-| | `FORZA_ADMIN_TOKEN` | the password of the [operator endpoints](operating.md) |
+| | `FORZA_ADMIN_TOKEN` | the password of the [operator endpoints](operating.md): a long random value (`openssl rand -hex 32`). The examples' placeholders are not taken as a token, and the start warns about one under 16 characters |
 | | `FORZA_PANEL_GIFT_MAX` | the most credits one gift from the [operator panel](operating.md#operator-panel) may carry (default 1000000) |
 | | `FORZA_ACCOUNTS_ADMIN_URL` | the website accounts service's admin page, linked from the operator panel (never fetched) |
 | | `FORZA_OWNER_TOKEN` | the token of the [website accounts](operating.md#website-accounts) service, for players deleting their own photos and designs (unset: off) |
@@ -24,11 +24,12 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--relay-only` | | run as a [volunteer relay](operating.md#running-a-relay) of a main server, with `--relay-of HOST:PORT`, `--relay-id ID` and `--relay-secret-file FILE` |
 | `--relay-allow-private` | | a relay also forwards to private and loopback addresses (a test on one LAN only) |
 | | `FORZA_DISK_CAP_MB` | cap of ghosts, cars and market blobs (default 4096) |
-| | `FORZA_MAX_PLAYERS` | cap of player records (default 20000) |
+| | `FORZA_MAX_PLAYERS` | cap of player records, and of the records with a key in `friends.json` (the players' keys, friends and blocks); as many again may have no key (a name another player blocked or asked) (default 20000) |
 | `--no-invites` | `FORZA_INVITES=0` | drop every game invite |
 | `--server-name HOST` | `FORZA_SERVER_NAMES` | the names players type to reach this server ([signed requests](#signed-requests)) |
 | `--rebind-legacy` | `FORZA_REBIND_LEGACY=1` | let an XUID bound to a friends key move to the first signed game |
 | `--raw-key-cutoff UNIX_TIME` | `FORZA_RAW_KEY_CUTOFF` | refuse friends keys sent raw after this time |
+| `--upgrade-cutoff UNIX_TIME` | `FORZA_UPGRADE_CUTOFF` | no more upgrades from a raw friends key to a public key after this time (default: 30 days after `--raw-key-cutoff`) |
 | `--server-id NAME` | `FORZA_SERVER_ID` | the id written on score rows ([which results count](website-data.md#which-results-count)) |
 | `--daily-challenges` | `FORZA_DAILY_CHALLENGES=1` | run the [daily and weekly challenges](website-data.md#daily-and-weekly-challenges) (off by default) |
 | `--daily-challenges-seed TEXT` | `FORZA_DAILY_CHALLENGES_SEED` | the secret seed they are chosen with (default: a random one made at the first start, kept in the data folder) |
@@ -63,6 +64,9 @@ website's files in [website](https://github.com/FH1-ReImagined/website).
         -e FORZA_ADMIN_TOKEN=choose-a-token \
         -v /path/to/data:/data forza-live --host 0.0.0.0
 
+Put a long random value of your own in place of `choose-a-token` (`openssl rand -hex 32` makes
+one): the placeholder itself is not accepted as a token.
+
 Use `--network host`: with a bridge network the players' public ip:port is hidden behind
 Docker's UDP proxy. The optional world events and the Co-op Festival (its festival events
 with CPU drivers; without the database the playlist is not offered) need the game's
@@ -92,9 +96,12 @@ comma separated list.) Add 127.0.0.0/8 only if the agent forwards to 127.0.0.1 (
 LAN IP as the tunnel target otherwise. Players then set `live_server` to the tunnel's public
 address. For a trusted proxy:
 
-- the per-address limits (16 players, 32 HTTP connections) do not apply; the datagram,
-  registration and error rates are counted per tunnelled player (per source port) instead.
-  The server-wide player cap and every player's relay budget stay;
+- the per-address limits (16 players, 32 HTTP connections, the sign-in rate) cannot count its
+  players by address, as they all share the agent's: without PROXY protocol (below) only the
+  server-wide caps hold them, and anyone who opens many connections through the tunnel can use
+  those up. With `--proxy-protocol-udp` and `--proxy-protocol-tcp` each player is counted under
+  the address its header names, as if it connected directly. The datagram and error rates are
+  per tunnelled player (per source port) either way, and every player's relay budget stays;
 - its players are told no public address, so other players do not punch to the agent's
   socket and their traffic goes through the server relay, unless the tunnel sends PROXY
   protocol headers (below). Players connecting directly keep hole punching. The log says
@@ -137,7 +144,28 @@ sends them, as the PROXY protocol requires (a player can send the same bytes its
   address that is not a trusted proxy (the LAN, with the token). The header's address is the
   one logged and counted for the per-address connection limit; admin still needs the token.
 
-Everything else (the per-address UDP limits, the relay budget, admin, auth) stays as above.
+With the headers the per-address limits are the player's own again:
+
+- UDP: a flow's games count under the address its header gave for the 16 players per address,
+  the sign-in rate, the new keys an address may bind and its signature checks
+  ([signed requests](#signed-requests)). The header only repeats what the datagrams said, and
+  an address is often many players', so a place under an address is held against others only by
+  a game that answered the challenge the server sent there (a game with signed requests, once
+  it is signed in). When an address is full, the registration there that has waited longest
+  without answering gives way to a newcomer with signed requests, so sign-ins made in a
+  player's name never keep that player's own game out. Flows are counted the same way: besides
+  those of its games that answered, one address may have 64 (the flows of games just restarted,
+  of games before signed requests); over that the one opened longest ago is refused for the
+  newest (its datagrams are dropped, and it is tried again every 2 s). Flows without an address
+  (older than the server or than its first 2 minutes, or opened while the flow table was full)
+  cannot be told apart: together they may hold half of `--max-peers` (at least 16 players),
+  never the whole server, and bind 32 new keys at once and then 2 a minute. After a restart
+  longer than the saved state lasts (10 minutes), the players who sign in during the first 2
+  minutes are such flows, so keep `--max-peers` at twice the players you expect at once, or more.
+- TCP: connections count under the header's address (an IPv6 address under its /64) for the 32
+  per address, and so do signature checks and wrong operator tokens.
+
+Everything else (the relay budget, admin, auth) stays as above.
 The status page then counts `via_proxy_address` (players with a PROXY address; per player
 `proxy_address`) and `proxy_protocol` (headers taken on UDP and HTTP, headers refused, flows
 known), with no IP address; the log says `via proxy, public address from PROXY` on such joins.
@@ -178,9 +206,13 @@ that was requested but not taken.
 
 ## Limits (all untrusted input)
 
-- per address (not for `--trusted-proxy` addresses): 16 players, 2500 datagrams/s, 2 new registrations/s, 32 HTTP connections
-  (they stay open while idle: the game needs that). A sign-in over the registration rate gets
-  "server error 6: too many sign-ins from this address" (the game tries again by itself);
+- per address (an IPv6 address counts under its /64; a tunnelled player's own with [PROXY protocol](#proxy-protocol-v2-hole-punching-through-the-tunnel);
+  without it the tunnel's players cannot be counted by address): 16 players, 2500 datagrams/s,
+  2 new registrations/s, 32 HTTP connections (they stay open while idle: the game needs that),
+  16 new keys at once and then 16 an hour, 20 signature checks a second
+  ([signed requests](#signed-requests)). A sign-in over the registration rate gets
+  "server error 6: too many sign-ins from this address" (the game tries again by itself), and
+  so does a registered game that names another XUID faster than that;
 - per player: relay budget 256 KB/s (`--rate-limit`), 30 open auctions, 50 unretrieved
   gifts, 100 shared cars, 4 game invites per 30 s (the rest are dropped and logged);
   one upload at most 2 MB (a signed game's photo mode big shot or movie: 32 MiB, in 256 KiB
@@ -188,7 +220,16 @@ that was requested but not taken.
   `FORZA_VIDEOS_CAP_MB` (2048) ([website data](website-data.md#community-videos)),
   HTTP bodies at most 8 MB;
 - whole server: ghosts, cars and market blobs at most `FORZA_DISK_CAP_MB` (default 4096) MB,
-  at most `FORZA_MAX_PLAYERS` (20000) player records;
+  at most `FORZA_MAX_PLAYERS` (20000) player records and as many records of keys and friends,
+  30 new player records an hour for callers with no key on record
+  ([title services](title_services.md)); 1024 HTTP connections, of which 768 at most that are
+  not kept for a player (a browser's, the website's, a game older than the keys). A new
+  connection over either takes the place of the one of those that has waited longest (or, when
+  all of them are being answered, of the one open longest), so connections that only sit there
+  keep nobody out. A connection is kept for its player once a title call on it was signed by the
+  player's own key, for as long as that player is signed in (or 15 minutes after its last signed
+  call), and one key keeps the 4 it used last: a game's own is never closed for a newcomer, and
+  no key holds more than a few;
 - the status page lists gamertags and XUIDs but no IP addresses.
 
 - shader lists ([website data](website-data.md#shader-lists-from-players)): 1 MiB and 500 pipelines per upload, 5000 pipelines per player and UTC day,
@@ -256,16 +297,52 @@ server kept its SHA-256.
   uses: the launcher's "This PC" server runs with it.
 - `--raw-key-cutoff UNIX_TIME` (env `FORZA_RAW_KEY_CUTOFF`): from then on, games and launchers
   that still send the friends key are refused for XUIDs that have a key on record: their friends
-  list and chat stay off and their title service writes fail (reads still work). Default: taken
-  until each player upgrades. `auth: raw friends keys ... since start` in the log every 10
-  minutes, and `auth` on the status page (`raw_http`, `raw_hello`, `raw_key_players`,
-  `upgraded`, `registered`), count them, so the cutoff can wait until old games are rare.
+  list and chat stay off and their title service writes fail (reads still work). A raw key binds
+  no new XUID after it either. Default: taken until each player upgrades. `auth: raw friends keys
+  ... since start` in the log every 10 minutes, and `auth` on the status page (`raw_http`,
+  `raw_hello`, `raw_key_players`, `upgraded`, `registered`), count them, so the cutoff can wait
+  until old games are rare. Set it: a raw key was sent in the clear to every server its player
+  used, and until its owner upgrades, whoever kept a copy can use it here.
+- `--upgrade-cutoff UNIX_TIME` (env `FORZA_UPGRADE_CUTOFF`; default: 30 days after
+  `--raw-key-cutoff`, none without one): from then on an XUID still bound to a raw friends key is
+  no longer moved to a public key by that key, because a copied key could do it before its owner
+  does. Its player's game is told the account is linked to another installation, and the operator
+  releases it by hand as for any such account (clear `key` in the player's `friends.json` record
+  while the server is stopped; the next signed game that signs in with the XUID binds it). Every
+  upgrade until then is a warning in the log, with the address it came from.
+- New keys have a budget. An XUID with no key on record is bound to the first key that signs in
+  with it, at most 16 at once from one address (then 16 an hour) and 2 a second for the whole
+  server; the tunnelled games without an address share one budget, 32 at once and then 2 a
+  minute; raw friends keys, which bind with one datagram whose source may be forged, 10 at once
+  and one a minute, counted apart from their address's signed games. Over a budget the XUID
+  stays unbound until a later HELLO (the game says one every few seconds), with a warning in the
+  log, and the game is told that friends are off "for now". `friends.json` holds at most
+  `FORZA_MAX_PLAYERS` records with a key, and such a record is never forgotten, however long its
+  player is away. Records without a key are made only by what other players do (a name someone
+  blocked, a request to a player who has not signed in with a key): they have a cap of their
+  own, as large, never take a new player's place, and the oldest that hold nothing but a name go
+  when there are too many (and after 180 days). A registered game may name another XUID (another
+  profile) within the sign-in rate: its own once it has answered the server's challenge, else
+  its address's.
 
 Every HTTP answer carries the server's clock (`X-Forza-Time`), and the WELCOME carries it too: a
 signature more than 120 s off the server's clock is refused, and a nonce is taken once. A check
-costs about 1 ms of CPU; at most 500 a second are made for the whole server and a few a second
-for each player, so floods of bad signatures cannot take the CPU. A reverse proxy in front of
-`--http-port` must pass the request line and body unchanged.
+costs about 1 ms of CPU; at most 500 a second are made for the whole server, and each is charged
+first to who asks for it: 20 a second (100 at once) for one address and for one TCP connection,
+a few for each player's HELLOs, and 100 a second for all the tunnelled clients without an address
+together. An address whose signatures fail 40 times in a minute gets no checks from its budget
+for a minute, with one warning in the log that names it; nothing is counted against the XUID a
+request names, which anyone can write. An address is not a player, though: a household, a
+carrier's NAT or a VPN exit is many, and behind a tunnel a UDP source is its sender's word. So
+the address's budget and its failures decide only what the unproven get. A connection or
+registration whose signature for an XUID checked out has that key's own budget for it (2 a
+second, 30 at once) whenever its address's is spent or stopped, and one that has had no check
+yet gets its first from a reserve of the server's (which only a signature that fails uses up):
+whoever shares an address with a flood of bad signatures still proves its key and goes on. A
+HELLO for an XUID bound to another key, or signed before its address was sent its challenge, is
+refused without a check. So floods of bad signatures cannot take the CPU, nor one sender the
+other players' checks. A reverse proxy in front of `--http-port` must pass the request line and
+body unchanged.
 
 Rollout: the server first (it takes signed requests and friends keys alike), then the game and
 launcher release, then `--raw-key-cutoff` on a date announced to the players. A game with signed

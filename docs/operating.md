@@ -11,7 +11,21 @@ Day-to-day running of a server other people play on: the operator endpoints and 
 Message Center notification for every player, new ones included, stored once), and `GET /world/event?session=all|<id>[&event=<id>]` are
 operator-only. They are answered for requests from the server's own machine (loopback, not
 through a reverse proxy), or with `FORZA_ADMIN_TOKEN` (header `X-Admin-Token: <token>` or
-`?token=<token>`); everything else gets 403. From the host's terminal:
+`?token=<token>`; prefer the header: the log leaves a token out of the URLs it prints, but a
+shell history or a browser does not); everything else gets 403. Each wrong token is a warning in
+the log with the address it came from (an IPv6 address counts under its /64). After 10 from one
+address in 5 minutes that address gets 403 for every token, the right one too, until they have
+passed; all the requests through the tunnel without an address of their own count as one address,
+so nobody outside can lock out the LAN or this machine. One case is the operator's and the
+outside's at once: the tunnel's agent on the server's own machine without `--proxy-protocol-tcp`,
+where every request through the tunnel comes from loopback as the operator's own do. There a
+token of 16 characters or more is taken whatever came before (it cannot be guessed, and wrong
+ones are only logged); a shorter one keeps the lock, so wrong tokens from outside can lock this
+machine's own requests out until it is replaced. The log never prints a token: a `token=` in a
+URL is left out however it is written. The token must be long and random
+(`openssl rand -hex 32`): the placeholders of `.env.example` and of these pages are not taken as
+a token (the start says so, and the panel stays off), and the start warns about one under 16
+characters. From the host's terminal:
 
     docker exec forza-live python3 -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:21201/gift?to=Name&credits=50000').read())"
 
@@ -129,12 +143,13 @@ player's gamertag, when it was last seen, the public key of its game (or, until 
 upgrades, a SHA-256 of the friends key of a game before signed requests), and its friends,
 requests both ways and blocks (written at most every 2 s after a change and on shutdown;
 keep the data folder). The first game that uses an XUID's friends binds them to its key
-([signed requests](configuration.md#signed-requests)); another game claiming that XUID gets no list. A player with no friends, requests or blocks is forgotten after 180 days.
+([signed requests](configuration.md#signed-requests)); another game claiming that XUID gets no list. A record with a key is never forgotten; one without (a name another player blocked or asked) that holds no friends, requests or blocks is forgotten after 180 days, and such records never count against the room for new players (`FORZA_MAX_PLAYERS`).
 Limits: 200 friends, 50 requests waiting each way, 200 blocks per player; 10 requests a
 minute (bursts of 5), 60 other changes a minute, 30 searches a minute; searches answer at
 most 20 players. A request to a player who blocked the sender looks sent but is dropped,
 and so are invites from a blocked player. The status page shows how many players,
-friendships and open requests there are. Games up to v0.1.14 still see everyone online as a
+friendships and open requests there are, and how many of the players have a key (`with_key`:
+the number `FORZA_MAX_PLAYERS` caps). Games up to v0.1.14 still see everyone online as a
 friend.
 
 Text chat is relayed, not stored: a message goes to the players online in the

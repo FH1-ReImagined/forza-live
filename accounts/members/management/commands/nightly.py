@@ -1,6 +1,7 @@
 """The daily upkeep: expired sessions, audit events past 90 days, accounts unused for 30 days that
 are not linked to a game (suspended ones stay), email accounts whose code was never used after a
-day, link requests and launcher nonces that are over, the likes of photos and designs gone from
+day, link requests and launcher nonces that are over, the rate-limit counters that have run out
+(the cache table's expired rows), the likes of photos and designs gone from
 the game server for LIKES_PURGE_GRACE_DAYS (members.moderation, also the purge_likes command),
 the hub's upkeep (members.hub.upkeep: old drafts, unfinished uploads, the worker's results), then
 a dated backup of the database and the email pepper (7 kept)."""
@@ -36,10 +37,23 @@ def purge(now=None):
     unused = now - datetime.timedelta(days=UNUSED_CODE_DAYS)
     LinkRequest.objects.filter(expires__lt=now - datetime.timedelta(hours=1)).delete()
     SignedNonce.objects.filter(until__lt=now).delete()
+    purge_cache(now)
     # A suspended account stays (members.moderation): deleting it would let it sign up afresh.
     stale = User.objects.filter(is_staff=False, is_superuser=False, is_active=True, game_link__isnull=True).filter(
         Q(last_login__lt=idle) | Q(last_login__isnull=True, date_joined__lt=unused))
     return stale.delete()[1].get("members.User", 0)
+
+
+def purge_cache(now=None):
+    """The expired rows of the rate-limit cache table. Django's database cache deletes an expired
+    row only when its key is read again or the table is over its cap, so the counters of visitors
+    who never came back would stay for good. Returns how many went."""
+    now = (now or timezone.now()).replace(microsecond=0)
+    table = connection.ops.quote_name(settings.CACHES["default"]["LOCATION"])
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM %s WHERE %s < %%s" % (table, connection.ops.quote_name("expires")),
+                       [connection.ops.adapt_datetimefield_value(now)])
+        return cursor.rowcount
 
 
 def backup(now=None, source=None):

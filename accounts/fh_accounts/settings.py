@@ -94,6 +94,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "members.middleware.SessionLifetime",
+    "members.middleware.KnownBrowser",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
@@ -137,8 +138,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 EMAIL_PEPPER_FILE = Path(env("FORZA_EMAIL_PEPPER_FILE", str(DATA_DIR / "email_pepper.bin")))
 BACKUP_DIR = Path(env("FORZA_ACCOUNTS_BACKUPS", str(DATA_DIR / "backups")))
 
-# allauth's rate limits live in the cache: in the database, so every worker shares them.
-CACHES = {"default": {"BACKEND": "django.core.cache.backends.db.DatabaseCache", "LOCATION": "cache"}}
+# allauth's rate limits live in the cache: in the database, so every worker shares them. Django's
+# own cap of 300 rows would not hold them: above it every write deletes a third of the rows, lowest
+# keys first, and the counters start again. Expired rows go nightly (members' nightly command).
+CACHES = {"default": {"BACKEND": "django.core.cache.backends.db.DatabaseCache", "LOCATION": "cache",
+                      "OPTIONS": {"MAX_ENTRIES": 200000}}}
 
 # ---- Sessions and cookies ----
 
@@ -218,9 +222,16 @@ LINKS_DAILY = int(env("FORZA_ACCOUNTS_LINKS_DAILY", "200"))
 ACCOUNT_RATE_LIMITS = {
     "signin_start": "20/h/ip",                       # Discord and GitHub sign-in starts
     "new_account": "5/d/ip,1000/d/key",              # new accounts, per IP and (key "all") in all
-    "request_login_code": "5/h/ip,3/h/key,5/d/key",  # code mails: per IP and per address
+    # Code mails: per IP and per mailbox (members.identity.mailbox_key: one for every spelling).
+    "request_login_code": "5/h/ip,20/d/ip,3/h/key,5/d/key",
+    # The same for a browser that signed in with the address before (members.views.KNOWN_COOKIE):
+    # a budget of its own, which nobody else's requests for that address can use up.
+    "request_login_code_known": "5/h/ip,20/d/ip,3/h/key,5/d/key",
     "code_failed": "20/h/ip",                        # wrong codes, per IP (5 tries per code besides)
     "login_code_mail_all": "%d/d/key" % EMAIL_DAILY,  # code mails in all, then email sign-in pauses
+    # Of those, the mails to addresses that never finished a sign-in (new accounts too): half, so
+    # the other half is always left for accounts that have signed in before.
+    "login_code_mail_new": "%d/d/key" % max(1, EMAIL_DAILY // 2),
     # The game link (members.links). "key" is the XUID, the account, or "all".
     "game_call": "600/h/key",          # signed launcher calls per XUID (polling included)
     "link_start": "5/h/key",           # link requests per XUID

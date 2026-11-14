@@ -14,10 +14,13 @@ import time
 import unittest
 from unittest.mock import patch
 
+from forza_live.core import auth
+from forza_live.core import ed25519
 from forza_live.core import limits
 from forza_live.title_services import lsp
 from forza_live import server as srv
 from forza_live.network import proxy
+from forza_live.network import xtsw
 from tests.support import FakeTransport
 
 AGENT = "192.0.2.10"  # the tunnel agent's address, a trusted proxy
@@ -203,6 +206,31 @@ class ProxyServerTest(unittest.TestCase):
             header = b""
         self.send(header + hello(token, f"P{token}"), addr, server)
         return server.by_addr.get(addr)
+
+    def signed(self, addr, token, slot=b"", who=None):
+        """A HELLO of a game with signed requests (the friends feature; its auth block in the
+        slot, or nothing yet) through the agent's socket addr, as the XUID of `who` (token)."""
+        body = struct.pack(">HQQIH", srv.VERSION, token, xuid(who or token), 0, 0)
+        body += bytes([1]) + b"r" + bytes([1]) + b"P" + bytes([srv.FEATURE_FRIENDS])
+        self.send(srv.MAGIC + bytes([srv.HELLO]) + body + bytes([len(slot)]) + slot, addr)
+        return body
+
+    def sign_in(self, addr, token, real=None, who=None):
+        """A game with signed requests signs in through addr: its first HELLO, then its answer
+        to the challenge of the WELCOME that reached it. The registration, or None."""
+        names = patch.object(auth, "SERVER_NAMES", set())  # signatures for any name
+        names.start()
+        self.addCleanup(names.stop)
+        if real:
+            self.send(proxy.header(real, TUNNEL), addr)
+        self.net.sent.clear()
+        body = self.signed(addr, token, who=who)
+        welcome = [d for a, d in self.net.sent if a == addr and d[4] == srv.WELCOME]
+        if not welcome:
+            return None
+        seed = bytes([token % 251] * 32)
+        self.signed(addr, token, auth.hello_block(seed, "x", xuid(who or token), welcome[0][-16:], body), who)
+        return self.server.by_addr.get(addr)
 
 
 class OffTest(ProxyServerTest):
@@ -602,13 +630,222 @@ class UdpTest(ProxyServerTest):
         self.assertIsNone(peer.real_addr)
         self.assertEqual(self.server.proxy_flows, {})
 
-    def test_limits_stay_those_of_the_agents_socket(self):
-        # 20 players behind one public address (a CGNAT) through the agent: no per-address cap
-        # by their real address, as before (MAX_PEERS_PER_IP is 16)
+    # --- the per-address limits count the player's own address, not the agent's socket ---
+
+    def errors(self, addr):
+        return [d[5] for a, d in self.net.sent if a == addr and d[4] == srv.ERROR]
+
+    def test_players_per_address_through_the_tunnel(self):
+        """Every game behind the agent used to be an address of its own (the agent's socket):
+        one sender filled the server from as many source ports as it has players."""
         peers = [self.join((AGENT, 45000 + i), 1 + i, (REAL_A[0], 40000 + i)) for i in range(20)]
-        self.assertTrue(all(p is not None and p.real_addr for p in peers))
-        self.assertEqual(self.server.limit_key(peers[0].addr), peers[0].addr)
-        self.assertEqual(self.server.per_ip, {AGENT: 20})
+        self.assertEqual([p is not None for p in peers], [True] * srv.MAX_PEERS_PER_IP + [False] * 4)
+        self.assertEqual(self.server.per_ip, {REAL_A[0]: srv.MAX_PEERS_PER_IP})
+        self.assertEqual(self.errors((AGENT, 45019)), [3])  # server full, for that address
+        self.assertEqual(self.server.source_key(peers[0].addr), REAL_A[0])
+        self.assertIsNotNone(self.join((AGENT, 46000), 100, REAL_B))  # another address has room
+        self.server.drop(peers[0], "left")
+        self.assertIsNotNone(self.join((AGENT, 45019), 20))  # and so has this one again
+        self.assertEqual(self.server.per_ip, {REAL_A[0]: srv.MAX_PEERS_PER_IP, REAL_B[0]: 1})
+
+    def test_the_sign_in_rate_is_the_address_s(self):
+        with patch.object(srv, "HELLOS_PER_IP", (0.001, 5)):
+            joined = [self.join((AGENT, 45000 + i), 1 + i, (REAL_A[0], 40000 + i)) for i in range(8)]
+            self.assertEqual(sum(p is not None for p in joined), 5)
+            self.assertEqual(self.errors((AGENT, 45007)), [srv.ERR_SLOW_DOWN])
+            self.assertIsNotNone(self.join((AGENT, 46000), 100, REAL_B))
+
+    def test_games_without_an_address_share_a_pool(self):
+        """Flows whose address is not known (older than the server, the table was full) cannot
+        be told apart: together they get a share of the server, never all of it."""
+        server, net = self.new_server()
+        server.max_peers = 40
+        self.assertEqual(server.pool_cap, 20)
+        peers = [self.join((AGENT, 45000 + i), 1 + i, server=server) for i in range(30)]
+        self.assertEqual(sum(p is not None for p in peers), 20)
+        self.assertEqual(server.per_ip, {srv.POOL: 20})
+        self.assertEqual([d[5] for a, d in net.sent if a == (AGENT, 45029) and d[4] == srv.ERROR], [3])
+        # players with an address still get in, each under its own
+        for i in range(10):
+            self.assertIsNotNone(self.join((AGENT, 47000 + i), 200 + i, ("81.2.69.%d" % (10 + i), 40000),
+                                           server=server))
+        self.assertEqual(len(server.peers), 30)
+        server.drop(peers[0], "left")
+        self.assertIsNotNone(self.join((AGENT, 45029), 30, server=server))
+
+    def test_a_tunnel_that_names_no_address_is_as_before(self):
+        server, _ = self.new_server(udp=False)
+        server.max_peers = 80
+        self.assertIsNone(server.pool_cap)
+        peers = [self.join((AGENT, 45000 + i), 1 + i, server=server) for i in range(30)]
+        self.assertTrue(all(p is not None for p in peers))
+        self.assertEqual(server.limit_key(peers[0].addr), peers[0].addr)
+
+    def test_another_xuid_stays_under_its_flow_s_address(self):
+        """A game that names another XUID loses the flow's address for hole punching, not its
+        place under that address's limits."""
+        addr = (AGENT, 40001)
+        peer = self.join(addr, 1, REAL_A)
+        packet = bytearray(hello(1))
+        struct.pack_into(">Q", packet, 15, xuid(2))
+        self.send(bytes(packet), addr)
+        self.assertIsNone(peer.real_addr)
+        self.assertEqual((peer.xuid, peer.source), (xuid(2), REAL_A[0]))
+        self.assertEqual(self.server.per_ip, {REAL_A[0]: 1})
+
+    def test_one_address_cannot_fill_the_flows_table(self):
+        with patch.object(srv, "FLOWS_PER_ADDRESS", 4):
+            for i in range(10):
+                self.send(proxy.header((REAL_A[0], 40000 + i), TUNNEL), (AGENT, 45000 + i))
+            self.assertEqual(len(self.server.proxy_flows), 4)
+            self.assertEqual(self.server.flow_sources, {REAL_A[0]: 4})
+            self.assertEqual(len(self.server.refused_flows), 6)  # the oldest: the newest four stay
+            self.assertEqual(self.server.status()["proxy_protocol"]["refused_flows"], 6)
+            # a refused flow's game does not register, with an address or without
+            self.net.sent.clear()
+            self.assertIsNone(self.join((AGENT, 45000), 10))
+            self.assertEqual(self.net.sent, [])
+            self.assertNotIn((AGENT, 45000), self.server.proxy_flows)
+            self.assertIsNotNone(self.join((AGENT, 45009), 1))  # one of its four does
+            self.assertIsNotNone(self.join((AGENT, 46000), 100, REAL_B))  # and another address's
+            # flows the agent closed are forgotten, the refused ones too
+            for i in range(6, 10):
+                aged(self.server, (AGENT, 45000 + i), srv.PROXY_FLOW_IDLE + 1)
+            for refused in self.server.refused_flows.values():
+                refused[0] -= srv.PROXY_FLOW_IDLE + 1
+            self.server.expire()
+            self.assertEqual(self.server.flow_sources, {REAL_B[0]: 1})
+            self.assertEqual(self.server.refused_flows, {})
+            self.assertEqual(self.join((AGENT, 45009), 10, (REAL_A[0], 40009)).real_addr, (REAL_A[0], 40009))
+
+    # --- an address is its sender's word, and often many players': what is done in its name
+    # never keeps out a game that answers the challenge sent there ---
+
+    def test_sign_ins_in_a_player_s_name_do_not_keep_its_game_out(self):
+        """Registrations sent with a player's address as their source took that address's 16
+        places, and the player's own game was told "server full" for as long as they were
+        renewed."""
+        with patch.object(srv, "HELLOS_PER_IP", (1000, 1000)):
+            for i in range(srv.MAX_PEERS_PER_IP):  # they never see a WELCOME: no challenge answered
+                self.assertIsNotNone(self.join((AGENT, 45000 + i), 100 + i, (REAL_A[0], 40000 + i)))
+            self.assertEqual(self.server.per_ip, {REAL_A[0]: srv.MAX_PEERS_PER_IP})
+            mine = (AGENT, 46000)
+            peer = self.sign_in(mine, 1, REAL_A)  # the player's own game
+            self.assertEqual(self.errors(mine), [])
+            self.assertIsNotNone(peer)
+            self.assertTrue(peer.friends_ok)
+            self.assertTrue(auth.answered(peer))
+            self.assertEqual(peer.real_addr, REAL_A)
+            # the one of the others that had waited longest gave way to it
+            self.assertNotIn((AGENT, 45000), self.server.by_addr)
+            self.assertEqual(self.server.per_ip, {REAL_A[0]: srv.MAX_PEERS_PER_IP})
+            # however many more come, with whatever they say they are: a game that answered stays
+            for i in range(40):
+                addr = (AGENT, 47000 + i)
+                self.send(proxy.header((REAL_A[0], 42000 + i), TUNNEL), addr)
+                self.signed(addr, 200 + i)
+            self.assertIs(self.server.by_addr.get(mine), peer)
+            self.assertTrue(peer.friends_ok)
+            self.assertEqual(self.server.per_ip, {REAL_A[0]: srv.MAX_PEERS_PER_IP})
+            # a game before signed requests cannot answer: at a full address it is refused, as before
+            self.assertIsNone(self.join((AGENT, 48000), 300, (REAL_A[0], 43000)))
+            self.assertEqual(self.errors((AGENT, 48000)), [3])
+
+    def test_games_that_answered_fill_an_address_as_before(self):
+        with patch.object(srv, "HELLOS_PER_IP", (1000, 1000)), patch.object(auth, "FIRST_USE_SOURCE", (1000, 1000)):
+            self.server.friends.store.first_use = auth.FirstUse()
+            peers = [self.sign_in((AGENT, 45000 + i), 1 + i, (REAL_A[0], 40000 + i))
+                     for i in range(srv.MAX_PEERS_PER_IP + 2)]
+            self.assertEqual([p is not None and p.friends_ok for p in peers],
+                             [True] * srv.MAX_PEERS_PER_IP + [False] * 2)
+            self.assertEqual(self.errors((AGENT, 45001 + srv.MAX_PEERS_PER_IP)), [3])  # server full, for that address
+            self.assertEqual(self.server.per_ip, {REAL_A[0]: srv.MAX_PEERS_PER_IP})
+
+    def test_a_game_that_gave_way_waits_before_it_takes_a_place(self):
+        """Two games that cannot answer (an XUID linked to another installation) do not take each
+        other's place again and again."""
+        with patch.object(srv, "HELLOS_PER_IP", (1000, 1000)), patch.object(srv, "MAX_PEERS_PER_IP", 2):
+            a, b, c = (AGENT, 45001), (AGENT, 45002), (AGENT, 45003)
+            for n, addr in enumerate((a, b)):
+                self.send(proxy.header((REAL_A[0], 40001 + n), TUNNEL), addr)
+                self.signed(addr, 1 + n)  # registered, and never answers
+            first = self.server.by_addr[a]
+            first.since -= 10  # the one registered longest ago
+            self.send(proxy.header((REAL_A[0], 40003), TUNNEL), c)
+            self.signed(c, 3)
+            self.assertNotIn(a, self.server.by_addr)  # gave way to the newcomer
+            self.assertIn(c, self.server.by_addr)
+            self.net.sent.clear()
+            self.signed(a, 1)  # it says HELLO again at once: not at another's cost, for now
+            self.assertNotIn(a, self.server.by_addr)
+            self.assertEqual(self.errors(a), [3])
+            self.assertEqual(set(self.server.by_addr), {b, c})
+            self.server.displaced[1] -= srv.DISPLACED_HOLD + 1
+            self.signed(a, 1)
+            self.assertIn(a, self.server.by_addr)
+
+    def test_a_signed_in_game_changes_profile_at_its_own_rate(self):
+        """Another profile on a registered game costs a sign-in. Counted against the address,
+        that was spent by whoever signed in from there, or in its name."""
+        mine = (AGENT, 46000)
+        peer = self.sign_in(mine, 1, REAL_A)
+        self.assertTrue(peer.friends_ok)
+        with patch.object(srv, "HELLOS_PER_IP", (0.001, 3)):
+            self.server.hello_buckets.clear()
+            for i in range(6):
+                self.join((AGENT, 45000 + i), 100 + i, (REAL_A[0], 40000 + i))
+            self.assertEqual(self.errors((AGENT, 45005)), [srv.ERR_SLOW_DOWN])  # the address's are used up
+            again = self.sign_in(mine, 1, who=2)  # the player's other profile
+            self.assertEqual(self.errors(mine), [])
+            self.assertIs(again, peer)
+            self.assertEqual(peer.xuid, xuid(2))
+            self.assertTrue(peer.friends_ok)
+
+    def test_flows_in_an_address_s_name_do_not_keep_its_games_flows_out(self):
+        """An address has so many flows: over that the newest was refused, and stayed refused
+        for as long as its game kept sending. Flows opened in a player's name kept that
+        player's own game out."""
+        with patch.object(srv, "FLOWS_PER_ADDRESS", 4):
+            for i in range(4):
+                self.send(proxy.header((REAL_A[0], 40000 + i), TUNNEL), (AGENT, 45000 + i))
+            self.assertEqual(self.server.flow_sources, {REAL_A[0]: 4})
+            mine = (AGENT, 46000)
+            peer = self.sign_in(mine, 1, REAL_A)  # the player's own game, on a new flow
+            self.assertIsNotNone(peer)
+            self.assertTrue(peer.friends_ok)
+            self.assertEqual((peer.real_addr, peer.source), (REAL_A, REAL_A[0]))
+            self.assertIn((AGENT, 45000), self.server.refused_flows)  # the oldest gave way to it
+            # a flow whose game answered its challenge is not one of the address's four, nor refused
+            for i in range(10):
+                self.send(proxy.header((REAL_A[0], 41000 + i), TUNNEL), (AGENT, 47000 + i))
+            self.assertIn(mine, self.server.proxy_flows)
+            self.assertEqual(self.server.flow_sources, {REAL_A[0]: 5})
+            self.assertEqual(len(self.server.refused_flows), 10)
+            self.assertEqual(welcome_public(self.net, mine), REAL_A)
+
+    def test_a_refused_flow_is_tried_again(self):
+        with patch.object(srv, "FLOWS_PER_ADDRESS", 2):
+            old = (AGENT, 45000)
+            self.assertIsNotNone(self.join(old, 1, REAL_A))  # a game before signed requests
+            for i in range(2):
+                self.send(proxy.header((REAL_A[0], 41000 + i), TUNNEL), (AGENT, 47000 + i))
+            self.assertIn(old, self.server.refused_flows)
+            self.net.sent.clear()
+            self.send(hello(1, "P1"), old)  # it keeps sending: dropped for now...
+            self.send(relay(5), old)
+            self.assertEqual(self.net.sent, [])
+            # ...and tried again after a moment, as the address's newest flow with the address
+            # its header gave: the one that is now the oldest gives way to it
+            self.server.refused_flows[old][1] -= srv.REFUSED_RETRY + 1
+            self.send(hello(1, "P1"), old)
+            self.assertEqual(welcome_public(self.net, old), REAL_A)
+            self.assertEqual(self.server.source_key(old), REAL_A[0])
+            self.assertEqual(self.server.proxy_flows[old].mode, srv.FLOW_HEADER)
+            self.assertEqual(set(self.server.refused_flows), {(AGENT, 47000)})
+            self.assertEqual(self.server.flow_sources, {REAL_A[0]: 2})
+            # a header in the middle of it is still a player's own bytes
+            self.send(proxy.header(FORGED, TUNNEL), old)
+            self.assertEqual(self.server.by_addr[old].real_addr, REAL_A)
 
 
 class RestartTest(ProxyServerTest):
@@ -646,6 +883,16 @@ class RestartTest(ProxyServerTest):
         self.assertEqual(welcome_public(net, c), ("0.0.0.0", 0))
         self.send(proxy.header(FORGED, TUNNEL), a, again)  # restored flows are mid-flow
         self.assertEqual(again.by_addr[a].real_addr, REAL_A)
+
+    def test_restored_players_are_counted_under_their_address(self):
+        a, b = (AGENT, 40001), (AGENT, 40002)
+        self.join(a, 1, REAL_A)
+        self.join(b, 2)  # no header: no address
+        self.assertTrue(self.server.save_state())
+        new, _ = self.restarted()
+        self.assertEqual(new.per_ip, {REAL_A[0]: 1, srv.POOL: 1})
+        self.assertEqual(new.flow_sources, {REAL_A[0]: 1})
+        self.assertEqual(new.source_key(a), REAL_A[0])
 
     def test_restart_with_another_game_on_the_socket(self):
         """review/restart_reuse.py: the agent's socket of a restored player now carries another
@@ -809,6 +1056,11 @@ class HttpTest(unittest.IsolatedAsyncioTestCase):
         self.port = self.http.sockets[0].getsockname()[1]
         self.token = patch.object(lsp, "ADMIN_TOKEN", "")
         self.token.start()
+        names = patch.object(auth, "SERVER_NAMES", set())  # signatures for any name, whatever ran before
+        names.start()
+        self.addCleanup(names.stop)
+        auth._budget[:] = [float(auth.VERIFY_RATE[1]), time.monotonic()]
+        srv.http_open.clear()
 
     async def asyncTearDown(self):
         for writer in self.writers:  # a failed test's kept-alive connections too
@@ -924,6 +1176,207 @@ class HttpTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.call(prefix), (None, b""))
         self.assertEqual(self.server.proxy_stats["rejected"], 5)
         self.assertEqual((await self.call(good))[0], 200)
+
+    # --- connections that cost their sender one request do not hold the server's ---
+
+    async def signed_call(self, reader, writer, seed, xuid):
+        """A title service read signed by the player's key on a kept-alive connection."""
+        target = "/Services.Horizon/o.xtsw"
+        headers = {"x-classname": "Forza.WebServices.Hopper, Forza.WebServices", "x-method": "GetList",
+                   "x-userid": "0x%x" % xuid}
+        body = bytes(xtsw.encode(xtsw.HopperGetList_Params, {"maxCategoryResults": 2, "maxHopperResults": 32}))
+        headers[auth.HEADER] = auth.auth_header(seed, "x", xuid, "POST", target, body, headers)
+        head = "POST %s HTTP/1.1\r\nHost: x\r\nConnection: Keep-Alive\r\nContent-Length: %d\r\n" % (
+            target, len(body))
+        head += "".join("%s: %s\r\n" % kv for kv in headers.items())
+        writer.write(head.encode() + b"\r\n" + body)
+        await writer.drain()
+        answer = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        length = int([h for h in answer.split(b"\r\n") if h.lower().startswith(b"content-length")][0]
+                     .split(b":")[1])
+        await reader.readexactly(length)
+        return int(answer.split()[1])
+
+    async def a_game(self, n=1):
+        """A kept-alive connection that made a call signed by its player's own key."""
+        seed, xuid = bytes([n] * 32), 0x0009000000000100 + n
+        self.server.friends.store.get(xuid, create=True)["pub"] = ed25519.public_key(seed).hex()
+        reader, writer = await self.keep_open(self.stream((REAL_B[0], 41000 + n)))
+        self.assertEqual(await self.signed_call(reader, writer, seed, xuid), 200)
+        return reader, writer
+
+    async def closed(self, reader, within=2.0):
+        try:
+            return await asyncio.wait_for(reader.read(), within) == b""
+        except asyncio.TimeoutError:
+            return False
+
+    async def test_a_new_connection_takes_the_place_of_an_idle_unproven_one(self):
+        """Every connection may idle for hours after one request: as many of them as the server
+        takes held every slot, and each new connection was closed at once."""
+        with patch.object(srv, "HTTP_TOTAL", 5), patch.object(srv, "HTTP_UNPROVEN", 3):
+            game, game_writer = await self.a_game()
+            idle = [await self.keep_open(self.stream((REAL_A[0], 40000 + i))) for i in range(3)]
+            self.assertEqual(len(srv.http_open), 4)
+            # the unproven ones are at their share: the next visitor is served all the same...
+            self.assertEqual((await self.call(self.stream(REAL_B)))[0], 200)
+            # ...in place of the one that waited longest
+            self.assertTrue(await self.closed(idle[0][0]))
+            self.assertFalse(await self.closed(idle[2][0], 0.2))
+            self.assertFalse(await self.closed(game, 0.2))  # never a game's
+            self.assertEqual(sum(1 for c in srv.http_open if not c.proved), 2)
+            # and so on, however many come: the visitors that are left answer for each other
+            for _ in range(6):
+                self.assertEqual((await self.call(self.stream(REAL_B)))[0], 200)
+            game_writer.write(self.request(keep=True))  # the game's connection is still its own
+            await game_writer.drain()
+            self.assertIn(b"200", await asyncio.wait_for(game.readuntil(b"\r\n\r\n"), 5))
+        for _, w in idle + [(game, game_writer)]:
+            w.close()
+
+    async def test_a_connection_that_does_not_read_its_answer_gives_way_too(self):
+        with patch.object(srv, "HTTP_TOTAL", 2), patch.object(srv, "HTTP_UNPROVEN", 2):
+            stuck = []
+            for i in range(2):  # each asks, and reads nothing
+                reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+                self.writers.append(writer)
+                writer.write(self.stream((REAL_A[0], 40000 + i)) + self.request(keep=True))
+                await writer.drain()
+                stuck.append((reader, writer))
+            await asyncio.sleep(0.1)
+            self.assertEqual((await self.call(self.stream(REAL_B)))[0], 200)
+
+    async def test_the_share_kept_for_games(self):
+        with patch.object(srv, "HTTP_TOTAL", 3), patch.object(srv, "HTTP_UNPROVEN", 2):
+            games = [await self.a_game(n) for n in (1, 2, 3)]  # each began unproven, in the others' share
+            self.assertEqual(await self.call(self.stream()), (None, b""))  # full of games: refused
+            self.assertTrue(all(c.proved for c in srv.http_open))
+            self.assertFalse(await self.closed(games[0][0], 0.2))
+        for _, w in games:
+            w.close()
+
+    async def test_one_key_does_not_hold_the_connections(self):
+        """A connection with one call signed by a player's key was kept for good, and one key
+        signed any number of them: when they were all the server takes, every new connection
+        was closed unanswered."""
+        with patch.object(srv, "HTTP_TOTAL", 8), patch.object(srv, "HTTP_UNPROVEN", 6):
+            seed, player = bytes([9] * 32), 0x0009000000000109
+            self.server.friends.store.get(player, create=True)["pub"] = ed25519.public_key(seed).hex()
+            held = []
+            for i in range(8):
+                reader, writer = await self.keep_open(self.stream((REAL_B[0], 41000 + i)))
+                self.assertEqual(await self.signed_call(reader, writer, seed, player), 200)
+                held.append((reader, writer))
+            self.assertTrue(all(c.proved for c in srv.http_open))
+            # a visitor is served all the same...
+            self.assertEqual((await self.call(self.stream()))[0], 200)
+            # ...in place of the one of that key's connections that had waited longest: the key
+            # keeps the few it used last
+            self.assertTrue(await self.closed(held[0][0]))
+            self.assertEqual(len(srv.http_kept(self.server)), srv.HTTP_PER_KEY)
+            for _ in range(6):
+                self.assertEqual((await self.call(self.stream()))[0], 200)
+            for reader, writer in held[-srv.HTTP_PER_KEY:]:  # the player's working connections
+                self.assertEqual(await self.signed_call(reader, writer, seed, player), 200)
+        for _, w in held:
+            w.close()
+
+    async def test_a_game_s_connection_is_kept_while_its_player_is_here(self):
+        """Kept for a player means for as long as the player's game runs, or for a while after
+        its last signed call: not for the hours a connection may idle."""
+        with patch.object(srv, "HTTP_TOTAL", 3), patch.object(srv, "HTTP_UNPROVEN", 2):
+            games = [await self.a_game(n) for n in (1, 2, 3)]
+            for c in srv.http_open:  # hours after their last signed calls
+                c.used = getattr(c, "used", 0.0) - 6 * 3600
+            # the first one's game is running (signed in on UDP with its key); the others' left
+            running = srv.Peer(7, ("192.0.2.10", 40001), 1, 0x0009000000000101, "P", "r", (0, 0))
+            running.friends_ok = True
+            self.server.peers[running.id] = running
+            self.assertEqual((await self.call(self.stream()))[0], 200)  # served: one of the others gave way
+            self.assertTrue(await self.closed(games[1][0]))
+            self.assertFalse(await self.closed(games[0][0], 0.2))
+            self.assertEqual(await self.signed_call(*games[0], bytes([1] * 32), 0x0009000000000101), 200)
+        for _, w in games:
+            w.close()
+
+    async def test_connections_kept_busy_give_way_too(self):
+        """Only a connection that waited gave way. Connections kept being answered (a signed
+        call that could not be checked was tried again for a second, and the next one was sent
+        at once) held every place for as long as their sender liked."""
+        with patch.object(srv, "HTTP_TOTAL", 3), patch.object(srv, "HTTP_UNPROVEN", 3):
+            release = asyncio.Event()
+
+            async def slow(*_):
+                await release.wait()
+                return 404, "text/plain", b"late"
+
+            with patch.object(srv, "lsp_answer", slow):
+                busy = []
+                try:
+                    for i in range(3):
+                        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+                        self.writers.append(writer)
+                        writer.write(self.stream((REAL_A[0], 40000 + i)) + self.request("/storage/x", keep=True))
+                        await writer.drain()
+                        busy.append((reader, writer))
+                        await asyncio.sleep(0.05)
+                    self.assertEqual([entry[1] for entry in srv.http_open.values()], [None] * 3)
+                    self.assertEqual((await self.call(self.stream(REAL_B)))[0], 200)
+                    self.assertTrue(await self.closed(busy[0][0]))  # the one open longest
+                finally:  # the handlers end before the server is closed
+                    release.set()
+                    await asyncio.sleep(0.05)
+
+    async def test_ipv6_addresses_count_by_their_64(self):
+        """A subscriber has a whole /64: each of its addresses was an address of its own for
+        the connections of one address, its signature checks and its wrong tokens."""
+        lsp._token_fails.clear()
+        self.addCleanup(lsp._token_fails.clear)
+
+        def v6(host, net=2):
+            return playit_v6(("2a02:26f0:1:%x::%x" % (net, host), 40000), ("2a02:26f0::1", 56678), 0x21)
+
+        with patch.object(srv, "HTTP_PER_IP", 3):
+            kept = [await self.keep_open(v6(1 + i)) for i in range(3)]
+            self.assertEqual(srv.http_conns, {"2a02:26f0:1:2::/64": 3})
+            self.assertEqual({c.address for c in srv.http_open}, {"2a02:26f0:1:2::/64"})
+            self.assertEqual(await self.call(v6(9)), (None, b""))  # a 4th from that /64
+            self.assertEqual((await self.call(v6(1, net=3)))[0], 200)  # another's
+            for _, w in kept:
+                w.close()
+        with patch.object(lsp, "ADMIN_TOKEN", "the-operator-s-own-token"), \
+                self.assertLogs("forza-live", "WARNING") as logs:
+            for i in range(lsp.TOKEN_FAILS):
+                self.assertEqual((await self.call(v6(16 + i), "/gift?to=x&credits=1&token=guess-%d" % i))[0], 403)
+            path = "/gift?to=nobody&credits=1&token=the-operator-s-own-token"
+            self.assertEqual((await self.call(v6(99), path))[0], 403)  # nothing is taken from that /64 now
+            self.assertEqual((await self.call(v6(1, net=3), path))[0], 404)  # taken from another: no such player
+        self.assertIn("a wrong admin token from 2a02:26f0:1:2::/64", logs.output[0])
+
+    async def test_a_handler_that_fails_does_not_log_the_token(self):
+        token = "the-operator-s-own-token"
+        with patch.object(lsp, "ADMIN_TOKEN", token), patch.object(lsp, "gift_request", side_effect=RuntimeError), \
+                self.assertLogs("forza-live", "INFO") as logs:
+            for query in ("to=nobody&credits=1&token=" + token, "%74oken=" + token + "&to=nobody"):
+                status, _ = await self.call(self.stream(), "/gift?" + query)
+                self.assertEqual(status, 500)  # the token was taken, and the handler failed
+        text = "\n".join(logs.output)
+        self.assertNotIn(token, text)
+        self.assertIn("LSP GET /gift?to=nobody&credits=1&token=... failed", text)
+        self.assertIn("LSP GET /gift?%74oken=...&to=nobody failed", text)
+
+    async def test_the_operator_s_token_is_not_logged(self):
+        with patch.object(lsp, "ADMIN_TOKEN", "the-operator-s-own-token"), \
+                self.assertLogs("forza-live", "INFO") as logs:
+            status, _ = await self.call(self.stream(), "/gift?to=nobody&credits=1&token=the-operator-s-own-token")
+            self.assertEqual(status, 404)  # the token was taken: no such player
+            status, _ = await self.call(self.stream(), "/notify?token=not-the-token&to=nobody")
+            self.assertEqual(status, 403)
+        text = "\n".join(logs.output)
+        self.assertNotIn("the-operator-s-own-token", text)
+        self.assertNotIn("not-the-token", text)
+        self.assertIn("GET /gift?to=nobody&credits=1&token=...", text)
+        self.assertIn("a wrong admin token from %s" % REAL_A[0], text)
 
     async def test_untrusted_connections_need_no_header(self):
         limits.configure_proxies("10.9.9.9")  # 127.0.0.1 is no proxy now

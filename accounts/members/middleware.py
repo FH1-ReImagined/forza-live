@@ -12,6 +12,9 @@ API's changes must be JSON (allauth's sign-in button is a plain form, which its 
 but for a hub upload's PUT of the zip itself (members.hub checks its type).
 SessionLifetime: a session ends 30 days after its last use (refreshed at most once a day) and 90
 days after its sign-in.
+KnownBrowser: a browser that holds a session of an account with an email address gets the cookie
+that gives its code requests for that address a budget of their own (members.views.KNOWN_COOKIE)
+when it asks for its account (GET /api/me), so a member has it before the next code is needed.
 """
 
 import re
@@ -119,3 +122,18 @@ class SessionLifetime:
             elif request.session.get("fh_day") != now // 86400:
                 request.session["fh_day"] = now // 86400  # saving it renews the cookie's 30 days
         return self.get_response(request)
+
+
+class KnownBrowser:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        if (request.path == "/api/me" and request.method == "GET" and response.status_code == 200
+                and request.user.is_authenticated):
+            from members import views
+            stand_in = views.stand_in_of(request.user)
+            if stand_in and views.known_stand_in(request) != stand_in:
+                views.set_known(response, stand_in)
+        return response

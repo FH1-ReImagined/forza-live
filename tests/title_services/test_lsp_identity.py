@@ -9,6 +9,7 @@ import struct
 import tempfile
 import unittest
 
+from forza_live.core import auth
 from forza_live.title_services import lsp
 from forza_live import server as srv
 from forza_live.network import xtsw as x
@@ -24,6 +25,7 @@ class IdentityTest(unittest.TestCase):
         self.old_dir = lsp.DATA_DIR
         lsp.DATA_DIR = self.tmp.name
         lsp._unverified_logged.clear()
+        auth._logged["told"].clear()
         self.server = srv.ForzaLive("test", 64)
         self.server.transport = type("T", (), {"sendto": lambda *_: None})()
         body = struct.pack(">HQQIH", srv.VERSION, 1, XUID, 0, 0)
@@ -104,6 +106,67 @@ class IdentityTest(unittest.TestCase):
         self.assertEqual(self.last_race(other)["verified"], False)
         self.assertEqual(sum("accepted as unverified" in m for m in logs.output), 1)
         self.assertEqual(self.status(self.race_stats(4, "AB" * 16, other)), (0, 0))
+
+    # --- the sign-in writes the record of the XUID the call was checked for ---
+
+    def logon(self, named, key=None, xuid=XUID, tag="Renamed", userid=True):
+        login = {"qwXuid": named, "wzGamerTag": tag, "currentCareerLevel": 9, "currentBadgeId": 0,
+                 "currentPlayerTitleId": 0}
+        headers = {"x-classname": "Forza.WebServices.User, Forza.WebServices", "x-method": "Logon2"}
+        if userid:
+            headers["x-userid"] = "0x%x" % xuid
+        if key is not None:
+            headers["x-friends-key"] = key
+        return lsp.service_call(headers, bytes(x.encode(x.UserLogon2_Params, {"loginData": login})), self.server)
+
+    def record(self, xuid=XUID):
+        path = os.path.join(self.tmp.name, "players", "%016X.json" % xuid)
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            return json.load(f)
+
+    def test_a_sign_in_cannot_name_another_player_in_its_body(self):
+        """Logon2 was checked for its X-UserId and wrote the record of the XUID in its body: one
+        unsigned call renamed any player."""
+        self.assertEqual(self.status(self.logon(XUID, KEY.hex(), tag="DriverA")), (0, 0))
+        mine = self.record()
+        self.assertEqual((mine["gamertag"], mine["logons"]), ("DriverA", 1))
+        stranger, other_key = 0x0009000000000066, bytes(15) + bytes([9])
+        body = struct.pack(">HQQIH", srv.VERSION, 2, stranger, 0, 0)
+        body += bytes([4]) + b"#TU4" + bytes([7]) + b"Mallory" + bytes([ALL]) + bytes([16]) + other_key
+        self.server.datagram_received(srv.MAGIC + bytes([srv.HELLO]) + body, ("127.0.0.1", 20002))
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            for kw in (dict(xuid=0x0009000000000077),         # an XUID nobody has, unsigned
+                       dict(userid=False),                    # no X-UserId at all
+                       dict(xuid=stranger, key=other_key.hex())):  # the sender's own XUID and key
+                self.assertEqual(self.status(self.logon(XUID, **kw)), (2, 5), kw)
+        self.assertEqual(self.record(), mine)
+        self.assertIsNone(self.record(0x0009000000000077))
+        self.assertTrue(all("names 0009000000000001 in its body" in line for line in logs.output))
+        # the player's own sign-in is what it was
+        self.assertEqual(self.status(self.logon(XUID, KEY.hex(), tag="DriverA2")), (0, 0))
+        self.assertEqual((self.record()["gamertag"], self.record()["logons"]), ("DriverA2", 2))
+        self.assertEqual(self.status(self.logon(stranger, other_key.hex(), xuid=stranger)), (0, 0))
+
+    def test_callers_without_a_key_make_few_new_records(self):
+        """Calls that name made-up XUIDs made a record each, up to the cap of player records:
+        from then on no new player's record was kept."""
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            for i in range(50):
+                made_up = 0x0009000000010000 + i
+                reply = self.logon(made_up, xuid=made_up) if i % 2 else self.race_stats(1, None, made_up)
+                self.assertEqual(self.status(reply), (0, 0))  # answered all the same
+        folder = os.path.join(self.tmp.name, "players")
+        self.assertEqual(len(os.listdir(folder)), lsp.NEW_UNVERIFIED[1])
+        self.assertEqual(len([line for line in logs.output if "records are not kept" in line]), 1)
+        # a record that exists is kept up as before, key or not
+        self.assertEqual(self.status(self.logon(0x0009000000010000, xuid=0x0009000000010000, tag="Again")), (0, 0))
+        self.assertEqual(self.record(0x0009000000010000)["gamertag"], "Again")
+        # and a player who proves the XUID gets a record whenever it comes
+        self.assertIsNone(self.record())
+        self.assertEqual(self.status(self.logon(XUID, KEY.hex(), tag="DriverA")), (0, 0))
+        self.assertEqual(self.record()["gamertag"], "DriverA")
 
     def test_caller_trusted_is_per_call(self):
         seen = []

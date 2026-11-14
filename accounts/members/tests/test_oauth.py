@@ -1,6 +1,7 @@
 """Discord and GitHub sign-in against a fake provider: the authorize request, state and PKCE,
 a replayed callback, the return-page allowlist, what is kept, and the limits."""
 
+import json
 from urllib.parse import parse_qs, urlsplit
 
 from allauth.socialaccount.models import SocialAccount
@@ -154,6 +155,29 @@ class ReturnPage(AccountsTest):
             target = start.get("Location", "")
             self.assertFalse(target.startswith("https://discord.com"), bad)
             self.assertNotIn("evil", target, bad)
+
+
+class SignInOnly(AccountsTest):
+    """allauth's redirect also takes process=connect from a signed-in session, which adds the
+    provider's account to that account as another way in. The site never asks for it."""
+
+    def test_connect_is_refused(self):
+        b = Browser()
+        with fake_provider() as fake:
+            self.oauth_sign_in(b, fake, uid="111")
+            self.assertTrue(signed_in(b))
+            for process in ("connect", "", "redirect"):
+                r = b.form(PROVIDER_REDIRECT_PATH, {"provider": "github", "callback_url": "/account.html",
+                                                    "process": process})
+                self.assertEqual(r.status_code, 400, process)
+                self.assertNotIn("Location", r)
+            r = b.form(PROVIDER_REDIRECT_PATH, {"provider": "github", "callback_url": "/account.html"})
+            self.assertEqual(r.status_code, 400)
+        self.assertEqual(list(SocialAccount.objects.values_list("provider", "uid")), [("discord", "111")])
+        self.assertEqual(json.loads(b.get_json("/api/me").content)["methods"], ["discord"])
+
+    def test_signing_in_still_starts(self):
+        self.assertTrue(self.oauth_start(Browser())["Location"].startswith("https://discord.com"))
 
 
 class Limits(AccountsTest):

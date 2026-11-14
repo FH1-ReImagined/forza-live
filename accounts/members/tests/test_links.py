@@ -573,6 +573,45 @@ class Pinning(LinkTest):
         self.assertEqual((link.state, link.pub), (GameLink.FROZEN, ed25519.public_key(SEED).hex()))
         self.assertIsNotNone(link.frozen_at)
 
+    def test_a_changed_key_cannot_replace_the_link(self):
+        """The key an XUID is bound to now is not the one its link pinned: it can no more start a
+        new link over it than unlink it. The link freezes and stays its account's."""
+        b, user = self.linked()
+        cache.clear()  # the once-a-day rule is over
+        self.player(XUID, SEED_B, "DriverA")
+        other, _ = self.signed_in(uid="222", ip="203.0.113.12")
+        r, doc = self.start(seed=SEED_B)
+        self.assertEqual((r.status_code, doc), (409, {"error": "this link needs the operator"}))
+        self.assertFalse(LinkRequest.objects.exclude(state=LinkRequest.LINKED).exists())
+        link = GameLink.objects.get()
+        self.assertEqual((link.user, link.state, link.pub), (user, GameLink.FROZEN, ed25519.public_key(SEED).hex()))
+        self.assertEqual(body(b.get_json("/api/me"))["link"]["state"], "frozen")
+        self.assertIsNone(body(other.get_json("/api/me"))["link"])
+
+    def test_a_changed_key_cannot_confirm_over_the_link(self):
+        """Nor does a request of the new key that an account already claimed replace it."""
+        b, user = self.linked()
+        cache.clear()
+        self.player(XUID, SEED_B, "DriverA")
+        _, thief = self.signed_in(uid="222", ip="203.0.113.12")
+        t = timezone.now()
+        req = LinkRequest.objects.create(
+            id="ab" * 16, xuid="%016X" % XUID, pub=ed25519.public_key(SEED_B).hex(), gamertag="DriverA",
+            created=t, expires=t + timedelta(minutes=10), token_hash="t" * 64, code_hash="c" * 64,
+            state=LinkRequest.CLAIMED, claimed_by=thief, claimed_session="")
+        r = self.confirm(req.id, thief.public_id, seed=SEED_B)
+        self.assertEqual((r.status_code, body(r)), (409, {"error": "this link needs the operator"}))
+        link = GameLink.objects.get()
+        self.assertEqual((link.user, link.state, link.pub), (user, GameLink.FROZEN, ed25519.public_key(SEED).hex()))
+        self.assertEqual(body(self.poll(req.id, seed=SEED_B))["state"], "claimed")  # not linked
+
+    def test_the_pinned_key_still_moves_its_link(self):
+        b, user = self.linked()
+        cache.clear()
+        other, second = self.signed_in(uid="222", ip="203.0.113.12")
+        self.link(other, second)
+        self.assertEqual(GameLink.objects.get().user, second)
+
     def test_the_operator_unfreezes_it(self):
         from members.admin import GameLinkAdmin
         from django.contrib import admin

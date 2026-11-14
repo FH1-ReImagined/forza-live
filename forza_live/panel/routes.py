@@ -15,7 +15,7 @@ deleting broadcasts, a player's page, the server list's and the relays' editing,
 
 Who can reach it (all of it, the page too; anything else gets 404, so the panel looks absent):
 
-- FORZA_ADMIN_TOKEN is set (without it the panel is off);
+- FORZA_ADMIN_TOKEN is set (without it, or with the documentation's placeholder, the panel is off);
 - the request did not come through the tunnel or a reverse proxy (lsp.came_through_proxy: a
   --trusted-proxy address, X-Forwarded-For, X-Real-IP or Forwarded), the rule of the photo and
   design moderation;
@@ -121,7 +121,7 @@ def local_address(ip):
 
 def reachable(peer, headers):
     """Whether the panel exists for this request (404 otherwise)."""
-    return (bool(lsp.ADMIN_TOKEN) and bool(peer) and not lsp.came_through_proxy(peer, headers)
+    return (bool(lsp.admin_token()) and bool(peer) and not lsp.came_through_proxy(peer, headers)
             and local_address(peer[0]))
 
 
@@ -163,7 +163,7 @@ def failed(ip, now=None):
 
 def token_ok(headers):
     given = headers.get("x-admin-token", "")
-    return bool(lsp.ADMIN_TOKEN) and hmac.compare_digest(given.encode(), lsp.ADMIN_TOKEN.encode())
+    return bool(lsp.admin_token()) and hmac.compare_digest(given.encode(), lsp.admin_token().encode())
 
 
 # ---- answers ----

@@ -579,15 +579,25 @@ class ChangedHelloTest(TwoDrivers):
 
     def test_a_spent_player_budget_proves_nothing(self):
         with self.spend_player_budget():
-            peer, welcome = self.changed()
+            peer, welcome = self.changed(seed=SEED_B)  # even signed with DriverB's own key
         self.assertEqual(auth.COUNTS["hello checks skipped"], 1)
         self.assert_unproven(peer, welcome)
 
     def test_a_spent_server_budget_proves_nothing(self):
         with self.spend_server_budget():
-            peer, welcome = self.changed()
+            peer, welcome = self.changed(seed=SEED_B)
         self.assertEqual(auth.COUNTS["checks over budget"], 1)
         self.assert_unproven(peer, welcome)
+
+    def test_another_key_s_xuid_costs_no_check(self):
+        """A HELLO for an XUID bound to another key cannot prove it whatever its signature: it is
+        refused before a check is spent on it."""
+        left = self.a.auth_budget[0]
+        with mock.patch.object(ed25519, "verify", side_effect=AssertionError("checked")):
+            peer, welcome = self.changed()  # DriverB's XUID, DriverA's key
+        self.assert_unproven(peer, welcome)
+        self.assertEqual((auth.COUNTS["refused another installation"], auth.COUNTS["hello checks skipped"]), (1, 0))
+        self.assertGreaterEqual(self.a.auth_budget[0], left)  # nothing of DriverA's budget either
 
     def test_a_spent_budget_binds_no_new_xuid(self):
         """An XUID with no key on record is neither bound nor proven by a HELLO left unchecked."""
@@ -693,11 +703,11 @@ class ChangedHelloTest(TwoDrivers):
         with mock.patch.object(ed25519, "verify", wraps=ed25519.verify) as verify:
             with self.spend_player_budget():
                 for i in range(10):
-                    self.assertFalse(self.changed(name=b"DriverB%d" % i)[0].friends_ok)
+                    self.assertFalse(self.changed(name=b"DriverB%d" % i, seed=SEED_B)[0].friends_ok)
             self.assertEqual((verify.call_count, auth.COUNTS["hello checks skipped"]), (0, 10))
             self.refill()
             with self.spend_server_budget():
-                self.assertFalse(self.changed()[0].friends_ok)
+                self.assertFalse(self.changed(seed=SEED_B)[0].friends_ok)
             self.assertEqual((verify.call_count, auth.COUNTS["checks over budget"]), (0, 1))
         self.refill()
         self.assertTrue(self.keep_alive()[0].friends_ok)  # checked again once there is budget
@@ -877,7 +887,7 @@ class RawKeyTest(Base):
         self.assertIn(b"Friends are off: this version of the game is too old", told)
         self.assertIn(b"Chat is off: this version of the game is too old", told)
         self.assertEqual(self.status(self.read(seed=None, raw=KEY.hex())), (0, 0))
-        # an upgrade still works after the cutoff
+        # an upgrade still works after the cutoff (for auth.UPGRADE_GRACE: test_auth_limits.py)
         self.assertTrue(self.sign_in(addr=("127.0.0.1", 20006), token=6)[0].friends_ok)
         self.assertEqual(self.status(self.race_stats(2)), (0, 0))
 

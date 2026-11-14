@@ -1,5 +1,6 @@
 """Email sign-in by code: identical answers, the mail, no stored address, tries, expiry, the
-limits, and the SMTP relay (a fake smtplib.SMTP)."""
+limits (per visitor, per mailbox whatever its spelling, the owner's own budget, the strangers'
+share of the day's mails, the counters' table), and the SMTP relay (a fake smtplib.SMTP)."""
 
 import json
 import time
@@ -7,12 +8,13 @@ from unittest import mock
 
 from allauth.account.models import EmailAddress
 from django.core import mail
+from django.core.cache import cache
 from django.db import connection
 from django.test import override_settings
 
-from members import identity
+from members import identity, views
 from members.models import User
-from members.tests.support import CODE_CONFIRM, CODE_REQUEST, AccountsTest, Browser
+from members.tests.support import CODE_CONFIRM, CODE_REQUEST, AccountsTest, Browser, fake_provider
 
 
 def code_of(message):
@@ -184,6 +186,228 @@ class Limits(AccountsTest):
         r = b.post_json(CODE_CONFIRM, {"code": code})
         self.assertEqual(r.status_code, 429)
         self.assertEqual(b.get_json("/api/me").status_code, 401)
+
+
+    def test_twenty_code_requests_a_day_per_ip(self):
+        now = time.time()
+        b = Browser(ip="198.51.100.95")
+        for hour in range(4):
+            with mock.patch("time.time", return_value=now + hour * 3700):
+                for i in range(5):
+                    r = b.post_json(CODE_REQUEST, {"email": "d%d-%d@example.com" % (hour, i)})
+                    self.assertEqual(r.status_code, 401, (hour, i))
+        with mock.patch("time.time", return_value=now + 4 * 3700):
+            r = b.post_json(CODE_REQUEST, {"email": "d4-0@example.com"})
+            self.assertEqual(json.loads(r.content)["errors"][0]["code"], "too_many_login_attempts")
+            self.assertEqual(Browser(ip="198.51.100.96").post_json(
+                CODE_REQUEST, {"email": "d4-0@example.com"}).status_code, 401)  # another visitor
+
+
+class Mailboxes(AccountsTest):
+    """The per-address limit counts the mailbox, whatever the spelling, and the address's owner
+    keeps a budget nobody else can use up."""
+
+    SPELLINGS = ("victim@gmail.com", "victim+1@gmail.com", "v.ictim@gmail.com", "Vic.Tim+x@GoogleMail.com",
+                 '"victim"@gmail.com')
+    EXOTIC = ('"vi\\ctim"@gmail.com', "victim@[192.0.2.7]")
+
+    def test_what_a_mailbox_is(self):
+        for address in self.SPELLINGS:
+            self.assertEqual(identity.mailbox(address), "victim@gmail.com", address)
+        self.assertEqual(identity.mailbox("First.Last+tag@Example.com"), "first.last@example.com")
+        self.assertEqual(identity.mailbox("p@b\u00fccher.example"), "p@xn--bcher-kva.example")
+        self.assertEqual(identity.mailbox("p@xn--bcher-kva.example"), "p@xn--bcher-kva.example")
+        # another spelling of a domain: mail servers read it as the plain one
+        for address in ("victim@\uff47mail.com", "victim@gm\u00adail.com", "victim@gmail\u3002com",
+                        "victim@exa\u200dmple.com", "no-at-sign", "@example.com", "a@"):
+            self.assertIsNone(identity.mailbox(address), ascii(address))
+        # spellings nobody types, which a mail server may deliver to somebody's mailbox all the same
+        for address in self.EXOTIC + ('"vic\\"tim"@gmail.com', '"vic tim"@gmail.com', "victim@192.0.2.7",
+                                      "victim@[IPv6:2001:db8::7]", 'vic"tim@gmail.com'):
+            self.assertIsNone(identity.mailbox(address), address)
+
+    def test_exotic_spellings_are_refused(self):
+        """A quoted local part with a backslash and a domain that is an address passed as
+        addresses of their own: each with its own budget of codes, an account and a mail."""
+        for i, address in enumerate(self.EXOTIC):
+            r = Browser(ip="198.51.100.%d" % (114 + i)).post_json(CODE_REQUEST, {"email": address})
+            self.assertEqual(r.status_code, 400, address)
+            self.assertEqual(json.loads(r.content)["errors"][0]["code"], "invalid")
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_every_spelling_shares_the_mailbox_s_three_an_hour(self):
+        for i, address in enumerate(self.SPELLINGS):
+            r = Browser(ip="198.51.100.%d" % (100 + i)).post_json(CODE_REQUEST, {"email": address})
+            self.assertEqual(r.status_code, 401 if i < 3 else 400, address)
+        self.assertEqual(len(mail.outbox), 3)
+        self.assertEqual(json.loads(r.content)["errors"][0]["code"], "too_many_login_attempts")
+
+    def test_another_spelling_of_a_domain_is_refused(self):
+        for address in ("victim@\uff47mail.com", "victim@gm\u00adail.com"):
+            r = Browser(ip="198.51.100.110").post_json(CODE_REQUEST, {"email": address})
+            self.assertEqual(r.status_code, 400, ascii(address))
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(User.objects.count(), 0)
+
+    def spend(self, address, start, ip=120):
+        """Other visitors ask for the address's codes until its five a day are gone."""
+        for n, hour in enumerate((0, 0, 0, 1.1, 1.1)):
+            with mock.patch("time.time", return_value=start + hour * 3600):
+                r = Browser(ip="198.51.100.%d" % (ip + n)).post_json(CODE_REQUEST, {"email": address})
+                self.assertEqual(r.status_code, 401, n)
+        return start + 1.2 * 3600
+
+    def test_others_cannot_use_up_the_owner_s_codes(self):
+        owner = Browser(ip="198.51.100.111")
+        done = self.email_sign_in(owner, "member@example.com")
+        self.assertIn(views.KNOWN_COOKIE, done.cookies)
+        owner.post_json("/api/logout-all", {})
+        later = self.spend("member@example.com", time.time() + 86400 * 2)
+        mail.outbox.clear()
+        with mock.patch("time.time", return_value=later):
+            stranger = Browser(ip="198.51.100.130").post_json(CODE_REQUEST, {"email": "member@example.com"})
+            self.assertEqual(stranger.status_code, 400)  # the mailbox's public budget is gone
+            self.assertEqual(mail.outbox, [])
+            again = owner.post_json(CODE_REQUEST, {"email": "Member@Example.com"})  # the owner's browser
+            self.assertEqual(again.status_code, 401)
+            self.assertEqual([m.to for m in mail.outbox], [["member@example.com"]])
+            self.assertEqual(owner.post_json(CODE_CONFIRM, {"code": code_of(mail.outbox[-1])}).status_code, 200)
+
+    def test_a_member_s_browser_gets_the_cookie_at_its_next_visit(self):
+        """The cookie came with a sign-in by code only: every member from before it, signed in
+        or not, had none until the next code, and others' requests could use that one up."""
+        owner = Browser(ip="198.51.100.111")
+        self.email_sign_in(owner, "member@example.com")
+        del owner.cookies[views.KNOWN_COOKIE]  # a session from before the cookie
+        seen = owner.get_json("/api/me")
+        self.assertEqual(seen.status_code, 200)
+        self.assertIn(views.KNOWN_COOKIE, seen.cookies)
+        morsel = seen.cookies[views.KNOWN_COOKIE]
+        self.assertEqual((bool(morsel["secure"]), bool(morsel["httponly"]), morsel["samesite"], morsel["path"]),
+                         (True, True, "Strict", "/"))
+        self.assertNotIn(views.KNOWN_COOKIE, owner.get_json("/api/me").cookies)  # once: it has it now
+        owner.post_json("/api/logout-all", {})
+        later = self.spend("member@example.com", time.time() + 86400 * 2)
+        mail.outbox.clear()
+        with mock.patch("time.time", return_value=later):
+            self.assertEqual(owner.post_json(CODE_REQUEST, {"email": "member@example.com"}).status_code, 401)
+            self.assertEqual([m.to for m in mail.outbox], [["member@example.com"]])
+        # nobody else gets one: not a visitor, not an account that has no email address
+        self.assertNotIn(views.KNOWN_COOKIE, Browser(ip="198.51.100.112").get_json("/api/me").cookies)
+        other = Browser(ip="198.51.100.113")
+        with fake_provider() as fake:
+            self.oauth_sign_in(other, fake)
+        seen = other.get_json("/api/me")
+        self.assertEqual(seen.status_code, 200)
+        self.assertNotIn(views.KNOWN_COOKIE, seen.cookies)
+
+    def test_the_owner_s_budget_is_for_that_address_only(self):
+        owner = Browser(ip="198.51.100.112")
+        self.email_sign_in(owner, "member@example.com")
+        later = self.spend("other@example.com", time.time() + 86400 * 2, ip=140)
+        with mock.patch("time.time", return_value=later):
+            self.assertEqual(owner.post_json(CODE_REQUEST, {"email": "other@example.com"}).status_code, 400)
+
+    def test_a_forged_cookie_gets_no_budget(self):
+        later = self.spend("member@example.com", time.time())
+        forged = Browser(ip="198.51.100.113")
+        forged.cookies[views.KNOWN_COOKIE] = identity.stand_in("member@example.com")
+        with mock.patch("time.time", return_value=later):
+            self.assertEqual(forged.post_json(CODE_REQUEST, {"email": "member@example.com"}).status_code, 400)
+
+    def test_the_cookie(self):
+        done = self.email_sign_in(Browser(), "member@example.com")
+        morsel = done.cookies[views.KNOWN_COOKIE]
+        self.assertEqual((bool(morsel["secure"]), bool(morsel["httponly"]), morsel["samesite"], morsel["path"],
+                          morsel["domain"]), (True, True, "Strict", "/", ""))
+        self.assertEqual(int(morsel["max-age"]), 400 * 86400)
+        self.assertNotIn("member", morsel.value)
+        self.assertNotIn("example", morsel.value)
+
+
+class Shares(AccountsTest):
+    """Half of the day's code mails are for addresses that never finished a sign-in; the rest is
+    left for accounts that have."""
+
+    def rates(self, total=4, new=2):
+        return override_settings(ACCOUNT_RATE_LIMITS=dict(
+            _rates(), login_code_mail_all="%d/d/key" % total, login_code_mail_new="%d/d/key" % new))
+
+    def test_half_is_the_default(self):
+        from django.conf import settings
+        self.assertEqual(settings.ACCOUNT_RATE_LIMITS["login_code_mail_new"], "%d/d/key" % (settings.EMAIL_DAILY // 2))
+
+    def test_strangers_cannot_use_up_the_members_mails(self):
+        with self.rates(), self.assertLogs("members", "WARNING") as logs:
+            self.email_sign_in(Browser(ip="198.51.100.150"), "member@example.com")  # a new address: 1 of 2
+            normal = Browser(ip="198.51.100.151").post_json(CODE_REQUEST, {"email": "s1@example.com"})
+            self.assertEqual(len(mail.outbox), 2)
+            for i in range(2, 5):  # the strangers' share is used up: the same answer, no mail, no account
+                r = Browser(ip="198.51.100.%d" % (150 + i)).post_json(CODE_REQUEST, {"email": "s%d@example.com" % i})
+                self.assertEqual(answer(r), answer(normal))
+            self.assertEqual(len(mail.outbox), 2)
+            self.assertEqual(User.objects.count(), 2)
+            # nor a second mail for an address that asked before and never signed in
+            Browser(ip="198.51.100.156").post_json(CODE_REQUEST, {"email": "s1@example.com"})
+            self.assertEqual(len(mail.outbox), 2)
+            # the member still signs in
+            self.email_sign_in(Browser(ip="198.51.100.157"), "member@example.com")
+            self.email_sign_in(Browser(ip="198.51.100.158"), "member@example.com")
+            # until the whole day's mails are gone
+            r = Browser(ip="198.51.100.159").post_json(CODE_REQUEST, {"email": "member@example.com"})
+            self.assertEqual(json.loads(r.content)["errors"][0]["code"], "paused")
+        warned = [line for line in logs.output if "used up" in line]
+        self.assertEqual(len(warned), 2, logs.output)  # once for the strangers' share, once for the day's
+        self.assertNotIn("example.com", "\n".join(logs.output))
+
+
+class Counters(AccountsTest):
+    """The limits are rows of the cache table. Django's default cap of 300 rows dropped a third of
+    them, lowest keys first, at every write above it: the counters started again."""
+
+    def fill(self, rows=400):
+        for i in range(rows):
+            cache.set("zz-another-counter-%d" % i, [time.time()], 3600)
+
+    def test_the_table_holds_them(self):
+        from django.conf import settings
+        self.assertGreaterEqual(settings.CACHES["default"]["OPTIONS"]["MAX_ENTRIES"], 100000)
+
+    def test_a_limit_outlives_many_other_counters(self):
+        b = Browser(ip="198.51.100.160")
+        for i in range(5):
+            self.assertEqual(b.post_json(CODE_REQUEST, {"email": "c%d@example.com" % i}).status_code, 401)
+        self.assertEqual(b.post_json(CODE_REQUEST, {"email": "c5@example.com"}).status_code, 400)
+        self.fill()
+        r = Browser(ip="198.51.100.160").post_json(CODE_REQUEST, {"email": "c6@example.com"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(json.loads(r.content)["errors"][0]["code"], "too_many_login_attempts")
+
+    def test_the_daily_mail_cap_outlives_many_visitors(self):
+        with override_settings(ACCOUNT_RATE_LIMITS=dict(_rates(), login_code_mail_all="3/d/key",
+                                                        login_code_mail_new="3/d/key")):
+            for i in range(3):
+                Browser(ip="198.51.100.%d" % (170 + i)).post_json(CODE_REQUEST, {"email": "m%d@example.com" % i})
+            self.fill()
+            r = Browser(ip="198.51.100.180").post_json(CODE_REQUEST, {"email": "m9@example.com"})
+        self.assertEqual(json.loads(r.content)["errors"][0]["code"], "paused")
+        self.assertEqual(len(mail.outbox), 3)
+
+    def test_expired_counters_go_nightly(self):
+        from django.utils import timezone
+        from members.management.commands import nightly
+        cache.set("an-hour", 1, 3600)
+        cache.set("a-day", 1, 86400)
+        self.assertEqual(nightly.purge_cache(), 0)
+        later = timezone.now() + timezone.timedelta(hours=2)
+        self.assertEqual(nightly.purge_cache(later), 1)
+        with connection.cursor() as c:
+            c.execute("SELECT cache_key FROM cache")
+            keys = [row[0] for row in c.fetchall()]
+        self.assertEqual(len(keys), 1)
+        self.assertIn("a-day", keys[0])
+        self.assertEqual(cache.get("a-day"), 1)
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend", EMAIL_HOST="smtp.relay.example",
