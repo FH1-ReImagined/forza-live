@@ -220,7 +220,8 @@ class ReadOnlyTest(Base):
             self.addCleanup(os.chmod, self.dir, 0o755)
         with engine.connect() as conn:
             self.assertEqual(len(rows(conn)), 2)
-        self.assertEqual(sorted(os.listdir(self.dir)), [storage.FILE])
+        if os.name == "posix":  # it made nothing there (Windows' reader keeps its -wal and -shm)
+            self.assertEqual(sorted(os.listdir(self.dir)), [storage.FILE])
 
 
 if __name__ == "__main__":

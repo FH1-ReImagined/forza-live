@@ -268,6 +268,7 @@ class FriendsTest(unittest.TestCase):
             self.assertTrue(store.save())
             store.players.clear()
             store.load()
+            storage.close_all()  # before the folder goes (Windows)
         self.transport.sent.clear()
         self.op(a, struct.pack(">BH", fr.SEARCH, 9) + s8("zed"))
         body = self.got(a)[-1]
