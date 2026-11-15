@@ -474,7 +474,9 @@ And inside calls that stay:
 - `Hopper.GetGameOptions`: a Co-op Festival campaign round in a world is served as before, but
   the co-op ledger does not open it (`world.Worlds.next_round`, `ledger_round`), so it has no
   result for the launcher; `/event` there says so in the host's notice;
-- `Scoreboard.GetBestScores`: answered, but a world's race start is no score token;
+- `Scoreboard.GetBestScores`, and `GetRows` for a speed zone's HUD board (type 2, view 5, which
+  the game fetches as the car enters the zone): answered, but a world's race or zone start is no
+  score token;
 - the challenges (`objectives.step`, where every step goes) take no step from a world's call, so
   a world's photo is published as a community photo but is not a photo step; `firstScore`
   (`scores.scored`) is not set from one;

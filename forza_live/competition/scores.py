@@ -946,8 +946,9 @@ def club_only(entries, xuid):
 
 def get_rows(xuid, body):
     p, _ = x.decode(x.ScoreboardGetRows_Params, body)
-    if p["type"] == SPEED_ZONE and p["view"] == FRIENDS_AND_CLUB:
+    if p["type"] == SPEED_ZONE and p["view"] == FRIENDS_AND_CLUB and not rooms.call_world():
         # A speed zone's HUD board, fetched as the car enters it: the zone's start (score_token).
+        # Not a converted world's zone (core/rooms.py): its results are not taken.
         score_token.start(xuid, p["type"], p["gameScoreboardId"], p["isServerTimeTrial"],
                           source()[0])
     if p["type"] == ONLINE_XP_TYPE:

@@ -346,6 +346,34 @@ class ScoresTest(WorldsCase):
         self.assertAlmostEqual(self.best_scores("b"), 110.0, places=3)
         self.assertEqual([k[0] for k in score_token._tokens], [B_XUID])
 
+    def test_a_world_speed_zone_s_hud_board_is_answered_and_makes_no_score_token(self):
+        """GetRows type 2 view 5 is the speed zone's HUD board, which the game fetches as the car
+        enters the zone: from Colorado it is the zone's start (a score token), not from a world."""
+        def hud(who):
+            body = {"type": scores.SPEED_ZONE, "view": scores.FRIENDS_AND_CLUB,
+                    "gameScoreboardId": ZONE, "isServerTimeTrial": False, "isClubBoard": False,
+                    "startAt": 1, "maxResults": 200}
+            return self.call("Scoreboard", "GetRows", x.ScoreboardGetRows_Params, body,
+                             **self.as_(who))
+        self.submit("b", scores.SPEED_ZONE, ZONE, 50.0)
+        score_token._tokens.clear()
+        world_reply = self.assert_nothing_kept(lambda: hud("a"))
+        self.assertEqual(status(world_reply), (0, 0))
+        self.assertEqual(status(hud("b")), (0, 0))
+        self.assertEqual([k[0] for k in score_token._tokens], [B_XUID])
+
+    def test_first_score_is_not_set_from_a_world_s_call(self):
+        """scores.scored, the firstScore hook, takes nothing in a world's call (defense in depth:
+        the world's submissions do not reach it)."""
+        token = rooms.set_call(("anthem", 1, WORLD_ROOM), A_XUID)
+        try:
+            scores.scored(A_XUID)
+        finally:
+            rooms.reset_call(token)
+        self.assertNotIn("firstScore", self.record(A_XUID))
+        scores.scored(A_XUID)   # outside a world's call: set
+        self.assertIn("firstScore", self.record(A_XUID))
+
     def test_the_1000_club_takes_no_medal(self):
         self.assertEqual(status(self.assert_nothing_kept(lambda: self.medal("a"))), (0, 0))
         self.assertEqual(status(self.medal("b")), (0, 0))
