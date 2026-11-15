@@ -261,23 +261,43 @@ class HeldTest(unittest.TestCase):
             "were written: ignored until they were"])
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.default_int_handler)
 
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX")
+    def test_two_signals_handled_in_one_round(self):
+        """SIGINT and SIGTERM waiting together: Python runs their handlers in one round, and the
+        first one's SIG_IGN must not be the second one's (it printed "Signal 15 ignored due to
+        race condition", with a traceback, in 5 of 79 busy three-signal stops)."""
+        held = srv.hold_stop_signals()
+        self.addCleanup(srv.release_stop_signals, held)
+        printed = []
+        with mock.patch("sys.unraisablehook", printed.append):
+            signal.pthread_sigmask(signal.SIG_BLOCK, srv.STOP_SIGNALS)
+            try:
+                signal.raise_signal(signal.SIGINT)
+                signal.raise_signal(signal.SIGTERM)
+            finally:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, srv.STOP_SIGNALS)  # both, at once
+        self.assertEqual(printed, [])
+        self.assertEqual(held[0], [signal.SIGINT, signal.SIGTERM])
+
     def test_a_flood_costs_the_saves_nothing(self):
-        """After the first held signal the signals are SIG_IGN until the log has told of it: a
-        flood of them is not a handler's call each, nor a byte each in the loop's wakeup pipe
-        (which filled, and printed a warning for every signal after)."""
+        """Once a held signal is noted it is SIG_IGN until the log has told of it: a flood of
+        them is not a handler's call each, nor a byte each in the loop's wakeup pipe (which
+        filled, and printed a warning for every signal after)."""
         signal.signal(signal.SIGTERM, signal.default_int_handler)
         held = srv.hold_stop_signals()
         noted = signal.getsignal(signal.SIGTERM)
         signal.raise_signal(signal.SIGINT)
-        for number in srv.STOP_SIGNALS:
-            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
+        self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
         for _ in range(2000):
-            signal.raise_signal(signal.SIGTERM)  # ignored by the system itself
-        self.assertEqual(held[0], [signal.SIGINT])
+            signal.raise_signal(signal.SIGINT)  # ignored by the system itself
+            signal.raise_signal(signal.SIGTERM)  # noted once, then ignored too
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+        self.assertEqual(held[0], [signal.SIGINT, signal.SIGTERM])
         with self.assertLogs("forza-live", "INFO") as logs:
             srv.tell_held(held, srv.SMALL_STORES)
         self.assertEqual(len(logs.output), 1)
-        self.assertIs(signal.getsignal(signal.SIGTERM), noted)  # the next part notes one again
+        for number in srv.STOP_SIGNALS:  # the next part notes them again
+            self.assertIs(signal.getsignal(number), noted)
         for _ in range(2000):
             signal.raise_signal(signal.SIGTERM)
         with self.assertLogs("forza-live", "INFO") as more:

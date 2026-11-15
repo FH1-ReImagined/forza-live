@@ -2396,16 +2396,18 @@ def hold_stop_signals():
     """From here a stop signal (SIGTERM, SIGINT) is noted and ignored, until
     release_stop_signals(held): the stop's saves run with it, and a second `docker stop` or
     Ctrl+C in the middle would otherwise reach the loop's handler only once they are done, with
-    nothing in the log (#70, #78). The first one is noted, and the signals are then SIG_IGN until
-    the log has told of it (tell_held): a flood of them costs the saves nothing, not even a
-    handler's call each. None where signals cannot be set (a thread other than the main one):
-    nothing is held then."""
+    nothing in the log (#70, #78). Each signal is noted once, and is then SIG_IGN until the log
+    has told of it (tell_held): a flood of them costs the saves nothing, not even a handler's call
+    each. None where signals cannot be set (a thread other than the main one): nothing is held
+    then."""
     came, previous = [], {}
 
     def noted(number, frame):
         came.append(number)
-        for each in previous:
-            signal.signal(each, signal.SIG_IGN)  # the rest of this part of the stop: nothing
+        # the rest of this part of the stop: nothing. Only this signal: one of the others may
+        # be waiting for its handler in this same round of Python's, which then finds SIG_IGN
+        # and prints "Signal 15 ignored due to race condition"
+        signal.signal(number, signal.SIG_IGN)
 
     try:
         for number in STOP_SIGNALS:
