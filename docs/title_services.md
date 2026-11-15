@@ -438,12 +438,21 @@ player's live sessions (`rooms.world_of_sessions`):
 - a session in a world's room makes the call that world's, also when the player has another
   session in Colorado (two games on one identity: the Colorado one loses its results while both
   play; between two worlds, the session heard last);
-- only sessions that proved the XUID count (the HELLO's signature or friends key), or any
+- the sessions that proved the XUID decide (the HELLO's signature or friends key), or any
   session of an XUID with no key on record: anyone can say HELLO with another player's XUID, and
-  a session like that in a world's room must not take that player's Colorado results;
+  a session like that in a world's room must not take that player's Colorado results while the
+  player plays in Colorado;
+- when none of the player's sessions has proved the XUID, its unproven sessions in a world's
+  room decide (it fails closed): a game's HELLO is unproven for a while in which its title calls
+  already come (its first HELLO, signed before the WELCOME told it its challenge; a restored
+  session's first HELLO after a restart, signed with the old server's challenge; a HELLO the
+  signature budgets left unchecked), and a world's result must not reach Colorado's boards then.
+  A HELLO forged that way takes a player's Colorado results only while none of the player's own
+  sessions is proven (the 5 s before a game's second HELLO);
 - with no session at all, the player's world session that left (BYE, timed out) in the last 10
   minutes (`rooms.LEFT_KEEP`) still counts, for a call that comes between a game's last datagram
-  and its next HELLO; a new session decides as soon as it says HELLO. A room never changes within
+  and its next HELLO; the state file keeps it through a restart. A new session decides as soon
+  as it says HELLO. A room never changes within
   a game's session (the game reads it once), so a player who moves between Colorado and a world
   starts another game, which is another session.
 

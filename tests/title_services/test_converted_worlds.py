@@ -18,6 +18,7 @@ import os
 import struct
 import time
 import unittest
+from types import SimpleNamespace
 
 from forza_live import server as srv
 from forza_live.competition import objectives as ob
@@ -25,6 +26,7 @@ from forza_live.competition import score_token
 from forza_live.competition import scores
 from forza_live.competition import stats
 from forza_live.content import market
+from forza_live.core import auth
 from forza_live.core import rooms
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
@@ -174,6 +176,18 @@ class WorldsCase(ta.Base):
     def record(self, xuid):
         return lsp.load_player(xuid)
 
+    def restart(self):
+        """The server restarts: a new one restores the players from the state file."""
+        self.server.state_path = os.path.join(self.tmp.name, srv.STATE_FILE)
+        self.assertTrue(self.server.save_state())
+        players = self.store.players
+        self.server = srv.ForzaLive("test", 64)
+        self.server.transport = SimpleNamespace(sendto=lambda d, a: self.sent.append((a, d)))
+        self.server.friends.store.players = players
+        self.store = self.server.friends.store
+        self.server.state_path = os.path.join(self.tmp.name, srv.STATE_FILE)
+        return self.server.load_state()
+
     def progress(self, xuid):
         doc = ob.document(xuid)
         return [o["progress"] for s in doc["sets"] if s["kind"] == "daily" for o in s["objectives"]]
@@ -222,6 +236,62 @@ class LookupTest(WorldsCase):
         self.hello(b"", ("127.0.0.1", 20010), xuid=0x0009000000000077, token=10, tag=b"Old",
                    room="+fh2")
         self.assertEqual(self.server.player_world(0x0009000000000077)[0], "fh2")
+
+    def test_a_game_s_first_hello_is_its_world_s_before_it_proves_the_xuid(self):
+        """A signing game's first HELLO cannot prove the XUID (it is signed before the WELCOME
+        tells the challenge); the next one, 5 s later, does. With none of the player's sessions
+        proven, its unproven session in a world decides: the calls in between are the world's."""
+        self.server.drop(self.a, "left")
+        self.server.left_worlds.clear()   # e.g. the player's first game of the day
+        peer, _ = self.hello(b"", ("127.0.0.1", 20031), xuid=A_XUID, token=31, tag=b"DriverA",
+                             room=WORLD_ROOM)
+        self.assertFalse(peer.friends_ok)
+        self.assertEqual(self.server.player_world(A_XUID), ("anthem", 31, WORLD_ROOM))
+        self.assert_nothing_kept(lambda: self.submit("a", scores.SPEED_TRAP, TRAP, 70.0))
+        # an unproven session in Colorado is not one: with no other the call is Colorado's
+        self.server.drop(peer, "left")
+        self.server.left_worlds.clear()
+        peer, _ = self.hello(b"", ("127.0.0.1", 20032), xuid=A_XUID, token=32, tag=b"DriverA",
+                             room=COLORADO_ROOM)
+        self.assertFalse(peer.friends_ok)
+        self.assertIsNone(self.server.player_world(A_XUID))
+
+    def test_after_a_restart_a_world_session_s_first_hello_keeps_the_world(self):
+        """A restored session is proven until its first HELLO after the restart, which is signed
+        with the old server's challenge and proves nothing until the next one: a score in
+        between must still be the world's."""
+        self.assertEqual(self.restart(), 2)
+        self.assertEqual(self.server.player_world(A_XUID), ("anthem", 1, WORLD_ROOM))
+        stale = auth.hello_block(ta.SEED, ta.MAIN, A_XUID, bytes(16),
+                                 self.hello_body(room=WORLD_ROOM))
+        peer, _ = self.hello(stale, A_ADDR, xuid=A_XUID, token=1, tag=b"DriverA", room=WORLD_ROOM)
+        self.assertFalse(peer.friends_ok)
+        self.assertEqual(self.server.player_world(A_XUID), ("anthem", 1, WORLD_ROOM))
+        self.assert_nothing_kept(lambda: self.submit("a", scores.SPEED_TRAP, TRAP, 70.0))
+        self.submit("b", scores.SPEED_TRAP, TRAP, 60.0)   # Colorado's restored game: kept
+        self.assertEqual(list(scores.STORE.boards["1:%d:0" % TRAP]), ["%016X" % B_XUID])
+
+    def test_a_world_session_that_left_before_a_restart_still_counts_after_it(self):
+        self.server.drop(self.a, "left")
+        self.assertEqual(self.restart(), 1)   # B's session
+        self.assertEqual(self.server.player_world(A_XUID), ("anthem", 1, WORLD_ROOM))
+        self.assert_nothing_kept(lambda: self.submit("a", scores.SPEED_TRAP, TRAP, 70.0))
+        self.assertIsNone(self.server.player_world(B_XUID))
+
+    def test_a_state_file_s_unreadable_left_worlds_are_left_out(self):
+        self.server.drop(self.a, "left")
+        self.server.state_path = os.path.join(self.tmp.name, srv.STATE_FILE)
+        state = self.server.snapshot()
+        self.assertEqual([r[:4] for r in state["left_worlds"]], [[A_XUID, "anthem", 1, WORLD_ROOM]])
+        state["left_worlds"] = [[A_XUID, "fh2", 1, WORLD_ROOM, time.time()], [B_XUID], "x",
+                                [7, "anthem", 1, "club", time.time()],
+                                [8, None, 1, "club", time.time()]]
+        with open(self.server.state_path, "w") as f:
+            json.dump(state, f)
+        self.server = srv.ForzaLive("test", 64)
+        self.server.state_path = os.path.join(self.tmp.name, srv.STATE_FILE)
+        self.assertEqual(self.server.load_state(), 1)   # B's session is restored all the same
+        self.assertEqual(self.server.left_worlds, {})
 
 
 class ScoresTest(WorldsCase):

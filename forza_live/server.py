@@ -1381,11 +1381,23 @@ class ForzaLive(asyncio.DatagramProtocol):
         """(world key, session token, room) of the converted world the player's game is in, or
         None (Colorado): its live sessions' rooms, else its world session that left within
         rooms.LEFT_KEEP (rooms.world_of_sessions). lsp.service_call asks it for every title
-        call."""
+        call.
+
+        The sessions that proved the XUID decide (counts_for_world). When none has, the XUID's
+        unproven sessions in a world's room do: a game's HELLO is unproven for a while in which
+        its title calls already come (its first HELLO, signed before it was told its challenge;
+        a restored session's first HELLO after a restart, signed with the old server's; a HELLO
+        the signature budgets left unchecked), and a world's result must never reach Colorado's
+        boards in it. Failing closed costs little: a HELLO forged with the XUID in a world's
+        room takes a player's Colorado results only while none of the player's sessions has
+        proved it, and never from a proven Colorado session."""
         if not xuid:
             return None
-        sessions = [(p.room, p.token, p.seen) for p in self.peers.values()
-                    if p.xuid == xuid and self.counts_for_world(p)]
+        mine = [p for p in self.peers.values() if p.xuid == xuid]
+        proven = [p for p in mine if self.counts_for_world(p)]
+        if not proven:
+            proven = [p for p in mine if rooms.world_key(p.room)]
+        sessions = [(p.room, p.token, p.seen) for p in proven]
         return rooms.world_of_sessions(sessions, self.left_worlds.get(xuid), time.monotonic())
 
     def coop_placement(self, peer, found):
@@ -1517,6 +1529,11 @@ class ForzaLive(asyncio.DatagramProtocol):
                 "standby_host": p.standby_host})
         state = {"version": STATE_VERSION, "saved_at": now_w, "epoch": self.epoch,
                  "next_id": self.next_id, "peers": peers}
+        # the converted world sessions that left lately (player_world): a call after the
+        # restart from a game whose session had left is still its world's
+        state["left_worlds"] = [[xuid, key, token, room, wall(when)]
+                                for xuid, (key, token, room, when) in self.left_worlds.items()
+                                if now_m - when < rooms.LEFT_KEEP]
         if self.proxy_udp:  # the agent's flows go on through a restart, without a new header
             state["proxy_flows"] = [[a[0], a[1], f.mode, list(f.public), list(f.owner)]
                                     for a, f in self.proxy_flows.items() if f.public and f.owner]
@@ -1582,6 +1599,12 @@ class ForzaLive(asyncio.DatagramProtocol):
                 self.peers[peer.id] = peer
                 self.by_addr[addr] = peer
                 self.restored.add(peer.id)
+            for row in state.get("left_worlds", []):  # a row it cannot read is left out
+                if (isinstance(row, list) and len(row) == 5 and isinstance(row[0], int)
+                        and rooms.world_key(row[3]) == row[1] and row[1] is not None
+                        and isinstance(row[4], (int, float))):
+                    xuid, key, token, room, when = row
+                    self.left_worlds[xuid] = (key, token, room, now_m - (now_w - when))
             if self.proxy_udp:
                 self.load_proxy_flows(state.get("proxy_flows", []), now_m)
             for pid in self.restored:  # counted as they were, whatever the caps say now
