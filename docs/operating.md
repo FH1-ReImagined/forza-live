@@ -744,8 +744,8 @@ more line, below):
     notifications: notifications.json written whole at the stop in 0.14 s: it has every change: 29310 notifications for 3998 players, 5 broadcasts
     scoreboards: scoreboards.json written whole at the stop in 0.32 s: it has every change: 412 boards, 50123 rows, 812 unranked rows, 1500 players in the 1000 Club
 
-A stop signal that comes while the server starts (while it reads its files, or even before) is
-noted: the start reads every file whole, and the server then stops as above, the first line being
+A stop signal that comes while the server starts (while it reads its files, or while Python is
+still loading its code) is noted: the start reads every file whole, and the server then stops as above, the first line being
 `stop: SIGTERM during the start: the server stops now that it is done`. A start that refuses to
 run (a file it cannot read) still ends with exit status 1 and its own line. A volunteer relay
 (`--relay-only`) has nothing to save: it logs the first line and ends with exit status 0.
