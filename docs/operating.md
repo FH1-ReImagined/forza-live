@@ -650,7 +650,7 @@ than `--stall-limit` (50 ms; `0` turns all of this off):
     loop: datagram PRESENCE from #12 'Gamertag' held the event loop 61 ms (limit 50 ms)
     loop: title Scoreboard.SubmitScore held the event loop 132 ms (limit 50 ms)
     loop: http GET /community/gallery.json held the event loop 75 ms (limit 50 ms)
-    loop: operator POST /admin/scores/rank held the event loop 210 ms (limit 50 ms)
+    loop: operator POST /admin/scores/* held the event loop 210 ms (limit 50 ms)
     loop: task expire held the event loop 58 ms (limit 50 ms)
     loop: the event loop was 180 ms late, held by work that no entry point times or by many short pieces of work (limit 50 ms)
 
@@ -660,7 +660,7 @@ The word after `loop:` is the kind of work, then what it was:
 |---|---|
 | `datagram` | the packet type (`HELLO`, `RELAY`, `MATCH_SEARCH`, ...) and, for a signed-in player, `#id 'gamertag'` as the other datagram lines do; never an address |
 | `title` | the title service and method the game called (`Hopper.GetGameOptions`); no player |
-| `http` | any other route, the status page and the website's included: its method and path without the query, ids or file names (`/community/img/*`) |
+| `http` | any other route, the status page and the website's included: its method and the route the server knows, without the query, ids or file names (`/community/img/*`); `other` for a path the server has no route for, so that no word of a requester's own is shown |
 | `operator` | an operator route (`/admin/...`, `/operator/...`, `/gift`, `/notify`, `/broadcast`, `/world/event`), the same way |
 | `task` | a periodic task (`keep_written`, `keep_counted`, ...) or a step of the main loop's once-a-second tick (`expire`, `maybe_save_state`, `friends.maybe_save`, `world_tick`, `events.flush`, ...) |
 | `stall` | the loop was late and nothing timed explains it (below) |
@@ -688,11 +688,12 @@ size today; the line numbers are those of the running version):
 A stall that never ends (the loop stuck for good) still has its stack line.
 
 At most 10 lines a minute of each kind (the stack lines are a kind too, `stack`) are logged; the rest are counted, and once the minute is
-over one line says how many were left out and how long the worst of them was:
+over one line says how many were left out and which of them was the worst:
 
-    loop: 37 more datagram line(s) were left out in that minute (the worst held the loop 812 ms)
+    loop: 37 more datagram line(s) were left out in that minute; the worst of them held the loop 812 ms: datagram MATCH_SEARCH from #12 'Gamertag'
 
-The status page has the numbers without the log, and nothing about who it was:
+The status page has the numbers without the log, and nothing about who it was (for an operator
+route, not even which: only the kind, `"kind": "operator"`, with no `what`):
 
     "event_loop": {"limit_ms": 50, "over_limit_last_hour": 4, "over_limit_since_start": 19,
                    "worst_last_hour": {"kind": "title", "what": "Scoreboard.SubmitScore", "ms": 132, "seconds_ago": 840}}

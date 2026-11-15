@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 import urllib.error
 import urllib.request
@@ -44,15 +45,19 @@ def presence():
 
 class LoopTest(unittest.IsolatedAsyncioTestCase):
     """The server's watchdog (watchdog.WATCH) started on the test's loop, and a server with one
-    player."""
+    player. HEARTBEAT = False: configured only, the entry points timed but no heartbeat, for a
+    test that counts lines or units exactly (a machine that stalls the loop for reasons of its
+    own would add a stall to them)."""
 
     LIMIT_MS, STACK_MS = 50, 0
+    HEARTBEAT = True
 
     async def asyncSetUp(self):
         self.watch = watchdog.WATCH
         self.addCleanup(self.watch.configure, 0)  # as every other test finds it: off
         self.watch.configure(self.LIMIT_MS, self.STACK_MS)
-        self.watch.start()
+        if self.HEARTBEAT:
+            self.watch.start()
         self.addCleanup(self.watch.stop)
         self.loop = asyncio.get_running_loop()
         self.server = srv.ForzaLive("test", 64)
@@ -74,12 +79,16 @@ class LoopTest(unittest.IsolatedAsyncioTestCase):
 
     async def datagram(self, data, addr=None):
         """A datagram as the transport hands it over: a callback of the loop, not inside a
-        task."""
+        task. What it raises is raised here."""
         done = self.loop.create_future()
 
         def deliver():
-            self.server.datagram_received(data, addr or self.peer.addr)
-            done.set_result(None)
+            try:
+                self.server.datagram_received(data, addr or self.peer.addr)
+            except Exception as error:  # noqa: BLE001 - the test's to see
+                done.set_exception(error)
+            else:
+                done.set_result(None)
         self.loop.call_soon(deliver)
         await done
 
@@ -104,13 +113,6 @@ class EntryPointsTest(LoopTest):
         self.assertNotIn("20007", "\n".join(logs.output))
         # the heartbeat was late too, but for a unit that has its line: no second line
         self.assertEqual([line for line in logs.output if "late" in line], [])
-
-    async def test_a_fast_datagram_is_no_line(self):
-        with self.assertNoLogs("forza-live", "WARNING"):
-            for _ in range(3):
-                await self.datagram(presence())
-            await self.settle()
-        self.assertEqual(self.watch.status()["event_loop"]["over_limit_last_hour"], 0)
 
     async def test_an_unregistered_sender_is_named_by_nobody(self):
         with mock.patch.object(self.server, "on_hello", lambda body, addr: hold_the_loop(0.1)):
@@ -158,6 +160,18 @@ class EntryPointsTest(LoopTest):
         self.assertNotIn("0009000000000007", held[0])  # the title lines name no player
         self.assertEqual([line for line in logs.output if "late" in line], [])
 
+    async def test_a_path_the_server_does_not_know_is_other(self):
+        def slow(server, method, path, headers, body, peer):
+            hold_the_loop(0.1)
+            return 404, "text/plain", b"not found"
+        with mock.patch.object(lsp, "handle", slow):
+            with self.assertLogs("forza-live", "WARNING") as logs:
+                await self.http(b"GET /mysecretword/more HTTP/1.1\r\nConnection: close\r\n\r\n")
+        held = [line for line in logs.output if "held the event loop" in line]
+        self.assertIn("loop: http GET other held the event loop", held[0])
+        self.assertNotIn("mysecretword", "\n".join(logs.output))
+        self.assertNotIn("mysecretword", json.dumps(self.server.status()))
+
     async def test_a_web_route_and_an_operator_route_are_their_routes(self):
         with mock.patch.object(self.server, "status",
                                lambda: (hold_the_loop(0.1), {"server": "forza-live"})[1]):
@@ -185,10 +199,14 @@ class EntryPointsTest(LoopTest):
     def test_routes_name_no_ids_codes_or_queries(self):
         for path, route in (("/", "/"), ("/status", "/status"), ("/operator/", "/operator"),
                             ("/community/img/ABCDEFGHJK23.jpg", "/community/img/*"),
-                            ("/owner/photos/ABCDEFGHJK23/delete", "/owner/photos/*"),
-                            ("/admin/scores/rank?token=s3cret&xuid=1", "/admin/scores/rank"),
+                            ("/community/gallery.json", "/community/gallery.json"),
+                            ("/owner/photos/ABCDEFGHJK23/delete", "/owner/*"),
+                            ("/admin/scores/rank?token=s3cret&xuid=1", "/admin/scores/*"),
+                            ("/admin/chat?token=s3cret", "/admin/chat"),
                             ("/storage/0009000000000007/ghost", "/storage/*"),
-                            ("/a/b/c/d", "/a/b/c/*"), ("/%2e%2e/x", "/*")):
+                            ("/community/mysecretword", "/community/*"),
+                            ("/a/b/c/d", "other"), ("/mysecretword", "other"),
+                            ("/challengesmysecret", "other"), ("/%2e%2e/x", "other"), ("//", "/")):
             self.assertEqual(watchdog.route_of(path), route, path)
         self.assertEqual(watchdog.describe_request("GET", "/gift?to=Racer&token=x", {}),
                          ("operator", "GET /gift"))
@@ -200,7 +218,36 @@ class EntryPointsTest(LoopTest):
             ("title", "Xls.Presence.GetX"))
 
 
+class KnownRoutesTest(unittest.TestCase):
+    """The routes the watchdog may name come from the routing code, not from a list of its own."""
+
+    def test_they_are_the_routing_codes(self):
+        self.assertEqual(watchdog.ROUTES, watchdog.routes_in(srv.http_handler, lsp.handle))
+        from forza_live.content import community, design_feed, online, owners, videos
+        from forza_live.panel import routes as panel
+        for prefix in (panel.PREFIX, owners.PREFIX, community.ADMIN_PREFIX, videos.ADMIN_PREFIX,
+                       design_feed.ADMIN_PREFIX, design_feed.FEED_PATH, online.PATH, "/status",
+                       "/admin/chat", "/world/event", "/gift", "/leaderboards", "/storage/"):
+            self.assertEqual(watchdog.route_of(prefix + "?x=1"), prefix.rstrip("/"), prefix)
+
+    def test_a_route_added_to_a_router_is_known_with_no_list_to_keep(self):
+        module = types.ModuleType("fresh")
+        exec('PREFIX = "/fresh/"\n'
+             'def handles(path):\n'
+             '    return path.startswith(PREFIX)\n', module.__dict__)
+        names = {"fresh": module}
+        exec('def handle(path):\n'
+             '    if path in ("/brand-new/thing", "/other-new"):\n'
+             '        return 1\n'
+             '    if fresh.handles(path):\n'
+             '        return 2\n', names)
+        self.assertEqual(watchdog.routes_in(names["handle"]),
+                         {("brand-new", "thing"), ("other-new",), ("fresh",)})
+
+
 class RateLimitTest(LoopTest):
+    HEARTBEAT = False
+
     async def test_at_most_n_lines_a_minute_of_each_kind_and_a_summary(self):
         now = [5000.0]
         self.watch.wall = lambda: now[0]
@@ -209,6 +256,8 @@ class RateLimitTest(LoopTest):
         with self.assertLogs("forza-live", "WARNING") as logs:
             for i in range(n + 7):
                 self.watch.report("datagram", "PRESENCE", None, watchdog.clock(), 0.06 + i / 1000)
+            self.watch.report("datagram", "RELAY", "#7 'Racer'", watchdog.clock(), 0.09)
+            self.watch.report("datagram", "BYE", None, watchdog.clock(), 0.065)
             self.watch.report("title", "Hopper.GetGameOptions", None, watchdog.clock(), 0.07)
         self.assertEqual(sum("loop: datagram" in line for line in logs.output), n)
         self.assertEqual(sum("loop: title" in line for line in logs.output), 1)  # its own count
@@ -216,14 +265,60 @@ class RateLimitTest(LoopTest):
         with self.assertLogs("forza-live", "WARNING") as logs:
             self.watch.lines.flush()
         self.assertEqual(len(logs.output), 1)
-        self.assertIn("loop: 7 more datagram line(s) were left out in that minute (the worst "
-                      "held the loop 76 ms)", logs.output[0])
+        self.assertIn("loop: 9 more datagram line(s) were left out in that minute; the worst of "
+                      "them held the loop 90 ms: datagram RELAY from #7 'Racer'", logs.output[0])
         with self.assertLogs("forza-live", "WARNING") as logs:  # a new minute
             self.watch.report("datagram", "PRESENCE", None, watchdog.clock(), 0.06)
         self.assertEqual(len(logs.output), 1)
         status = self.watch.status()["event_loop"]
-        self.assertEqual(status["over_limit_last_hour"], n + 9)  # every one is counted
-        self.assertEqual(status["worst_last_hour"]["ms"], 76)
+        self.assertEqual(status["over_limit_last_hour"], n + 11)  # every one is counted
+        self.assertEqual(status["worst_last_hour"]["ms"], 90)
+
+    async def test_the_stacks_summary_names_its_stall(self):
+        now = [100.0]
+        lines = watchdog.Lines(lambda: now[0])
+        stalls = watchdog.LINES_PER_MINUTE + 3
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            for n in range(1, stalls + 1):  # the last three left out, the second last the worst
+                lines.say("stack", "stall %d, at save (store.py:9)" % n,
+                          900 if n == stalls - 1 else 300, "loop: stall %d", n)
+            now[0] += 60
+            lines.flush()
+        self.assertEqual(len(logs.output), watchdog.LINES_PER_MINUTE + 1)
+        self.assertEqual(logs.output[-1],
+                         "WARNING:forza-live:loop: 3 more stack line(s) were left out in that "
+                         "minute; the worst of them held the loop 900 ms: stall %d, at save "
+                         "(store.py:9)" % (stalls - 1))
+
+
+class ExplainedTest(LoopTest):
+    """The heartbeat's lateness that the units reported meanwhile explain, however many there
+    were: no stall line for it. Without the heartbeat task: its check is called as it calls it."""
+
+    HEARTBEAT = False
+
+    async def test_many_units_in_one_gap_explain_the_whole_lateness(self):
+        due = watchdog.clock()
+        self.watch.due = due  # as the heartbeat sets them going to sleep
+        self.watch.explained = 0.0
+        units = 100
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            for i in range(units):  # 100 datagrams of 60 ms one after the other
+                self.watch.report("datagram", "PRESENCE", None, due + i * 0.06, 0.06)
+            self.watch.check(due, due + units * 0.06 + 0.002)
+        self.assertEqual([line for line in logs.output if "late" in line], [])
+        self.assertNotIn("stall", [m[3] for m in self.watch.minutes])
+
+    async def test_what_the_units_do_not_explain_is_a_stall(self):
+        due = watchdog.clock()
+        self.watch.due = due
+        self.watch.explained = 0.0
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            self.watch.report("datagram", "PRESENCE", None, due - 0.05, 0.11)  # 60 ms after due
+            self.watch.check(due, due + 0.06 + 0.2)
+        late = [line for line in logs.output if "late" in line]
+        self.assertEqual(len(late), 1, logs.output)
+        self.assertIn(ms_of(late[0], LATE), (199, 200))  # 260 late, less the 60 explained
 
 
 class HeartbeatTest(LoopTest):
@@ -263,6 +358,51 @@ class StackTest(LoopTest):
                             for line in logs.output), logs.output)
 
 
+class FastTest(LoopTest):
+    """A datagram far under the limit (a limit no machine's own pause reaches) is no line."""
+
+    LIMIT_MS = 1000
+    HEARTBEAT = False
+
+    async def test_a_fast_datagram_is_no_line(self):
+        with self.assertNoLogs("forza-live", "WARNING"):
+            for _ in range(3):
+                await self.datagram(presence())
+            await self.settle()
+        self.assertEqual(self.watch.status()["event_loop"]["over_limit_last_hour"], 0)
+
+
+class DatagramReportTest(LoopTest):
+    HEARTBEAT = False  # a report that fails explains nothing: the heartbeat would say so
+
+    async def test_a_report_that_fails_never_reaches_the_datagram(self):
+        handled = []
+
+        def slow(peer, body):
+            hold_the_loop(0.1)
+            handled.append(peer.id)
+
+        class Broken(dict):  # the packet types' names
+            def get(self, *args):
+                raise RuntimeError("the names")
+
+        class Unprintable:  # the player's name
+            def __repr__(self):
+                raise RuntimeError("the name")
+
+        with mock.patch.object(self.server, "on_presence", slow):
+            with mock.patch.object(self.watch, "report", side_effect=RuntimeError("the report")):
+                await self.datagram(presence())  # raises nothing
+            with mock.patch.object(srv, "DATAGRAM_NAMES", Broken()):
+                await self.datagram(presence())
+            with mock.patch.object(self.peer, "name", Unprintable()):
+                await self.datagram(presence())
+        self.assertEqual(handled, [7, 7, 7])  # each one handled
+        with mock.patch.object(self.server, "on_presence", lambda peer, body: handled.append(0)):
+            await self.datagram(presence())
+        self.assertEqual(handled, [7, 7, 7, 0])  # and the next one too
+
+
 class OffTest(LoopTest):
     LIMIT_MS = 0
 
@@ -292,6 +432,8 @@ class StopTest(LoopTest):
 
 
 class StatusTest(LoopTest):
+    HEARTBEAT = False
+
     async def test_status_has_the_last_hours_count_and_worst(self):
         now = [7200.0]
         self.watch.wall = lambda: now[0]
@@ -315,6 +457,15 @@ class StatusTest(LoopTest):
         self.assertEqual(status["over_limit_last_hour"], 0)
         self.assertEqual(status["over_limit_since_start"], 1)
         self.assertNotIn("worst_last_hour", status)
+
+    async def test_status_names_no_operator_route(self):
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            self.watch.report("operator", "GET /admin/chat", None, watchdog.clock(), 0.2)
+        self.assertIn("loop: operator GET /admin/chat held the event loop", logs.output[0])
+        worst = self.server.status()["event_loop"]["worst_last_hour"]
+        self.assertEqual((worst["kind"], worst["ms"]), ("operator", 200))
+        self.assertNotIn("what", worst)
+        self.assertNotIn("admin", json.dumps(self.server.status()["event_loop"]))
 
 
 def free_port(kind):

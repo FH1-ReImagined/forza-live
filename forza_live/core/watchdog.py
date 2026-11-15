@@ -21,10 +21,11 @@ limit (--stall-stack, 250 ms), once per stall, and logs it.
 
 Off (--stall-limit 0): no task factory, no heartbeat, no thread, and the datagram's check is one
 comparison with an infinite LIMIT. The lines are rate limited (LINES_PER_MINUTE of each kind;
-the rest counted, and a summary says how many were left out). /status has the count of the last
-hour and its worst (status()). Nothing here names an address, a key or a token: a datagram
-names its player as the server's other datagram lines do (#id 'gamertag'), a request its route
-without its query or ids (route_of), a title-service call its service and method.
+the rest counted, and a summary says how many were left out and which was the worst). /status
+has the count of the last hour and its worst (status()). Nothing here names an address, a key or
+a token: a datagram names its player as the server's other datagram lines do (#id 'gamertag'), a
+request a route the server knows without its query or ids (route_of: any other path is OTHER),
+a title-service call its service and method. /status names no operator route, only its kind.
 """
 
 import asyncio
@@ -36,6 +37,7 @@ import re
 import sys
 import threading
 import time
+import types
 
 log = logging.getLogger("forza-live")
 
@@ -58,6 +60,11 @@ DATAGRAM, TITLE, HTTP, OPERATOR, TASK, STALL, STACK = (
 METHODS = frozenset(("GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"))
 OPERATOR_ROUTES = ("/admin", "/operator", "/world/event", "/notify", "/gift", "/broadcast")
 SEGMENT = re.compile(r"[a-z][a-z_.-]{0,31}\Z")  # a path's word: lower case, no digits
+OTHER = "other"  # the route of a path that no route of the server's starts with
+# The routes the server knows, each as its words: ("community", "img"). server.py sets it from
+# its routing code (routes_in), so that a route added there is named without a list to keep.
+ROUTES = frozenset()
+ROUTERS = ("handle", "handles")  # the routing functions of the modules a router calls
 NAME = re.compile(r"[^A-Za-z0-9_]")
 PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # forza_live/
 ASYNCIO = os.path.dirname(os.path.abspath(asyncio.__file__))
@@ -65,9 +72,8 @@ HERE = os.path.abspath(__file__)
 STACK_FRAMES = 8
 
 
-def route_of(path):
-    """A request's route for the log and /status: its path without the query, up to three
-    words, and `*` for the rest (an id, a file name, a code)."""
+def words_of(path):
+    """A path's first words (SEGMENT, up to three) without its query, and whether more follows."""
     words = path.partition("?")[0].partition("#")[0].strip("/")
     words = words.split("/") if words else []
     kept = []
@@ -75,10 +81,64 @@ def route_of(path):
         if not SEGMENT.match(word):
             break
         kept.append(word)
-    route = "/" + "/".join(kept)
-    if len(kept) < len(words):
-        route += "/*" if kept else "*"
-    return route
+    return tuple(kept), len(kept) < len(words)
+
+
+def route_of(path):
+    """A request's route for the log and /status: the longest route the server knows (ROUTES)
+    that its path starts with, and `*` for the rest (an id, a file name, a code); OTHER for a
+    path that starts with none, so that no word of a requester's own is ever shown."""
+    kept, more = words_of(path)
+    if not kept:
+        return OTHER if more else "/"
+    for n in range(len(kept), 0, -1):
+        if kept[:n] in ROUTES:
+            return "/" + "/".join(kept[:n]) + ("/*" if more or n < len(kept) else "")
+    return OTHER
+
+
+def routes_in(*functions):
+    """The routes these routing functions know (ROUTES): every path among their constants, the
+    module constants they name (owners.PREFIX = "/owner/") and those of the routing functions
+    (ROUTERS) of the modules they call, theirs too, as the words route_of matches."""
+    found, seen, todo = set(), set(), list(functions)
+
+    def add(value):
+        if isinstance(value, str) and value.startswith("/"):
+            words = words_of(value)[0]
+            if words:
+                found.add(words)
+        elif isinstance(value, (tuple, frozenset)):
+            for item in value:
+                add(item)
+
+    while todo:
+        fn = todo.pop()
+        code = getattr(fn, "__code__", None)
+        if code is None or code in seen:
+            continue
+        seen.add(code)
+        codes, names = [code], set()
+        while codes:  # the function's own code and what is nested in it (a lambda, a genexpr)
+            c = codes.pop()
+            names.update(c.co_names)
+            for const in c.co_consts:
+                if isinstance(const, types.CodeType):
+                    codes.append(const)
+                else:
+                    add(const)
+        for name in names:
+            value = fn.__globals__.get(name)
+            if isinstance(value, types.ModuleType):
+                for attr in names:
+                    item = getattr(value, attr, None)
+                    if attr in ROUTERS and callable(item):
+                        todo.append(item)
+                    else:
+                        add(item)
+            else:
+                add(value)
+    return frozenset(found)
 
 
 def describe_request(method, path, headers):
@@ -174,25 +234,30 @@ def where(frame):
 
 class Lines:
     """At most LINES_PER_MINUTE lines a minute of each kind; the rest are counted, and a
-    summary line says how many were left out. One thread uses one Lines."""
+    summary line says how many were left out and which of them was the worst. One thread uses
+    one Lines."""
 
     def __init__(self, wall):
         self.wall = wall
-        self.kinds = {}  # kind -> [start of its minute, lines logged, lines left out, worst ms]
+        # kind -> [start of its minute, lines logged, lines left out, worst ms, worst's unit]
+        self.kinds = {}
 
-    def say(self, kind, ms, message, *args):
+    def say(self, kind, unit, ms, message, *args):
+        """message % args, unless the minute's lines of this kind are used up: then `unit`
+        (what the line was about, as the summary names it) and its ms are counted."""
         now = self.wall()
         entry = self.kinds.get(kind)
         if entry is None or now - entry[0] >= 60.0:
             if entry is not None:
                 self.summary(kind, entry)
-            entry = self.kinds[kind] = [now, 0, 0, 0.0]
+            entry = self.kinds[kind] = [now, 0, 0, 0.0, None]
         if entry[1] < LINES_PER_MINUTE:
             entry[1] += 1
             log.warning(message, *args)
         else:
             entry[2] += 1
-            entry[3] = max(entry[3], ms)
+            if entry[4] is None or ms > entry[3]:
+                entry[3], entry[4] = ms, unit
 
     def flush(self):
         """The summaries of the minutes that are over."""
@@ -205,9 +270,9 @@ class Lines:
     @staticmethod
     def summary(kind, entry):
         if entry[2]:
-            log.warning("loop: %d more %s line(s) were left out in that minute (the worst "
-                        "held the loop %d ms)", entry[2], kind, entry[3])
-            entry[2] = 0
+            log.warning("loop: %d more %s line(s) were left out in that minute; the worst of "
+                        "them held the loop %d ms: %s", entry[2], kind, entry[3], entry[4])
+            entry[2], entry[4] = 0, None
 
 
 class Watch:
@@ -230,7 +295,9 @@ class Watch:
         self.minutes = collections.deque()  # [minute, count, worst ms, kind, what, when] (an hour)
         self.total = 0
         self.reported = 0.0  # seconds of all that was reported: a step leaves out what was in it
-        self.recent = collections.deque(maxlen=32)  # (began, ended) of what was reported
+        # Seconds of what was reported since the heartbeat went to sleep, from when it was due:
+        # how much of its lateness has a line already (check)
+        self.explained = 0.0
         self.due = clock()  # when the heartbeat is due
         self.beats = 0
         self.sampled = -1  # self.beats when the stack was last sampled: once per stall
@@ -317,14 +384,16 @@ class Watch:
         try:
             ended = began + took
             self.reported += took
-            self.recent.append((began, ended))
+            # what of it came after the heartbeat was due (it is not awake meanwhile: ended
+            # is before its next wake)
+            self.explained += max(0.0, ended - max(began, self.due))
             ms = took * 1000.0
             self.count(kind, what, ms)
             sampled = self.sampled_at
             where_ = " (stall %d)" % self.stalls if sampled and began <= sampled <= ended else ""
-            self.lines.say(kind, ms, "loop: %s %s%s held the event loop %d ms (limit %d ms)%s",
-                           kind, what, " from " + who if who else "", ms, self.limit * 1000,
-                           where_)
+            unit = "%s %s%s" % (kind, what, " from " + who if who else "")
+            self.lines.say(kind, unit, ms, "loop: %s held the event loop %d ms (limit %d ms)%s",
+                           unit, ms, self.limit * 1000, where_)
         except Exception:  # noqa: BLE001
             log.debug("loop: the watchdog's report failed", exc_info=True)
 
@@ -354,6 +423,7 @@ class Watch:
         flushed = clock()
         while True:
             self.due = due = clock() + period
+            self.explained = 0.0
             await asyncio.sleep(period)
             now = clock()
             self.due = now + period  # the loop is not held now: the watcher thread waits again
@@ -370,14 +440,13 @@ class Watch:
         late = now - due
         if late <= self.limit:
             return
-        explained = sum(max(0.0, min(ended, now) - max(began, due))
-                        for began, ended in self.recent if ended > due)
-        held = late - explained
+        held = late - self.explained
         if held > self.limit:
             sampled = self.sampled_at
             where_ = " (stall %d)" % self.stalls if sampled and due <= sampled <= now else ""
             self.count(STALL, "untimed", held * 1000.0)
-            self.lines.say(STALL, held * 1000.0,
+            self.lines.say(STALL, "untimed work, the event loop %d ms late" % (late * 1000.0),
+                           held * 1000.0,
                            "loop: the event loop was %d ms late, held by work that no entry "
                            "point times or by many short pieces of work (limit %d ms)%s",
                            held * 1000.0, self.limit * 1000, where_)
@@ -406,10 +475,10 @@ class Watch:
         self.stalls += 1
         self.sampled_at = clock()
         try:
-            self.thread_lines.say(STACK, held * 1000.0,
+            at = where(frame)
+            self.thread_lines.say(STACK, "stall %d, at %s" % (self.stalls, at), held * 1000.0,
                                   "loop: stall %d: the event loop has been held %d ms so far, "
-                                  "at %s",
-                                  self.stalls, held * 1000.0, where(frame))
+                                  "at %s", self.stalls, held * 1000.0, at)
         finally:
             del frame
 
@@ -425,8 +494,11 @@ class Watch:
                "over_limit_since_start": self.total}
         if recent:
             worst = max(recent, key=lambda m: m[2])
-            out["worst_last_hour"] = {"kind": worst[3], "what": worst[4], "ms": round(worst[2]),
-                                      "seconds_ago": int(now - worst[5])}
+            out["worst_last_hour"] = shown = {"kind": worst[3], "what": worst[4],
+                                              "ms": round(worst[2]),
+                                              "seconds_ago": int(now - worst[5])}
+            if worst[3] == OPERATOR:  # the public page says no more than that it was one
+                del shown["what"]
         return {"event_loop": out}
 
 

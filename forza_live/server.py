@@ -529,11 +529,17 @@ class ForzaLive(asyncio.DatagramProtocol):
                 self.slow_datagram(addr, began, took)
 
     def slow_datagram(self, addr, began, took):
-        kind = self.handling
-        peer = self.by_addr.get(addr)
-        watchdog.WATCH.report(
-            watchdog.DATAGRAM, "?" if kind is None else DATAGRAM_NAMES.get(kind, "type %d" % kind),
-            None if peer is None else "#%d %r" % (peer.id, peer.name), began, took)
+        """The watchdog's line of a datagram that held the loop: never raises into the datagram's
+        handling, whatever went wrong in it."""
+        try:
+            kind = self.handling
+            peer = self.by_addr.get(addr)
+            watchdog.WATCH.report(
+                watchdog.DATAGRAM,
+                "?" if kind is None else DATAGRAM_NAMES.get(kind, "type %d" % kind),
+                None if peer is None else "#%d %r" % (peer.id, peer.name), began, took)
+        except Exception:  # noqa: BLE001 - the watchdog never costs a datagram
+            log.debug("loop: the watchdog's datagram report failed", exc_info=True)
 
     def handle_datagram(self, data, addr):
         if self.proxy_udp and limits.is_trusted_proxy(addr[0]):
@@ -2187,6 +2193,11 @@ async def http_handler(server, reader, writer):
         http_open.pop(who, None)
         http_release(ip)
         writer.close()
+
+
+# The routes the watchdog may name (core/watchdog.py): those of the routing code itself, so that
+# a requester's own words in a path it does not know are never on the log or /status.
+watchdog.ROUTES = watchdog.routes_in(http_handler, lsp.handle)
 
 
 DRIFT_LOGGED = 1 << 20  # a recount this far from the running total is in the log
