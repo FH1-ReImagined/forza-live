@@ -2235,11 +2235,140 @@ STOP_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGINT")
                      if hasattr(signal, name))
 
 
+def signal_name(number):
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return str(number)
+
+
+class StopRequest:
+    """The stop signals (SIGTERM: `docker stop`; SIGINT: Ctrl+C), taken through the event loop
+    (#78). A signal only notes itself here and wakes main(), which then ends from its own code:
+    the tick loop's wait returns, and the stop runs as main() has it. Python's own way, a
+    KeyboardInterrupt raised in the main thread at whatever it is doing, was lost when that was
+    a weakref callback, a __del__ or a garbage collector callback (it is only printed there,
+    "Exception ignored in ..."): the server ran on until the container runtime killed it, and
+    none of the stop's saves were made.
+
+    install(loop) takes the signals with loop.add_signal_handler; where the loop has none
+    (Windows), with a signal.signal handler that only schedules the note onto the loop
+    (call_soon_threadsafe). Either way nothing is raised where the signal lands, and every
+    signal after the first is noted and changes nothing."""
+
+    def __init__(self):
+        self.came = []  # the stop signals, in the order they came
+        self.during_start = False  # the first one came before the server was serving
+        self.serving = False  # main() sets it once the start is done
+        self.stopping = asyncio.Event()
+        self.loop = None
+        self.taken = []  # the signals the loop's add_signal_handler has
+        self.blocked = None  # the thread's signal mask before block()
+
+    def install(self, loop):
+        """The signals are this loop's from here. Nothing in a thread other than the main one,
+        where signals cannot be set (none is delivered there either)."""
+        self.loop = loop
+        for number in STOP_SIGNALS:
+            try:
+                loop.add_signal_handler(number, self.note, number)
+                self.taken.append(number)
+                continue
+            except NotImplementedError:  # Windows' event loops: the handler below instead
+                pass
+            except (RuntimeError, ValueError):  # not the main thread
+                break
+            try:
+                signal.signal(number, self.schedule)
+            except ValueError:  # not the main thread
+                break
+        return self
+
+    def schedule(self, number, frame):
+        """The signal.signal handler (Windows): it runs wherever the main thread is, so it only
+        hands the note to the loop, which cannot fail there."""
+        try:
+            self.loop.call_soon_threadsafe(self.note, number)
+        except RuntimeError:  # the loop is closed: the stop is over
+            self.came.append(number)
+
+    def note(self, number):
+        """A stop signal (the loop calls this, never the signal itself)."""
+        if not self.came:
+            self.during_start = not self.serving
+        self.came.append(number)
+        self.stopping.set()
+
+    async def wait(self, seconds):
+        """True once a stop was asked for (at once if it was already), False after seconds."""
+        if self.stopping.is_set():
+            return True
+        try:
+            async with asyncio.timeout(seconds):
+                await self.stopping.wait()
+        except TimeoutError:
+            return False
+        return True
+
+    async def until_stopped(self, coro):
+        """coro until it ends by itself or a stop is asked for, which cancels it at the await it
+        is at (the --relay-only relay: it has nothing to save). Its result or exception."""
+        task = asyncio.ensure_future(coro)
+        stopped = asyncio.ensure_future(self.stopping.wait())
+        try:
+            await asyncio.wait((task, stopped), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopped.cancel()
+            if not task.done():
+                task.cancel()
+                await asyncio.wait((task,))
+        if task.cancelled() and self.stopping.is_set():
+            return None
+        return task.result()
+
+    def said(self):
+        """The log's line for the stop that was asked for, or None (main() ends another way)."""
+        if not self.came:
+            return None
+        if self.during_start:
+            return ("stop: %s during the start: the server stops now that it is done"
+                    % signal_name(self.came[0]))
+        return "stop: %s: the server stops" % signal_name(self.came[0])
+
+    def block(self):
+        """Until quiet(): the signals the loop has wait in this thread, while the loop's close
+        puts Python's default handlers back (SIGTERM's would end the process, or be ignored
+        as a container's first process)."""
+        if self.taken and self.blocked is None and hasattr(signal, "pthread_sigmask"):
+            self.blocked = signal.pthread_sigmask(signal.SIG_BLOCK, self.taken)
+
+    def quiet(self):
+        """From here to the end of the process a stop signal is noted and ignored (a container
+        runtime's second SIGTERM, a second Ctrl+C after the stop): run() calls it once the loop
+        is closed. A signal that waited meanwhile (block) comes now, to this handler."""
+        def ignore(number, frame):
+            self.came.append(number)
+        try:
+            for number in STOP_SIGNALS:
+                signal.signal(number, ignore)
+        except ValueError:  # not the main thread
+            pass
+        finally:
+            if self.blocked is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, self.blocked)
+                self.blocked = None
+
+
+SMALL_STORES = "the registrations, co-op ledger and friends"
+JOURNALED_STORES = "notifications.json and scoreboards.json"
+
+
 def hold_stop_signals():
     """From here a stop signal (SIGTERM, SIGINT) is noted and ignored, until
-    release_stop_signals(held): the stores without a journal are written whole, and a second
-    `docker stop` or Ctrl+C in the middle would cut them short (#70). None where signals cannot
-    be set (a thread other than the main one): nothing is held then."""
+    release_stop_signals(held): the stop's saves run with it, and a second `docker stop` or
+    Ctrl+C in the middle would otherwise reach the loop's handler only once they are done, with
+    nothing in the log (#70, #78). None where signals cannot be set (a thread other than the
+    main one): nothing is held then."""
     came, previous = [], {}
     try:
         for number in STOP_SIGNALS:
@@ -2250,7 +2379,18 @@ def hold_stop_signals():
     return came, previous
 
 
-def release_stop_signals(held):
+def tell_held(held, during=SMALL_STORES):
+    """The log tells of a signal held while `during` were written, once."""
+    if held is None:
+        return
+    came = held[0]
+    if came:
+        log.info("stop: %s again while %s were written: ignored until they were",
+                 signal_name(came[0]), during)
+        del came[:]
+
+
+def release_stop_signals(held, during=SMALL_STORES):
     """The handlers as they were before hold_stop_signals(), and the log told of a signal that
     came meanwhile."""
     if held is None:
@@ -2258,9 +2398,7 @@ def release_stop_signals(held):
     came, previous = held
     for number, handler in previous.items():
         signal.signal(number, handler)
-    if came:
-        log.info("stop: %s again while the registrations, co-op ledger and friends were written: "
-                 "ignored until they were", signal.Signals(came[0]).name)
+    tell_held(held, during)
 
 
 def own_error(error, handled):
@@ -2284,12 +2422,12 @@ def own_error(error, handled):
 
 def save_at_stop(server, held=None):
     """What the server writes as it stops, the boards last: their last write is megabytes, and
-    whatever ends it early (a second signal, the stop's time running out) costs the boards
-    nothing, their journal has every change (#67); so for the notifications' write before them,
-    and a signal that ends that one still lets the boards be written. The stores before them have no journal: a
-    stop signal waits until they are written (held: what hold_stop_signals() gave, when the
-    caller already holds them), and each is written whatever became of the others, so that the
-    boards' last write is always reached (#70)."""
+    whatever ends it early (the stop's time running out, a kill) costs the boards nothing,
+    their journal has every change (#67); so for the notifications' write before them. The
+    stores before them have no journal. Each is written whatever became of the others, so that
+    the boards' last write is always reached (#70), and a stop signal waits until all of them
+    are written (held: what hold_stop_signals() gave, when the caller already holds them): the
+    signals no longer end the stop at all (#78), they are noted, and the log says so."""
     def ledger():
         if coop_ledger.LEDGER.dirty:
             coop_ledger.LEDGER.save()
@@ -2300,35 +2438,42 @@ def save_at_stop(server, held=None):
 
     if held is None:
         held = hold_stop_signals()
-    stopping = sys.exc_info()[1]  # what ends main(): the signal's KeyboardInterrupt, ...
+    stopping = sys.exc_info()[1]  # what ends main() when it is an exception
     try:
-        # the registrations first: a restart now keeps the players (#93)
-        for what, save in (("registrations", server.save_state), ("co-op ledger", ledger),
-                           ("friends", friends_store)):
-            try:
-                save()
-            except Exception as e:  # noqa: BLE001 - the stores after it, and the boards, go on
-                log.error("stop: the %s could not be written", what,
-                          exc_info=own_error(e, stopping))
+        try:
+            # the registrations first: a restart now keeps the players (#93)
+            for what, save in (("registrations", server.save_state), ("co-op ledger", ledger),
+                               ("friends", friends_store)):
+                try:
+                    save()
+                except Exception as e:  # noqa: BLE001 - the stores after it, and the boards, go on
+                    log.error("stop: the %s could not be written", what,
+                              exc_info=own_error(e, stopping))
+        finally:
+            tell_held(held, SMALL_STORES)
+        # The stores with a journal, which loses nothing whatever ends the stop: the boards
+        # last, reached whatever ends the notifications' write.
+        try:
+            notifications.STORE.stop()  # notifications.json gets what only its journal had
+        except Exception as e:  # noqa: BLE001 - the boards are still written
+            log.error("stop: the notifications could not be written",
+                      exc_info=own_error(e, stopping))
+        except BaseException as e:  # (not a stop signal: those are held)
+            log.warning("stop: %s while notifications.json was written whole: not written, its "
+                        "journal has every change; the boards are written all the same",
+                        type(e).__name__)
+            raise
+        finally:
+            scores.STORE.stop()  # scoreboards.json gets what only its journal had
     finally:
-        release_stop_signals(held)
-    # The stores with a journal, which loses nothing whatever ends the stop: the boards last,
-    # reached whatever ends the notifications' write (a second signal there ends the stop only
-    # once the boards are written, or a third one cuts them).
-    try:
-        notifications.STORE.stop()  # notifications.json gets what only its journal had
-    except Exception as e:  # noqa: BLE001 - the boards are still written
-        log.error("stop: the notifications could not be written", exc_info=own_error(e, stopping))
-    except BaseException as e:
-        log.warning("stop: %s while notifications.json was written whole: not written, its "
-                    "journal has every change; the boards are written all the same",
-                    type(e).__name__)
-        raise
-    finally:
-        scores.STORE.stop()  # scoreboards.json gets what only its journal had
+        release_stop_signals(held, JOURNALED_STORES)
 
 
-async def main():
+async def main(stop=None):
+    """The server until a stop signal (stop: run()'s StopRequest, already installed; one is
+    installed on this loop when main() is run some other way)."""
+    if stop is None:
+        stop = StopRequest().install(asyncio.get_running_loop())
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="0.0.0.0", help="address to listen on")
     parser.add_argument("--port", type=int, default=int(os.environ.get("FORZA_LIVE_PORT", 21200)),
@@ -2404,7 +2549,10 @@ async def main():
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s")
     if args.relay_only:  # nothing below: no data folder, no HTTP port (relay_node.py)
-        await relay_node.run(args)
+        stop.serving = True  # nothing to read first: a stop signal ends the relay at once
+        await stop.until_stopped(relay_node.run(args))
+        if stop.said():
+            log.info("%s", stop.said())
         return
     limits.configure_proxies(os.environ.get("FORZA_TRUSTED_PROXIES", ""), *args.trusted_proxy)
     if limits.TRUSTED_PROXIES:
@@ -2447,12 +2595,13 @@ async def main():
     server.relays.probation_time = max(0.0, args.relay_probation) * 60
     server.relays.configure(args.data_dir)
     log.info("Forza Live listening on UDP %s:%d (epoch %04X)", args.host, args.port, server.epoch)
+    listening = None  # the HTTP port's server, closed first at the stop
     if args.http_port:
         server.http_port = args.http_port
         server.proxy_http_port = args.proxy_http_port
         server.invites = not args.no_invites
-        await asyncio.start_server(lambda r, w: http_handler(server, r, w), args.host, args.http_port,
-                                 limit=1 << 15)
+        listening = await asyncio.start_server(lambda r, w: http_handler(server, r, w), args.host,
+                                               args.http_port, limit=1 << 15)
         log.info("title servers and status page on http://%s:%d/", args.host, args.http_port)
     if watchdog.WATCH.on:
         log.info("event loop watchdog: logs what holds the loop over %g ms (stacks over %g ms)",
@@ -2468,10 +2617,10 @@ async def main():
         except (OSError, sqlite3.Error):
             log.warning("community event delivery storage unavailable; retrying later")
 
+    stop.serving = True  # a stop signal during the start was noted: it stops the server here
     try:
         ticks = 0
-        while True:
-            await asyncio.sleep(1)
+        while not await stop.wait(1):  # a stop signal ends this wait, never a tick half way
             ticks += 1
             timed("challenges.tick", server.challenges.tick)
             if ticks % 2 == 0:
@@ -2487,8 +2636,12 @@ async def main():
                 # urllib blocks: off the event loop, and never fatal (it catches everything)
                 await asyncio.to_thread(discord_status.update, server.status(), args.data_dir)
     finally:
+        held = hold_stop_signals()  # until every store is written: noted, and ignored
+        if stop.said():
+            log.info("%s", stop.said())
+        if listening is not None:
+            listening.close()  # no new connection from here (those open end with the loop)
         watchdog.WATCH.stop()  # the stop's saves hold the loop, on purpose
-        held = hold_stop_signals()  # until the stores without a journal are written
         counting.cancel()
         writing.cancel()
         noting.cancel()
@@ -2501,20 +2654,31 @@ async def main():
         server.events.db.close()
 
 
-def run():
-    """The command line (forza_live_server.py in the repository's root calls this)."""
-    # SIGTERM (docker stop) ends the server like Ctrl+C; as a container's first process
-    # it would otherwise be ignored.
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
+def run(came=()):
+    """The command line (forza_live_server.py in the repository's root calls this, with the stop
+    signals that came while the server's code was read: they stop it once it has started).
+
+    A stop signal (SIGTERM: `docker stop`; SIGINT: Ctrl+C) is the event loop's (StopRequest):
+    main() returns once the stop's saves are done, and the exit status is 0. Every signal after
+    the first is noted and ignored, to the end of the process. As a container's first process
+    the server would ignore SIGTERM without a handler of its own."""
+    stop = StopRequest()
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
+        with asyncio.Runner() as runner:
+            stop.install(runner.get_loop())
+            for number in came:
+                stop.note(number)
+            runner.run(main(stop))
+            stop.block()  # the stop is done: the loop's close, and then quiet()
+    except KeyboardInterrupt:  # not a stop signal any more (those are the loop's): kept as before
         pass
     except journal.Unreadable:
         # scoreboards.json or notifications.json is there and cannot be read, nor its .bak (or
         # it is damaged and the .bak cannot be read): the log has said so, and the server does
         # not start without them (docs/operating.md, "Scores on disk", "Notifications on disk")
         sys.exit(1)
+    finally:
+        stop.quiet()
 
 
 if __name__ == "__main__":

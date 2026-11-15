@@ -6,7 +6,16 @@
 `python3 forza_live_server.py --help` lists every option.
 """
 
-from forza_live.server import run
-
 if __name__ == "__main__":
-    run()
+    import signal
+
+    # A stop signal while the server's code is still being read is noted, and stops the server
+    # once it has started (forza_live.server.run, #78): as a container's first process it would
+    # otherwise be ignored, and a stop right after a start lost.
+    came = []
+    for name in ("SIGTERM", "SIGINT"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda number, frame: came.append(number))
+
+    from forza_live.server import run
+    run(came)

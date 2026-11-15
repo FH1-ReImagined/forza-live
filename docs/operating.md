@@ -720,6 +720,53 @@ token, and let the accounts container reach the HTTP port directly, from an addr
 `--trusted-proxy` (the routes refuse the tunnel and proxies, as moderation does). Without the token
 the routes are off and the account page cannot delete.
 
+## Stopping the server
+
+`docker compose stop` (SIGTERM) and Ctrl+C in a terminal (SIGINT) stop the server the same way.
+The signal only asks for the stop: the server ends what it is doing at that moment (a datagram, a
+request, a tick of its timers) and then stops, in this order:
+
+1. `stop: SIGTERM: the server stops` in the log (`SIGINT` for Ctrl+C).
+2. The HTTP port closes: no new connection from here. Those already open end once the saves are
+   done.
+3. The [event loop's watchdog](#what-holds-the-event-loop) is turned off: the saves hold the loop,
+   on purpose.
+4. The saves: the registrations (`live_state.json`), the co-op ledger and friends, then
+   `notifications.json` and the boards' `scoreboards.json` last, each with its own line
+   ([scores on disk](#scores-on-disk), [notifications on disk](#notifications-on-disk)).
+5. The Discord status says the server is offline (when it is set up), the UDP port closes, and
+   the process ends with exit status 0.
+
+So a stop ends with the notifications' line and then the boards':
+
+    stop: SIGTERM: the server stops
+    notifications: notifications.json written whole at the stop in 0.14 s: it has every change: 29310 notifications for 3998 players, 5 broadcasts
+    scoreboards: scoreboards.json written whole at the stop in 0.32 s: it has every change: 412 boards, 50123 rows, 812 unranked rows, 1500 players in the 1000 Club
+
+A stop signal that comes while the server starts (while it reads its files, or even before) is
+noted: the start reads every file whole, and the server then stops as above, the first line being
+`stop: SIGTERM during the start: the server stops now that it is done`. A start that refuses to
+run (a file it cannot read) still ends with exit status 1 and its own line. A volunteer relay
+(`--relay-only`) has nothing to save: it logs the first line and ends with exit status 0.
+
+**A second signal changes nothing.** Once the stop has begun, every further SIGTERM or SIGINT (a
+second `docker compose stop`, Ctrl+C pressed again) is noted and ignored until the process ends:
+no save is cut short, and the log says so once for each part of the stop it came in:
+
+    stop: SIGTERM again while the registrations, co-op ledger and friends were written: ignored until they were
+    stop: SIGTERM again while notifications.json and scoreboards.json were written: ignored until they were
+
+The stop takes a fraction of a second, most of it those last two writes; the compose file gives it
+20 s (`stop_grace_period`). Only a kill ends it earlier: Docker's at the end of that time,
+`docker compose kill`, or SIGKILL. A kill costs the boards and the notifications nothing (their
+journals have every change) and the other stores what changed since their last save; and it
+leaves `scoreboards.json` and `notifications.json` complete only together with their journals,
+which matters before a rollback ([scores on disk](#scores-on-disk)).
+
+Versions before this one stopped through an exception raised wherever the server was when the
+signal came; inside code whose errors Python only prints (`Exception ignored in ...` in the log),
+the stop was lost: the server ran on until Docker killed it 20 s later, without the stop's saves.
+
 ## Backups and rollback
 
 Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it.
@@ -796,13 +843,9 @@ does (rolling back, below).
 The stores that have no journal (the registrations in `live_state.json`, the co-op ledger and
 friends) are written first, each whatever became of the others (an error in one is logged as
 `stop: the friends could not be written` with that save's own traceback, and the others and the
-boards are still written). While they are written a second stop signal (a second `docker compose
-stop`, Ctrl+C) is ignored and logged (`stop: SIGTERM again while the registrations, co-op ledger
-and friends were written: ignored until they were`); once they are, a signal ends the stop again,
-which costs the boards nothing. The notifications' last write comes between those stores and the
-boards: a signal while it runs ends it (`stop: KeyboardInterrupt while notifications.json was
-written whole: not written, its journal has every change; the boards are written all the same`, a
-warning) and the boards are still written; only a signal after that one cuts theirs short.
+boards are still written). The notifications' last write comes between those stores and the
+boards. A second stop signal (a second `docker compose stop`, Ctrl+C) during any of them is noted
+and ignored, and no write is cut short ([stopping the server](#stopping-the-server)).
 
 **A `scoreboards.json` that cannot be read.** When the file is there but cannot be read (a read
 error, permissions) the boards come from its `.bak` and the journal, as above. When the `.bak`
@@ -831,8 +874,11 @@ it held`.
 
 What that means for you:
 
-- **Stopping**: one `docker compose stop`, and let it end. The boards are written last, after
-  everything else the server saves.
+- **Stopping**: `docker compose stop`, and let it end. The boards are written last, after
+  everything else the server saves. A second `docker compose stop` (or Ctrl+C) while it stops is
+  harmless: it is logged and ignored, and the stop goes on as for one. What ends a stop early is a
+  kill (`docker compose kill`, or the 20 s running out), which leaves `scoreboards.json` complete
+  only with its journal: the stop's last line says which it was.
 - **Backups**: the whole data folder, with the server stopped. A copy of `scoreboards.json`
   taken while the server runs is not complete without `scoreboards.journal` beside it: by
   itself it lacks up to a minute of scores. If you must copy from a running server, copy

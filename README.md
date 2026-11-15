@@ -43,6 +43,7 @@ server on the player's own machine, and a server added by its address connects t
 | `tools/server_probe.py` | checks a server from outside (status page, UDP HELLO -> WELCOME) |
 | `tools/xtsw_decode.py` | decodes the requests a server saved with `--dump-requests` |
 | `tools/event_admin.py` | manages community events on a server |
+| `tools/stop_loop.py` | stops a busy server on this machine thousands of times and counts the stops that were lost or did not save (#78) |
 | `accounts/` | the website accounts service for forza.dyotson.dev/api/ (Django, django-allauth, django-ninja): its own dependencies, image and tests ([`accounts/README.md`](accounts/README.md)) |
 | `screening/` | the screening worker for community photos, videos and designs (its own Docker image, [`screening/README.md`](screening/README.md)) |
 | `video/` | the video converter: the game's movie uploads to MP4 with ffmpeg, in a container with no network (its own Docker image, [`video/README.md`](video/README.md)) |

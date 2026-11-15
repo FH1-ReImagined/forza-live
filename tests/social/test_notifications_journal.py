@@ -650,10 +650,10 @@ class StopTest(Base):
         boards.assert_called_once_with()
         self.assertIn("stop: the notifications could not be written", logs.output[0])
 
-    def test_a_second_signal_during_its_write_still_lets_the_boards_be_written(self):
-        """docker stop twice: the second signal comes while notifications.json is written
-        whole at the stop (the stop signals are no longer held then). That write ends, the
-        journal has every change, and the boards' stop still runs before the stop ends."""
+    def test_a_second_and_third_signal_during_the_writes_change_nothing(self):
+        """docker stop again while notifications.json is written whole at the stop, and once
+        more while the boards are (#78: the signals are held for the whole stop). Neither write
+        is cut short, and the log says the signals were ignored."""
         old = scores.DATA_DIR
         self.addCleanup(scores.configure, old)
         scores.configure(self.dir.name, "main-1")
@@ -664,18 +664,28 @@ class StopTest(Base):
         def dump(*args):
             signal.raise_signal(signal.SIGTERM)  # docker stop again, in the middle of it
             return real(*args)
-        previous = signal.signal(signal.SIGTERM, signal.default_int_handler)  # as run() has it
-        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        boards_stop = scores.STORE.stop
+
+        def boards():
+            signal.raise_signal(signal.SIGINT)  # and Ctrl+C while the boards are written
+            return boards_stop()
+        for number in srv.STOP_SIGNALS:  # the worst handler there could be outside the stop
+            self.addCleanup(signal.signal, number, signal.signal(number, signal.default_int_handler))
         with mock.patch.object(notices, "dump", dump), \
-                mock.patch.object(scores.STORE, "stop", wraps=scores.STORE.stop) as boards, \
+                mock.patch.object(scores.STORE, "stop", side_effect=boards) as stopped, \
                 self.assertLogs("forza-live", "INFO") as logs:
-            self.assertRaises(KeyboardInterrupt, srv.save_at_stop, self.server())
-        boards.assert_called_once_with()
-        self.assertTrue(any("KeyboardInterrupt while notifications.json was written whole" in
-                            line and line.startswith("WARNING") for line in logs.output),
-                        logs.output)
-        self.assertFalse(os.path.exists(self.path("notifications.json")))
-        self.restart()  # nothing lost: the journal had it
+            try:
+                srv.save_at_stop(self.server())
+            except KeyboardInterrupt:
+                self.fail("a signal cut the stop's writes short")
+        stopped.assert_called_once_with()
+        self.assertIn("INFO:forza-live:stop: SIGTERM again while notifications.json and "
+                      "scoreboards.json were written: ignored until they were", logs.output)
+        self.assertFalse(any(line.startswith("WARNING") for line in logs.output), logs.output)
+        with open(self.path("notifications.json")) as f:
+            self.assertIn("only in the journal", f.read())  # written whole: alone it is complete
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.default_int_handler)
+        self.restart()
         self.assertEqual([n["id"] for n in notices.pending(A)], [nid])
 
     def test_rolling_back_without_the_fold(self):
