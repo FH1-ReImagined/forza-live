@@ -716,6 +716,16 @@ players' own photos and designs, it reads this server's data folder (the friends
 read-only mount, and never writes to it. It reads the database's `-wal` and `-shm` files beside
 it too, so its user needs to be able to read those (they are made with the database's own mode).
 
+The service reads the friends from wherever the server keeps them: from the database once the
+server has imported `friends.json` into it, and from `friends.json` while the database does not
+hold them yet (a server from before the database, the moment of its first start) or again (a
+[rollback](#the-database) to such a version). So the service and the server can be updated in
+either order, as long as the service is at least the version of this server's repository that
+added the database: an accounts service from before it reads only `friends.json`, and after the
+server's first start on the database (which renames the file `friends.json.imported`) it finds no
+keys at all, so every link check fails until it is updated. Update the accounts service first,
+or in the same step as the server; going back, roll the server back first.
+
 Players delete their own photos and designs from the account page: the service asks this server's
 [owner routes](title_services.md#a-players-own-items-forza_livecontentownerspy), which need
 `FORZA_OWNER_TOKEN`. Give both the same random value (`openssl rand -hex 32`), never the admin
@@ -727,7 +737,7 @@ the routes are off and the account page cannot delete.
 
 Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it. The database can also be copied while the server runs ([the database](#the-database)).
 
-To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, or from before the notifications' journal, put each journal in its file first ([scores on disk](#scores-on-disk) and [notifications on disk](#notifications-on-disk) have the commands). Before going back to a version from before the database, export the friends to `friends.json` first ([the database](#the-database)). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
+To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, or from before the notifications' journal, put each journal in its file first ([scores on disk](#scores-on-disk) and [notifications on disk](#notifications-on-disk) have the commands). Before going back to a version from before the database, run the database's rollback command first ([the database](#the-database)). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
 
 ### The database
 
@@ -746,9 +756,21 @@ log). A stop folds the log into the database and removes both.
   never leaves the database half written. A write that fails (a full disk) is logged once
   (`friends: changes could not be written to forza_live.sqlite3 (...): they are written again
   with the next ones`) and made again every second until it goes through (`friends: written to
-  forza_live.sqlite3 again (after 3 failed write(s))`). The stop waits for the friends' last
-  changes and closes the database before it writes the stores with a journal (`stop:
-  forza_live.sqlite3 did not take its last changes in time` when it could not in 15 s).
+  forza_live.sqlite3 again (after 3 failed write(s))`). Every change is either committed or
+  failed and made again, whatever fails (the file, the disk, the commit). If the writing thread
+  itself ever stops (`storage: the writer of forza_live.sqlite3 stopped`, with a traceback: a
+  bug to report), the changes it had are failed too and the next one starts a new thread
+  (`friends: the writer of forza_live.sqlite3 had stopped (...): a new one takes the changes`),
+  at most one every 10 s. The stop waits for the friends' last changes and closes the database
+  before it writes the stores with a journal (`stop: forza_live.sqlite3 did not take its last
+  changes in time` when it could not in 15 s).
+- **A newer version's tables.** Each store's tables have a version (the table `stores`). A server
+  that knows a newer version of a store's tables upgrades the older ones at its start, in one
+  transaction, after a copy of the database as `forza_live.sqlite3.before-friends-v2` (for
+  example; `friends: forza_live.sqlite3 copied to ...`). A failed upgrade leaves the tables as
+  they were and the server does not start. A database whose tables are newer than the server
+  knows (after going back to an older version) refuses the start: restore the copy made before
+  the upgrade, or run the newer version.
 - **The first start** imports `friends.json` into it and renames the file
   `friends.json.imported`, which it never changes or deletes: `friends: 6714 record(s) imported
   from friends.json into forza_live.sqlite3 in 0.28 s; the file is kept as friends.json.imported`.
@@ -769,8 +791,10 @@ log). A stop folds the log into the database and removes both.
 
       docker compose exec forza-live python3 -m forza_live.core.storage --data-dir /data export friends > friends-export.json
 
-  (`... export friends /data/friends-export.json` writes the file in the data folder). Or with
-  `sqlite3`, read-only, while the server runs:
+  (`... export friends /data/friends-export.json` writes the file in the data folder; never as
+  `/data/friends.json`, which the command refuses: that is the rollback's file, below). The
+  export only reads: it opens the database read-only, and what the next start does is the same
+  with it or without it. Or with `sqlite3`, read-only, while the server runs:
 
       sqlite3 -readonly data/forza_live.sqlite3 "SELECT xuid, name, pub IS NOT NULL FROM friends_players WHERE name = 'Gamertag'"
       sqlite3 -readonly data/forza_live.sqlite3 "SELECT other, datetime(since, 'unixepoch') FROM friends_relations WHERE xuid = '0009000000000001' AND map = 'friends'"
@@ -785,27 +809,37 @@ log). A stop folds the log into the database and removes both.
   "import sqlite3; c = sqlite3.connect('/data/forza_live.sqlite3'); c.execute(\"UPDATE ...\");
   c.commit()"`.
 - **A `friends.json` beside the database** at a start (a backup put back, a previous version run
-  meanwhile) is never read over it without a reason, and never deleted:
-  - the file the database imported (or exported, below), the same bytes: nothing in it is new.
-    The database is the store; the file is renamed `friends.json.imported.1` (or
-    `friends.json.exported`, and a number after it when the name is taken).
-  - a file the previous version wrote after the export below, while the database has not changed
-    since that export: the rollback's own file, with everything the database had and what changed
-    during the rollback. It is imported again in place of the friends (`friends: ... imported
-    again from friends.json`) and renamed like the first one.
-  - anything else (a previous version started without the export, a file put back by hand): the
-    file does not continue the database, so the database is the store. The file is renamed
-    `friends.json.unused` (a number after it when the name is taken), with a warning. To take it
-    instead, stop the server and run `docker compose run --rm --entrypoint python3 forza-live -m
-    forza_live.core.storage --data-dir /data import friends /data/friends.json.unused`.
-- **Rolling back to a version from before the database.** That version reads `friends.json`,
-  which this one renamed. Stop the server, write the file with this version's image:
+  meanwhile) is never read over it without the operator's rollback command, and never deleted:
+  - the file the database imported (or wrote for a rollback, below), the same bytes: nothing in
+    it is new. The database is the store; the file is renamed `friends.json.imported.1` (or
+    `friends.json.rollback`: a rollback nobody started from is over), a number after it when
+    the name is taken.
+  - after the rollback command below, the file the previous version left there, while the
+    database has not changed since the command: the rollback's way back, with everything the
+    database had and what changed during the rollback. It is imported again in place of the
+    friends (`friends: ... imported again after the rollback from friends.json`) and renamed like
+    the first one.
+  - anything else (a previous version started without the rollback command, a file put back by
+    hand, an export): the file does not continue the database, so the database is the store.
+    The file is renamed `friends.json.unused` (a number after it when the name is taken), with a
+    warning. To take it instead, stop the server and run `docker compose run --rm --entrypoint
+    python3 forza-live -m forza_live.core.storage --data-dir /data import friends
+    /data/friends.json.unused`.
+- **Rolling back to a version from before the database** is the one named command that changes
+  what a start does. That version reads `friends.json`, which this one renamed. Stop the server
+  and write the file with this version's image:
 
-      docker compose run --rm --entrypoint python3 forza-live -m forza_live.core.storage --data-dir /data export friends /data/friends.json
+      docker compose run --rm --entrypoint python3 forza-live -m forza_live.core.storage --data-dir /data rollback friends
 
-  and start the previous version. Without that step it starts with no friends and no players'
-  keys at all. Coming back to this version takes the file that version wrote (the second case
-  above), as long as nothing started this version in between.
+  It writes `/data/friends.json` (it refuses when a file of that name is there) and notes in the
+  database that the next start of this version takes back the `friends.json` it finds, the
+  previous version's. Then start the previous version. Without the command it starts with no
+  friends and no players' keys at all. Coming back to this version imports the file that
+  version wrote (the second case above). The note ends at the database's next commit, and at a
+  start of this version that finds the command's own file untouched: from then on a
+  `friends.json` is set aside again. Roll the website accounts service back after the server,
+  or leave it as it is: it reads `friends.json` during the rollback ([website
+  accounts](#website-accounts)).
 
 ### The previous copies (`.bak`)
 

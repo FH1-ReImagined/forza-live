@@ -55,7 +55,9 @@ readers, and uses them on the game server's data folder, mounted read-only.
 - The launcher's link calls come the same way, to `https://forza.dyotson.dev/api/game/...`,
   signed with the player's key (`X-Forza-Auth`).
 - This service reads the game server's data folder (`FORZA_GAME_DATA`, mounted read-only):
-  the friends in the game server's database (`forza_live.sqlite3`, read-only, a record at a time) for the public key each XUID is bound to, `players/<XUID>.json` for the gamertag,
+  the friends in the game server's database (`forza_live.sqlite3`, read-only, a record at a time;
+  `friends.json` while the database does not hold them, for a game server from before it or
+  rolled back to one, so that the two can be updated in either order) for the public key each XUID is bound to, `players/<XUID>.json` for the gamertag,
   the first result on the boards (and the signed sign-ins, for the optional likes wait), `banned_xuids.json`, and `community.json`, `videos.json` and `designs.json` for the
   photos, videos and designs and who owns them.
 - It calls the game server for one thing only: deleting a player's own photo, video or design, through

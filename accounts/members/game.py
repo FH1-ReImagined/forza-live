@@ -2,9 +2,11 @@
 
 The game server (forza_live/) keeps its data in FORZA_GAME_DATA, which this service mounts
 read-only. It reads, with the game server's own code:
-- the friends in its database, forza_live.sqlite3 (forza_live.social.friends.Reader; friends.json
-  before it): the public key each XUID is bound to, a record at a time, as the game server's
-  last commit has it;
+- the friends (forza_live.social.friends.Reader): the public key each XUID is bound to, a record
+  at a time, from its database, forza_live.sqlite3, as its last commit has it, or from
+  friends.json while the database does not hold them (a game server from before the database,
+  or rolled back to one), so that this service and the game server can be updated in either
+  order;
 - players/<XUID>.json (forza_live.core.durable): the gamertag, the first result on the boards
   (firstScore: lsp.first_score, and lsp.backfill_first_scores for results from before it) and,
   for the optional likes wait only, the signed sign-ins (firstSigned, signedDays:
@@ -69,8 +71,9 @@ def configure():
 
 
 def store():
-    """The game server's friends, read-only and as its last commit has them (friends.Reader: a
-    record at a time, leaving out what the game server forgets at its start, FORGET_DAYS)."""
+    """The game server's friends, read-only and as it has them now (friends.Reader: a record at
+    a time, from its database or its friends.json, leaving out what the game server forgets at
+    its start, FORGET_DAYS)."""
     configure()
     with _lock:
         if _store["store"] is None:

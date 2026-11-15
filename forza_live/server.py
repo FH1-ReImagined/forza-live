@@ -2299,12 +2299,17 @@ def save_at_stop(server, held=None):
         if coop_ledger.LEDGER.dirty:
             coop_ledger.LEDGER.save()
 
+    # The friends' save and the database's close share one wait (storage.CLOSE_WAIT): on a disk
+    # that does not answer, the stop still reaches the stores with a journal in compose's 20 s.
+    until = time.monotonic() + storage.CLOSE_WAIT
+
     def friends_store():
-        if server.friends.store.pending() and not server.friends.store.save():
+        if server.friends.store.pending() and not server.friends.store.save(
+                max(0.0, until - time.monotonic())):
             log.error("stop: the friends' last changes are not all in %s", storage.FILE)
 
-    def database():
-        if not storage.close_all():  # what is still queued, committed; the writer ended
+    def database():  # what is still queued, committed; the writer ended
+        if not storage.close_all(max(1.0, until - time.monotonic())):
             log.error("stop: %s did not take its last changes in time", storage.FILE)
 
     if held is None:

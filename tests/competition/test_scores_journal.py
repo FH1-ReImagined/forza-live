@@ -934,7 +934,7 @@ class TwoFaultsTest(Base):
     def test_a_store_that_fails_at_the_stop_logs_its_own_error_only(self):
         server = self.server()
 
-        def friends_save():
+        def friends_save(timeout=None):
             try:
                 raise ValueError("the friends' own first error")
             except ValueError:

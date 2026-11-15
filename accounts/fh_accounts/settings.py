@@ -292,8 +292,10 @@ EMAIL_SIGNIN_ENABLED = bool(EMAIL_HOST) or TESTING
 
 # ---- The game link (members.links) ----
 
-# The game server's data folder, mounted read-only: friends.json (the keys), players/ (gamertags
-# and signed sign-ins) and banned_xuids.json. Without it, linking is off.
+# The game server's data folder, mounted read-only: the friends (the keys) in its database,
+# forza_live.sqlite3, or in friends.json for a game server from before it (members.game reads
+# either), players/ (gamertags and signed sign-ins) and banned_xuids.json. Without it, linking is
+# off.
 GAME_DATA = Path(env("FORZA_GAME_DATA")) if env("FORZA_GAME_DATA") else None
 LINK_MINUTES = 10        # a link request lasts this long
 LINK_CODES_OFF_MINUTES = 10  # codes stop this long after too many wrong ones (link_code_failed)
@@ -377,7 +379,7 @@ LOGGING = {
     "root": {"handlers": ["console"], "level": "INFO"},
     # Request lines carry codes and states in their query strings: never log them.
     "loggers": {"django.request": {"level": "ERROR"}, "django.server": {"level": "ERROR"},
-                # The game server's modules (members.game): their notes on each reload of
-                # friends.json and on each refused signature are the game server's to log.
+                # The game server's modules (members.game): their notes on reading its friends
+                # and on each refused signature are the game server's to log.
                 "forza-live": {"level": "WARNING"}, "forza_live": {"level": "WARNING"}},
 }

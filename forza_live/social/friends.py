@@ -49,23 +49,22 @@ On disk (#75): two tables of the server's database (storage.FILE). friends_playe
 record (xuid, name, seen, key, pub, the names of its maps, and any other field as JSON in extra);
 friends_relations a row per entry of its maps (xuid, map: friends, in, out, blocked or muted,
 other, since). The Store keeps every record in memory, as before, and every read is from there.
-A change notes the record (touch); right after the work that made it (loop.call_soon), the
-changed records are copied, on the loop, and handed to the database's writer thread as one write,
-which replaces their rows; the loop never waits for the disk. save() waits for every change so
-far to be committed: the stop, and a tool; written() is the same for a coroutine, off the loop
-(an event's enrollment, events.enroll). A write that fails is made again with the records as
-they are then, at the next tick (maybe_save). A kill loses at most the changes of the last few
-milliseconds that were not committed yet; the database is never left half written.
+How a change reaches the tables is storage.Records' (the Store is one, with KIND): a change
+marks the record (touch); right after the work that made it (loop.call_soon), the changed
+records' rows are made, on the loop, and handed to the database's writer thread as one write
+(write_rows), which replaces their rows; the loop never waits for the disk. save() waits for
+every change so far to be committed: the stop, and a tool; written() is the same for a
+coroutine, off the loop (an event's enrollment, events.enroll). A write that fails is made again
+with the records as they are then, at the next tick (maybe_save). A kill loses at most the
+changes of the last few milliseconds that were not committed yet; the database is never left
+half written.
 """
 
-import asyncio
 import collections
-import concurrent.futures
 import hashlib
 import json
 import logging
 import os
-import pickle
 import struct
 import threading
 import time
@@ -78,6 +77,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from forza_live.core import auth
 from forza_live.core import bans
+from forza_live.core import durable
 from forza_live.core import limits
 from forza_live.core import storage
 
@@ -228,16 +228,13 @@ def replace_all(conn, players):
     _insert(conn, rows, relations)
 
 
-def write_whole(conn, pickled):
-    """A whole write (Store.dirty = True, players replaced): the records as they were pickled."""
-    replace_all(conn, pickle.loads(pickled))
-    storage.bump(conn, NAME)
-
-
-def write_changes(conn, rows, relations, drop):
-    """The changed records' rows (as Store.flush made them, in the order the records changed):
-    their relations replaced, the records in `drop` (gone, or made anew: deleted first, so that
-    a new one's row comes last, as its record does in memory) deleted, the others put."""
+def write_rows(conn, made, drop):
+    """The changed records' rows (rows_of's, as storage.Records.flush made them, in the order the
+    records changed): their relations replaced, the records in `drop` (gone, or made anew:
+    deleted first, so that a new one's row comes last, as its record does in memory) deleted,
+    the others put."""
+    rows = [row for row, _ in made]
+    relations = [r for _, rel in made for r in rel]
     put = [r["xuid"] for r in rows]
     keys = put + sorted(set(drop) - set(put))
     for chunk in _chunks(keys):
@@ -245,7 +242,6 @@ def write_changes(conn, rows, relations, drop):
     for chunk in _chunks(drop):
         conn.execute(PLAYERS.delete().where(PLAYERS.c.xuid.in_(chunk)))
     _insert(conn, rows, relations, upsert=True)
-    storage.bump(conn, NAME)
 
 
 def parse_file(data):
@@ -263,6 +259,11 @@ def parse_file(data):
 def export_data(conn):
     """friends.json as the versions before the database wrote it (storage export)."""
     return {"version": 1, "players": read_all(conn)}
+
+
+# The friends' tables for the storage layer (core/storage.py): its writes, import and export.
+STORAGE = storage.Kind(NAME, VERSION, TABLES, read_all, replace_all, rows_of, write_rows,
+                       file=FILE, parse_file=parse_file, export_data=export_data)
 
 
 def forgotten(p, cutoff):
@@ -298,16 +299,17 @@ class Full(Exception):
     """The store has no room for another record without a key (Store.get)."""
 
 
-class Store:
+class Store(storage.Records):
     """The players' relations: {xuid: {"name", "seen", "key", "friends", "in", "out",
     "blocked"}}, each relation a {xuid hex: since} map, kept symmetric (A's "out" is B's
     "in"). path: friends.json in the data folder, whose database (storage.FILE) the store is
-    kept in once loaded; None: in memory only."""
+    kept in once loaded; None: in memory only. Its records, their changes and their writes are
+    storage.Records' (mark, flush, save, written)."""
+
+    KIND = STORAGE
 
     def __init__(self, path=None):
-        self.path = path
-        self._players = {}
-        self.db = None  # the storage.Database, once loaded (or first written)
+        super().__init__(path)
         self.on_rebind = []  # fn(xuid, old binding, new binding): auth.rebind
         self.first_use = auth.FirstUse()  # the budgets of new bindings
         self.checks = auth.Checks()  # and of signature checks per client address
@@ -315,71 +317,20 @@ class Store:
         # at every load, and every 2 s while the store changes (maybe_save).
         self.keyed = 0
         self.searched = 0.0  # monotonic time until which spare() does not look for room again
-        # What changed since the last flush: the XUIDs (hex) of the changed records, in the
-        # order they changed, those of them made anew, or everything (_whole).
-        self._changed = {}
-        self._fresh = set()
-        self._whole = False
-        self._soon = False  # a flush is due on the loop (call_soon)
-        self._writes = []  # (what it held: (changed, fresh), None for whole; its future)
-        self._failed = 0  # writes that failed in a row (the log says the first)
         self._counted = 0.0  # monotonic time of the last count() by maybe_save
 
     @property
     def players(self):
-        return self._players
+        return self.records
 
     @players.setter
     def players(self, players):
         """Replaced as a whole (a test, a tool): written as a whole."""
-        self._players = players
-        self._whole = True
-        self._schedule()
-
-    @property
-    def dirty(self):
-        """A change not handed to the writer yet."""
-        return bool(self._changed) or self._whole
-
-    @dirty.setter
-    def dirty(self, value):
-        """True: everything is written again (a caller that changed records without touch());
-        False: what changed is forgotten."""
-        if value:
-            self._whole = True
-            self._schedule()
-        else:
-            self._changed, self._fresh, self._whole = {}, set(), False
-
-    @property
-    def saving(self):
-        """A write handed to the writer is not committed yet."""
-        return any(not f.done() for _, f in self._writes)
-
-    def pending(self):
-        """Something changed that is not committed yet (or whose write failed)."""
-        self._reap()
-        return self.dirty or bool(self._writes)
+        self.records = players
 
     def touch(self, xuid):
         """The XUID's record changed (a caller that changes it in place, chat's mutes)."""
-        self._touch(self.hx(xuid))
-
-    def _touch(self, k, fresh=False):
-        self._changed[k] = None
-        if fresh:
-            self._fresh.add(k)
-        self._schedule()
-
-    def _schedule(self):
-        if self._soon or self.db is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # a tool, a test: save() writes it
-        self._soon = True
-        loop.call_soon(self.flush)
+        self.mark(self.hx(xuid))
 
     @staticmethod
     def hx(xuid):
@@ -416,7 +367,7 @@ class Store:
                                                        or p["blocked"] or p.get("muted")))
         for _, k in names[:over + max(1, cap // 10)]:  # a tenth at once: not a scan for each
             del self.players[k]
-            self._touch(k)
+            self.mark(k)
         if len(self.players) - self.keyed < cap:
             return True
         self.searched = now + SPARE_SEARCH
@@ -435,7 +386,7 @@ class Store:
                            % len(self.players))
             p = self.players[k] = {"name": "", "seen": time.time(), "key": "", "friends": {},
                                    "in": {}, "out": {}, "blocked": {}}
-            self._touch(k, fresh=True)
+            self.mark(k, fresh=True)
         return p
 
     def bind(self, p, pub="", key="", xuid=None):
@@ -448,11 +399,11 @@ class Store:
         else:
             p["key"] = key
         if xuid is not None:
-            self._touch(self.hx(xuid))
+            self.mark(self.hx(xuid))
         else:  # found by the record itself: a binding is rare, a scan is cheap enough
             for k, q in self.players.items():
                 if q is p:
-                    self._touch(k)
+                    self.mark(k)
                     break
 
     def relation(self, a, b):
@@ -511,7 +462,7 @@ class Store:
             for field in ("friends", "in", "out"):
                 if p[field].pop(k, None) is not None:
                     changed = True
-                    self._touch(own)
+                    self.mark(own)
         return changed
 
     def befriend(self, a, b):
@@ -552,139 +503,34 @@ class Store:
         p = self.get(xuid)
         return limits.clean_gamertag(p["name"] if p else "", xuid)
 
-    # --- the database (the module's docstring, "On disk") ---
+    # --- the database (the module's docstring, "On disk"; core/storage.py's Records) ---
 
     def load(self):
         """The records from the database in the data folder (friends.json imported into it at
-        the first start: storage.import_once). storage.Refused, logged, when they cannot be read:
-        the server does not start on an empty store, whose first change would put it over what
-        it could not read."""
+        the first start: storage.import_once), what a start forgets left out (and deleted from
+        the tables). storage.Refused, logged, when they cannot be read: the server does not start
+        on an empty store, whose first change would put it over what it could not read."""
         if not self.path:
             return
-        folder = os.path.dirname(os.path.abspath(self.path))
-        try:
-            db = storage.database(folder)
-            storage.ensure(db, NAME, VERSION, TABLES)
-            storage.import_once(db, NAME, self.path, parse_file, replace_all)
-            players = db.read(read_all)
-        except storage.Refused:
-            raise
-        except (SQLAlchemyError, OSError) as e:
-            log.error("friends: %s cannot be read (%s): not started", storage.FILE, e)
-            raise storage.Refused("%s: %s" % (storage.FILE, e)) from e
+        players = self.open()
         cutoff = time.time() - FORGET_DAYS * 86400
-        self._players = {k: p for k, p in players.items() if not forgotten(p, cutoff)}
-        self.db = db
-        self._changed = {k: None for k in players if k not in self._players}  # gone from disk too
-        self._fresh, self._whole = set(), False
+        kept = {k: p for k, p in players.items() if not forgotten(p, cutoff)}
+        self.loaded(kept, gone=[k for k in players if k not in kept])
         self.count()
-        log.info("friends: %d player(s) from %s, %d with a key", len(self.players), db.name,
+        log.info("friends: %d player(s) from %s, %d with a key", len(self.players), self.db.name,
                  self.keyed)
-        self._schedule()
-
-    def _attach(self):
-        """A store with a path that was never loaded (a test, a tool) gets its database at its first
-        write, which is whole: what is in memory is the store, as when it wrote the whole file."""
-        self.db = storage.database(os.path.dirname(os.path.abspath(self.path)))
-        storage.ensure(self.db, NAME, VERSION, TABLES)
-        storage.started(self.db, NAME)
-        self._whole = True
-
-    def flush(self):
-        """What changed since the last flush handed to the writer, as rows made here from the
-        records as they are (a few records: microseconds; a whole write pickles them, a few
-        milliseconds for the public server's 1.8 MB). The future of that write, or None when nothing changed."""
-        self._soon = False
-        self._reap()
-        if not self.path or not self.dirty:
-            return None
-        if self.db is None:
-            self._attach()
-        if self._whole:
-            held = None
-            future = self.db.submit(write_whole, pickle.dumps(self.players, pickle.HIGHEST_PROTOCOL))
-        else:
-            rows, relations, drop = [], [], []
-            for k in self._changed:
-                p = self.players.get(k)
-                if p is None or k in self._fresh:
-                    drop.append(k)
-                if p is not None:  # its rows are made now: what changes after is the next write's
-                    row, rel = rows_of(k, p)
-                    rows.append(row)
-                    relations += rel
-            held = (self._changed, self._fresh)
-            future = self.db.submit(write_changes, rows, relations, drop)
-        self._changed, self._fresh, self._whole = {}, set(), False
-        self._writes.append((held, future))
-        return future
-
-    def _reap(self):
-        """The writes that are over: one that failed has its records written again (as they are
-        by then) at the next flush."""
-        if not self._writes:
-            return
-        left = []
-        for held, future in self._writes:
-            if not future.done():
-                left.append((held, future))
-                continue
-            error = future.exception()
-            if error is None:
-                if self._failed:
-                    log.info("friends: written to %s again (after %d failed write(s))",
-                             storage.FILE, self._failed)
-                    self._failed = 0
-                continue
-            if not self._failed:
-                log.warning("friends: changes could not be written to %s (%s): they are written "
-                            "again with the next ones", storage.FILE, error)
-            self._failed += 1
-            if held is None:
-                self._whole = True
-            else:
-                for k in held[0]:
-                    self._changed.setdefault(k, None)
-                self._fresh |= held[1]
-        self._writes = left
 
     def save(self, timeout=storage.CLOSE_WAIT):
-        """Every change so far committed, waiting here: True when it is. On the event loop only
-        at the stop (and in a tool); a coroutine awaits written() instead."""
-        if not self.path:
-            return False
-        self.flush()
-        futures = [f for _, f in self._writes]
-        concurrent.futures.wait(futures, timeout)
-        ok = all(f.done() and f.exception() is None for f in futures)
-        self._reap()
-        self.count()
-        return ok and not self.dirty
-
-    async def written(self):
-        """save() for a coroutine: True once every change made before the call is committed,
-        awaited off the loop."""
-        if not self.path:
-            return False
-        self.flush()
-        futures = [f for _, f in self._writes]
-        if futures:
-            await asyncio.gather(*map(asyncio.wrap_future, futures), return_exceptions=True)
-        ok = all(f.exception() is None for f in futures)
-        self._reap()
+        ok = super().save(timeout)
+        if self.path:
+            self.count()
         return ok
 
     def maybe_save(self):
-        """Every second from the main loop: a write that failed is made again, and the records
-        with a key are counted again every 2 s while the store changes. A change is handed to
-        the writer right after the work that made it (_schedule); this is for what is left."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            self.save()  # no event loop (a tool, a test): here
-            return
-        changed = self.dirty or bool(self._writes)
-        self.flush()
+        """Every second from the main loop: a write that failed is made again (Records.tick),
+        and the records with a key are counted again every 2 s while the store changes. A change
+        is handed to the writer right after the work that made it; this is for what is left."""
+        changed = self.tick()
         now = time.monotonic()
         if changed and now - self._counted >= 2:
             self._counted = now
@@ -692,32 +538,48 @@ class Store:
 
 
 class Reader:
-    """The records as the database has them now, one at a time and read-only, for another
-    process: the website accounts service reads the data folder through a read-only mount
+    """The records as the server has them now, one at a time and read-only, for another process:
+    the website accounts service reads the data folder through a read-only mount
     (accounts/members/game.py). get() as Store.get (what a start forgets left out), with the
     has_key and hx of a Store, so that auth.bound_pub and auth.check_request take it as one.
-    Each thread keeps its connection while the file stays the same file (an open connection
-    reads every commit; a restored copy is a new file); one that could only read the file as it
-    is (the server stopped, the folder read-only) is not kept, so the next get sees a server that
-    started meanwhile."""
+
+    It reads whichever the server keeps the friends in, so that the accounts service and the
+    server can be updated in either order: the database once it holds the store
+    (storage.holds: it imported friends.json, or started without one, and no rollback is
+    waiting), else friends.json while it is there (a server from before the database, one that
+    has not imported it yet, a rollback to one), read whole as the previous versions read it,
+    again whenever it changes. Each thread keeps its connection to the database while the file
+    stays the same file (an open connection reads every commit; a restored copy is a new file);
+    one that could only read the file as it is (the server stopped, the folder read-only) is not
+    kept, so the next get sees a server that started meanwhile."""
 
     hx = staticmethod(lambda xuid: "%016X" % xuid)
 
     def __init__(self, folder):
         self.path = os.path.join(folder, storage.FILE)
+        self.file = os.path.join(folder, FILE)
         self.engines = None
         self.local = threading.local()
+        self._lock = threading.Lock()  # the file's records, read again by one thread at a time
+        self._from_file = (None, {})  # (the file's stat, its records)
 
     @staticmethod
     def has_key(p):
         return Store.has_key(p)
 
     def get(self, xuid, create=False, own=False):
-        try:
-            st = os.stat(self.path)
-        except OSError:
-            self._drop()
+        p = self._read(self.hx(xuid))
+        if p is None or forgotten(p, time.time() - FORGET_DAYS * 86400):
             return None
+        return p
+
+    def _read(self, k):
+        try:
+            file_there = os.path.lexists(self.file)
+            st = os.stat(self.path)
+        except OSError:  # no database: a server from before it (or none yet)
+            self._drop()
+            return self._file_record(k) if file_there else None
         if self.engines is None:
             self.engines = (storage.engine_for(self.path, read_only=True, fallback=False),
                             storage.engine_for(self.path, read_only=True, immutable=True))
@@ -735,17 +597,37 @@ class Reader:
                     local.conn, local.file = conn, same
             try:
                 with conn.begin():
-                    p = read_one(conn, self.hx(xuid))
+                    # friends.json beside it: the database is the store only once it holds it
+                    from_file = file_there and not storage.holds(*_note(conn))
+                    p = None if from_file else read_one(conn, k)
             finally:
                 if not kept:
                     conn.close()
         except SQLAlchemyError as e:  # no tables yet (a server before its first start), a lock
             self._drop()
+            if file_there:
+                return self._file_record(k)
             log.warning("friends: %s cannot be read now: %s", self.path, e)
             return None
-        if p is None or forgotten(p, time.time() - FORGET_DAYS * 86400):
-            return None
-        return p
+        return self._file_record(k) if from_file else p
+
+    def _file_record(self, k):
+        """The record in friends.json, read whole when the file changed (durable.load: its .bak
+        when it is damaged), or None."""
+        with self._lock:
+            try:
+                st = os.stat(self.file)
+                stamp = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            except OSError:
+                return None
+            if self._from_file[0] != stamp:
+                try:
+                    players = parse_file(durable.load(self.file))
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                    log.warning("friends: %s cannot be read now: %s", self.file, e)
+                    return None
+                self._from_file = (stamp, players)
+            return self._from_file[1].get(k)
 
     def _drop(self):
         conn = getattr(self.local, "conn", None)
@@ -763,6 +645,15 @@ class Reader:
         for engine in self.engines or ():
             engine.dispose()
         self.engines = None
+        self._from_file = (None, {})
+
+
+def _note(conn):
+    """The friends' (revision, note) in the stores table, (0, {}) without one."""
+    try:
+        return storage.state(conn, NAME)
+    except SQLAlchemyError:  # a database without the stores table
+        return 0, {}
 
 
 class Friends:

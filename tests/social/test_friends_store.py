@@ -341,36 +341,115 @@ class BothTest(Base):
         self.assertEqual([n for n in self.names() if n.startswith(fr.FILE)],
                          ["friends.json.imported", "friends.json.imported.1"])
 
-    def test_after_an_export_the_previous_version_s_file_is_taken(self):
-        """The rollback docs/operating.md describes: stop, export, the previous version runs on
-        the export and changes things; back to this version: its file has everything."""
-        store = self.imported(made_up(500))
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(storage.main(["--data-dir", self.dir, "export", "friends",
-                                           self.path]), 0)
+    def command(self, *argv):
+        """The operator's command (storage.main), the server stopped: its exit code."""
+        storage.close_all()
+        out = io.TextIOWrapper(io.BytesIO())  # stdout, with its buffer
+        with contextlib.redirect_stderr(io.StringIO()) as said, contextlib.redirect_stdout(out):
+            try:
+                code = storage.main(["--data-dir", self.dir] + list(argv))
+            except SystemExit as e:  # argparse's refusal
+                code = e.code
+        out.flush()
+        self.out, self.err = out.buffer.getvalue(), said.getvalue()
+        return code
+
+    def previous_version(self):
+        """What a previous version does with the friends.json it starts on: it reads it and
+        writes it back with a change of its own. The records it wrote."""
         with open(self.path) as f:
             data = json.load(f)
-        self.assertEqual(data, {"version": 1, "players": store.players})
         data["players"]["0009000000FEDCBA"] = {"name": "DuringRollback", "seen": NOW, "key": "",
                                                "friends": {}, "in": {}, "out": {}, "blocked": {}}
-        self.file(data["players"])  # the previous version's write
-        again = self.start()
-        self.assertIn("imported again", self.said[0])
-        self.assertEqual(again.players, as_before(data["players"]).players)
-        self.assertEqual(again.name(0x0009000000FEDCBA), "DuringRollback")
+        self.file(data["players"])
+        return data["players"]
+
+    def test_reading_the_data_never_changes_what_a_start_does(self):
+        """An export (to stdout, or a file to keep) and a backup read the database and nothing
+        more: a friends.json put back by hand afterwards, older than the database, is set aside
+        and the database stays the store."""
+        older = made_up(500)
+        store = self.imported(older)
+        a, b = (int(k, 16) for k in list(store.players)[:2])
+        store.block(a, b)  # newer than the file
+        self.assertTrue(store.save())
+        self.assertEqual(self.command("export", "friends"), 0)
+        self.assertEqual(json.loads(self.out)["players"], store.players)
+        self.assertEqual(self.command("export", "friends", os.path.join(self.dir, "keep.json")), 0)
+        self.assertEqual(self.command("backup", os.path.join(self.dir, "copy.sqlite3")), 0)
+        del older[next(iter(older))]
+        self.file(older)  # a backup from before the import put back by hand
+        again = self.start("WARNING")
+        self.assertIn("does not continue it", self.said[0])
+        self.assertTrue(again.blocks(a, b))
+        self.assertEqual(again.players, store.players)
+        self.assertIn("friends.json.unused", self.names())
+
+    def test_the_export_does_not_write_the_file_a_start_looks_at(self):
+        self.imported(made_up(50))
+        self.assertEqual(self.command("export", "friends", self.path), 2)
+        self.assertIn("use the rollback command", self.err)
         self.assertNotIn(fr.FILE, self.names())
 
-    def test_an_export_nobody_started_from_is_kept_aside(self):
+    def test_after_the_rollback_command_the_previous_version_s_file_is_taken(self):
+        """The rollback docs/operating.md describes: stop, rollback, the previous version runs on
+        the file and changes things; back to this version: its file has everything."""
         store = self.imported(made_up(500))
-        with contextlib.redirect_stderr(io.StringIO()):
-            storage.main(["--data-dir", self.dir, "export", "friends", self.path])
+        self.assertEqual(self.command("rollback", "friends"), 0)
+        self.assertIn("start the previous version now", self.err)
+        with open(self.path) as f:
+            self.assertEqual(json.load(f), {"version": 1, "players": store.players})
+        players = self.previous_version()
         again = self.start()
+        self.assertIn("imported again after the rollback", self.said[0])
+        self.assertEqual(again.players, as_before(players).players)
+        self.assertEqual(again.name(0x0009000000FEDCBA), "DuringRollback")
+        self.assertNotIn(fr.FILE, self.names())
+        # and that was the rollback's one way back: a file put back later is set aside
+        again.seen(0x0009000000ABCDE1, "Later")
+        self.assertTrue(again.save())
+        self.file(made_up(500))
+        self.start("WARNING")
+        self.assertIn("does not continue it", self.said[0])
+
+    def test_a_rollback_nobody_started_from_is_set_aside_and_over(self):
+        store = self.imported(made_up(500))
+        self.assertEqual(self.command("rollback", "friends"), 0)
+        again = self.start()  # this version again, the previous one never ran
         self.assertEqual(again.players, store.players)
-        self.assertIn("friends.json is the file forza_live.sqlite3 exported", self.said[0])
-        self.assertIn("friends.json.exported", self.names())
+        self.assertIn("friends.json is the file forza_live.sqlite3 wrote for a rollback",
+                      self.said[0])
+        self.assertIn("friends.json.rollback", self.names())
+        self.file(made_up(20))  # the rollback is over: a file now is not taken
+        self.assertEqual(self.start("WARNING").players, store.players)
+        self.assertIn("does not continue it", self.said[0])
+
+    def test_a_rollback_is_over_at_the_database_s_next_commit(self):
+        """A rollback written while this version still ran (or ran again after it): its next
+        commit ends it, and the file the previous version then writes is not taken over it."""
+        self.imported(made_up(500))
+        self.assertEqual(self.command("rollback", "friends"), 0)
+        os.rename(self.path, self.path + ".aside")
+        store = self.start()  # this version, without the file
+        store.seen(0x0009000000ABCDE2, "AfterTheRollback")
+        self.assertTrue(store.save())
+        os.rename(self.path + ".aside", self.path)
+        self.previous_version()
+        again = self.start("WARNING")
+        self.assertIn("does not continue it", self.said[0])
+        self.assertEqual(again.players, store.players)
+
+    def test_the_rollback_does_not_write_over_a_file(self):
+        self.imported(made_up(50))
+        self.file(made_up(5))
+        with self.assertLogs("forza-live", "ERROR") as logs:
+            self.assertEqual(self.command("rollback", "friends"), 1)
+        self.assertIn("is already in", logs.output[0])
+        with open(self.path) as f:
+            self.assertEqual(len(json.load(f)["players"]), 5)
 
     def test_a_file_that_does_not_continue_the_database_is_kept_aside(self):
-        for case in ("no export", "changed since the export", "a new server"):
+        for case in ("no rollback", "changed since the rollback", "a new server"):
             with self.subTest(case=case):
                 storage.close_all()
                 for name in os.listdir(self.dir):
@@ -381,14 +460,13 @@ class BothTest(Base):
                     store.save()
                 else:
                     store = self.imported(made_up(500))
-                if case == "changed since the export":
-                    with contextlib.redirect_stderr(io.StringIO()):
-                        storage.main(["--data-dir", self.dir, "export", "friends", self.path])
+                if case == "changed since the rollback":
+                    self.assertEqual(self.command("rollback", "friends"), 0)
                     os.remove(self.path)
                     store = self.start()
-                    store.seen(0x0009000000ABCDE0, "AfterExport")
+                    store.seen(0x0009000000ABCDE0, "AfterRollback")
                     self.assertTrue(store.save())
-                # a previous version that started without the export: a store of its own
+                # a previous version that started without the rollback: a store of its own
                 small = {"0009000000000099": {"name": "Alone", "seen": NOW, "key": "x",
                                               "friends": {}, "in": {}, "out": {}, "blocked": {}}}
                 self.file(small)
@@ -398,10 +476,7 @@ class BothTest(Base):
                 self.assertEqual(again.players, store.players)
                 self.assertIn("friends.json.unused", self.names())
                 # and the operator can take it instead, with the server stopped
-                storage.close_all()
-                with contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(storage.main(["--data-dir", self.dir, "import", "friends",
-                                                   self.path + ".unused"]), 0)
+                self.assertEqual(self.command("import", "friends", self.path + ".unused"), 0)
                 self.assertEqual(self.start().players, small)
 
 
@@ -421,13 +496,13 @@ async def main():
         store.seen(0x000B000000000000 + n, "Kept%d" % n)
         assert await store.written()
         print("kept %d" % n, flush=True)
-        real, go = fr.write_changes, threading.Event()
+        real, go = storage.write_changes, threading.Event()
 
         def held(*args):
             print("writing %d" % (n + 1), flush=True)
             go.wait()
             return real(*args)
-        fr.write_changes = held
+        storage.write_changes = held
         store.seen(0x000B000000000000 + n + 1, "Lost%d" % (n + 1))
         await asyncio.sleep(3600)
     while True:  # changes, each told once it is committed, as fast as they come
@@ -524,7 +599,7 @@ class StopTest(Base):
         with self.assertLogs("forza-live", "INFO"):
             server = self.server()
         store = server.friends.store
-        real, order = fr.write_changes, []
+        real, order = storage.write_changes, []
 
         def slow(*args):  # a slow disk: each write takes 20 ms
             time.sleep(0.02)
@@ -534,7 +609,7 @@ class StopTest(Base):
             for n in range(60):
                 store.seen(0x000C000000000000 + n, "Late%d" % n)
                 await asyncio.sleep(0)  # each its own write, queued behind the slow ones
-        with mock.patch.object(fr, "write_changes", slow):
+        with mock.patch.object(storage, "write_changes", slow):
             asyncio.run(changes())
             self.assertTrue(store.saving)  # most of them still queued
             with mock.patch.object(srv.notifications.STORE, "stop",
@@ -556,7 +631,7 @@ class StopTest(Base):
         with self.assertLogs("forza-live", "INFO"):
             server = self.server()
         store = server.friends.store
-        with mock.patch.object(fr, "write_changes", side_effect=OSError("no space left")):
+        with mock.patch.object(storage, "write_changes", side_effect=OSError("no space left")):
             store.seen(0x000C000000000001, "Retried")
             with self.assertLogs("forza-live", "WARNING") as logs:
                 self.assertFalse(store.save())
@@ -567,6 +642,44 @@ class StopTest(Base):
         self.assertIn("written to forza_live.sqlite3 again", logs.output[0])
         self.assertFalse(store.pending())
         self.assertEqual(self.start().name(0x000C000000000001), "Retried")
+
+
+    def test_a_writer_that_stopped_is_replaced_and_nothing_waits_for_it(self):
+        """The writer thread ends on a bug: the store's write is answered (not left queued for
+        nobody), the next flush opens a new writer, and the change is committed."""
+        self.file(made_up(300))
+        with self.assertLogs("forza-live", "INFO"):
+            server = self.server()
+        store = server.friends.store
+        dead = store.db
+
+        def bug(conn):
+            raise KeyboardInterrupt  # what no `except Exception` takes
+        with self.assertLogs("forza-live", "ERROR"):
+            dead.submit(bug)
+            dead.thread.join(30)
+        self.assertIsNotNone(dead.died)
+        with mock.patch.object(storage, "REOPEN_WAIT", 3600), \
+                self.assertLogs("forza-live", "WARNING") as logs:
+            store.seen(0x000C000000000002, "AfterTheBug")
+            self.assertTrue(store.save())  # a new writer, at once
+        self.assertIn("a new one takes the changes", logs.output[0])
+        self.assertIsNot(store.db, dead)
+        self.assertTrue(dead.queue.empty())
+        with mock.patch.object(storage, "REOPEN_WAIT", 3600), \
+                self.assertLogs("forza-live", "WARNING") as logs:
+            store.db.submit(bug)
+            store.db.thread.join(30)
+            store.seen(0x000C000000000003, "SecondBug")
+            self.assertFalse(store.save())  # no second writer within REOPEN_WAIT: it fails...
+        self.assertIn("written again with the next ones", logs.output[-1])
+        self.assertTrue(store.pending())  # ...and is kept to be written again
+        store._reopen_at = 0
+        with self.assertLogs("forza-live", "INFO"):
+            self.assertTrue(store.save())
+        again = self.start()
+        self.assertEqual(again.name(0x000C000000000002), "AfterTheBug")
+        self.assertEqual(again.name(0x000C000000000003), "SecondBug")
 
 
 class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
@@ -610,14 +723,14 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
         self.server.datagram_received(srv.MAGIC + bytes([srv.FRIEND]) + body, peer.addr)
 
     async def test_friends_changes_never_hold_the_loop(self):
-        real, threads = fr.write_changes, set()
+        real, threads = storage.write_changes, set()
 
         def slow(*args):  # a slow disk: 30 ms a write, in the writer's thread
             threads.add(threading.get_ident())
             time.sleep(0.03)
             return real(*args)
         rnd = random.Random(74)
-        with mock.patch.object(fr, "write_changes", slow), \
+        with mock.patch.object(storage, "write_changes", slow), \
                 mock.patch.object(fr, "ACTIONS_PER_MIN", 10 ** 6), \
                 mock.patch.object(fr, "REQUESTS_PER_MIN", 10 ** 6), \
                 self.assertNoLogs("forza-live", "WARNING"):
@@ -642,13 +755,13 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
     async def test_the_watchdog_sees_a_friends_write_that_holds_the_loop(self):
         """The control: the same watchdog sees a save() made on the loop (as events.enroll made
         one before #75) while the disk is slow."""
-        real = fr.write_changes
+        real = storage.write_changes
 
         def slow(*args):
             time.sleep(0.15)
             return real(*args)
         self.store.seen(self.peers[0].xuid, "Renamed")
-        with mock.patch.object(fr, "write_changes", slow), \
+        with mock.patch.object(storage, "write_changes", slow), \
                 self.assertLogs("forza-live", "WARNING") as logs:
             self.watch.call("friends.save", self.store.save)
             await asyncio.sleep(0.1)
@@ -657,7 +770,7 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
 
     async def test_an_enrollment_waits_for_its_binding_off_the_loop(self):
         peer = self.sign_in_new()
-        go, ticks, real = threading.Event(), [], fr.write_changes
+        go, ticks, real = threading.Event(), [], storage.write_changes
 
         def held(*args):
             go.wait(30)
@@ -667,7 +780,7 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
             while not go.is_set():
                 ticks.append(time.monotonic())
                 await asyncio.sleep(0.005)
-        with mock.patch.object(fr, "write_changes", held):
+        with mock.patch.object(storage, "write_changes", held):
             self.store.seen(peer.xuid, "Enrolled")  # a change of its record, not yet on disk
             result = self.server.events.handle("POST", "/admin/events/enroll",
                                                {"xuid": "%016X" % peer.xuid})
@@ -688,7 +801,7 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
 
     async def test_an_enrollment_whose_binding_cannot_be_written_is_refused(self):
         peer = self.sign_in_new()
-        with mock.patch.object(fr, "write_changes", side_effect=OSError("no space left")), \
+        with mock.patch.object(storage, "write_changes", side_effect=OSError("no space left")), \
                 self.assertLogs("forza-live", "WARNING"):
             self.store.seen(peer.xuid, "NotKept")
             with self.assertRaisesRegex(OSError, "could not persist"):
@@ -724,7 +837,7 @@ class ReaderTest(Base):
     def test_it_forgets_what_a_start_forgets(self):
         old = {"0009000000000001": {"name": "Old", "seen": NOW - 400 * DAY, "key": "",
                                     "friends": {}, "in": {}, "out": {}, "blocked": {}}}
-        storage.ensure(storage.database(self.dir), fr.NAME, fr.VERSION, fr.TABLES)
+        storage.ensure(storage.database(self.dir), fr.STORAGE)
         storage.database(self.dir).call(fr.replace_all, old)
         reader = fr.Reader(self.dir)
         self.addCleanup(reader.close)
@@ -736,6 +849,65 @@ class ReaderTest(Base):
         reader = fr.Reader(self.dir)
         self.addCleanup(reader.close)
         self.assertIsNone(reader.get(0x0009000000000001))
+
+    def reads_as(self, reader, players):
+        """The reader has the records a start keeps of `players`, and none of the others."""
+        kept = as_before(players).players
+        for k, p in list(players.items())[:150]:
+            self.assertEqual(reader.get(int(k, 16)), kept.get(k), k)
+
+    def test_it_reads_friends_json_until_the_database_holds_the_store(self):
+        """The accounts service may be updated before the server or after it: with only
+        friends.json (a server from before the database), with the database made and the file
+        not imported yet, after the import, and during a rollback to a previous version."""
+        players = made_up(400, now=time.time())
+        reader = fr.Reader(self.dir)
+        self.addCleanup(reader.close)
+        self.file(players)  # a server from before the database
+        self.reads_as(reader, players)
+        players["0009000000000AAA"] = {"name": "New", "seen": time.time(), "key": "", "pub": "ab" * 32,
+                                       "friends": {}, "in": {}, "out": {}, "blocked": {}}
+        self.file(players)  # that server binds a key: the file changes, and is read again
+        self.assertEqual(auth.bound_pub(reader, 0x0009000000000AAA), b"\xab" * 32)
+        db = storage.database(self.dir)  # this version starts: tables made, nothing imported
+        storage.ensure(db, fr.STORAGE)
+        self.reads_as(reader, players)
+        store = self.start()  # the import
+        self.assertNotIn(fr.FILE, self.names())
+        self.reads_as(reader, store.players)
+        store.seen(0x0009000000000AAA, "AfterImport")
+        self.assertTrue(store.save())
+        self.assertEqual(reader.get(0x0009000000000AAA)["name"], "AfterImport")
+        storage.close_all()
+        with contextlib.redirect_stderr(io.StringIO()):  # a rollback: the file is the store
+            self.assertEqual(storage.main(["--data-dir", self.dir, "rollback", "friends"]), 0)
+        with open(self.path) as f:
+            during = json.load(f)["players"]
+        during["0009000000000AAA"]["pub"] = "cd" * 32  # the previous version re-keyed it
+        self.file(during)
+        self.assertEqual(auth.bound_pub(reader, 0x0009000000000AAA), b"\xcd" * 32)
+        again = self.start()  # back to this version: the database again
+        self.assertNotIn(fr.FILE, self.names())
+        self.assertEqual(auth.bound_pub(reader, 0x0009000000000AAA), b"\xcd" * 32)
+        self.assertEqual(again.players["0009000000000AAA"]["pub"], "cd" * 32)
+
+    def test_a_friends_json_set_aside_or_put_back_is_not_read_over_the_database(self):
+        self.file(made_up(100, now=time.time()))
+        store = self.start()
+        self.file({})  # a file put back by hand, while the server runs
+        reader = fr.Reader(self.dir)
+        self.addCleanup(reader.close)
+        self.reads_as(reader, store.players)
+
+    def test_a_damaged_friends_json_reads_its_bak(self):
+        players = made_up(50, now=time.time())
+        self.file(players, self.path + ".bak")
+        with open(self.path, "w") as f:
+            f.write('{"version": 1, "pla')
+        reader = fr.Reader(self.dir)
+        self.addCleanup(reader.close)
+        with self.assertLogs("forza_live", "WARNING"):
+            self.reads_as(reader, players)
 
 
 class ExportTest(Base):

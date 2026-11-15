@@ -6,9 +6,12 @@ a database of a newer version refused.
 Run: python3 -m unittest discover -s tests -t .
 """
 
+import concurrent.futures
 import contextlib
 import io
+import logging
 import os
+import random
 import sqlite3
 import tempfile
 import threading
@@ -20,6 +23,10 @@ from forza_live.core import storage
 
 TABLES = MetaData()
 ROWS = Table("test_rows", TABLES, Column("n", Integer, primary_key=True), Column("text", Text))
+
+
+KIND = storage.Kind("test", 1, TABLES, read_all=None, replace_all=None, rows_of=None,
+                    write_rows=None)
 
 
 def put(conn, n, text="row"):
@@ -44,7 +51,7 @@ class Base(unittest.TestCase):
         self.dir = tmp.name
         self.addCleanup(storage.close_all)  # before the folder goes: Windows keeps open files
         self.db = storage.database(self.dir)
-        storage.ensure(self.db, "test", 1, TABLES)
+        storage.ensure(self.db, KIND)
 
     def held(self):
         """A submit that holds the writer until the returned event is set."""
@@ -117,6 +124,236 @@ class WriterTest(Base):
         self.assertEqual(self.db.read(lambda c: c.exec_driver_sql("PRAGMA foreign_keys").scalar()), 1)
 
 
+class Faults:
+    """The writer's calls to SQLite broken on purpose: fail(point, n) makes the next n calls at
+    that point raise as a full disk or a lost file does. The points: connect (a new
+    connection), begin (BEGIN), savepoint (SAVEPOINT), execute (a write's INSERT), rollback_to
+    (ROLLBACK TO, after a write that failed), release (RELEASE), commit (COMMIT)."""
+
+    POINTS = ("connect", "begin", "savepoint", "execute", "rollback_to", "release", "commit")
+    STATEMENTS = {"BEGIN": "begin", "SAVEPOINT": "savepoint", "INSERT": "execute",
+                  "ROLLBACK TO": "rollback_to", "RELEASE": "release"}
+
+    def __init__(self, test, db):
+        self.db = db
+        self.left = dict.fromkeys(self.POINTS, 0)
+        self.hits = dict.fromkeys(self.POINTS, 0)
+        self.after_commit = []  # points armed once the transaction under way is committed
+        self.lock = threading.Lock()
+        dialect = db.engine.dialect
+        real_connect, real_commit = dialect.connect, dialect.do_commit
+
+        def connect(*args, **kwargs):
+            self.check("connect", "unable to open database file")
+            return real_connect(*args, **kwargs)
+
+        def do_commit(dbapi_connection):
+            self.check("commit", "disk I/O error")
+            real_commit(dbapi_connection)
+            with self.lock:
+                for point in self.after_commit:
+                    self.left[point] += 1
+                self.after_commit = []
+
+        def before(conn, cursor, statement, parameters, context, executemany):
+            for start, point in self.STATEMENTS.items():
+                if statement.lstrip().upper().startswith(start):
+                    self.check(point, "database or disk is full")
+        dialect.connect, dialect.do_commit = connect, do_commit
+        event.listen(db.engine, "before_cursor_execute", before)
+
+        def undo():
+            del dialect.connect, dialect.do_commit
+            event.remove(db.engine, "before_cursor_execute", before)
+        test.addCleanup(undo)
+
+    def fail(self, point, n=1):
+        with self.lock:
+            self.left[point] += n
+
+    def next_batch(self, *points):
+        """These points fail in the next transaction (the one under way commits first)."""
+        with self.lock:
+            self.after_commit += points
+
+    def clear(self):
+        with self.lock:
+            self.left = dict.fromkeys(self.POINTS, 0)
+            self.after_commit = []
+
+    def check(self, point, message):
+        if threading.current_thread() is not self.db.thread:  # the test's own reads go on
+            return
+        with self.lock:
+            if not self.left[point]:
+                return
+            self.left[point] -= 1
+            self.hits[point] += 1
+        raise sqlite3.OperationalError(message)
+
+
+class FaultTest(Base):
+    """Every write the writer takes from the queue ends with its result or an exception,
+    whatever fails and wherever, alone or one after the other; a result means it is in the
+    database, an exception that nothing of it is."""
+
+    def setUp(self):
+        super().setUp()
+        self.faults = Faults(self, self.db)
+        self.futures = {}  # n -> its future
+        self.n = 0
+
+    def writes(self, count=1):
+        """`count` writes submitted at once (one transaction, as far as the writer takes them so)."""
+        made = []
+        for _ in range(count):
+            self.n += 1
+            self.futures[self.n] = self.db.submit(put, self.n)
+            made.append(self.futures[self.n])
+        return made
+
+    def settle(self):
+        """Each future answered within 30 s (none left waiting), and the database holds just the
+        writes whose future has a result."""
+        concurrent.futures.wait(list(self.futures.values()), 30)
+        waiting = [n for n, f in self.futures.items() if not f.done()]
+        self.assertEqual(waiting, [], "writes left without an answer")
+        kept = {n for n, f in self.futures.items() if f.exception() is None}
+        for n in kept:
+            self.assertEqual(self.futures[n].result(), n)
+        self.assertEqual({r[0] for r in self.db.read(rows)}, kept)
+        return kept
+
+    def test_the_reviewed_case_a_failed_commit_then_a_failed_connection(self):
+        """A commit fails (the writer lets its connection go), then the next connection fails:
+        that batch's writes are answered too, and the next write is kept."""
+        self.faults.fail("commit")
+        with self.assertLogs("forza-live", "ERROR"):
+            first = self.writes()[0]
+            with self.assertRaises(Exception):
+                first.result(30)
+            self.faults.fail("connect")
+            second = self.writes()[0]
+            with self.assertRaises(Exception):
+                second.result(30)  # before the fix: never answered
+        third = self.writes()[0]
+        self.assertEqual(third.result(30), self.n)
+        self.assertEqual(self.settle(), {self.n})
+
+    def test_each_point_breaks_alone(self):
+        for point in Faults.POINTS:
+            with self.subTest(point=point):
+                hits = self.faults.hits[point]
+                if point == "connect":  # a connection is made only after a failed one
+                    self.faults.next_batch("commit")
+                go = self.held()
+                batch = self.writes(5)  # one transaction, behind the held one
+                self.faults.next_batch(*{"rollback_to": ("execute", "rollback_to"),
+                                         "connect": ()}.get(point, (point,)))
+                with self.assertLogs("forza-live", "INFO"):  # the error, or nothing at all
+                    logging.getLogger("forza-live").info("break %s", point)
+                    go.set()
+                    concurrent.futures.wait(batch, 30)
+                self.assertTrue(all(f.done() for f in batch))
+                if point == "connect":  # that batch failed at its commit; then the connection
+                    self.faults.fail("connect")
+                    batch = self.writes(5)
+                    concurrent.futures.wait(batch, 30)
+                    self.assertTrue(all(f.done() for f in batch))
+                self.assertEqual(self.faults.hits[point], hits + 1, point)
+                kept = self.settle()
+                if point == "execute":  # its own savepoint: the other four are kept
+                    self.assertEqual(sum(1 for f in batch if f.exception() is None), 4)
+                else:  # the transaction failed: nothing of it kept
+                    self.assertFalse(any(f.exception() is None for f in batch), point)
+                self.assertEqual(self.writes()[0].result(30), self.n)  # and the next one is kept
+                self.assertEqual(self.settle(), kept | {self.n})
+                self.faults.clear()
+
+    def test_the_points_break_one_after_the_other(self):
+        """Every pair: a batch broken at one point, the next batch broken at another (a connection
+        given up after the first leaves the second to make a new one), then a write that goes
+        through."""
+        for first in Faults.POINTS:
+            for second in Faults.POINTS:
+                with self.subTest(first=first, second=second):
+                    with self.assertLogs("forza-live", "INFO"):
+                        logging.getLogger("forza-live").info("break %s then %s", first, second)
+                        for point in (first, second):
+                            if point == "rollback_to":
+                                self.faults.fail("execute")
+                            self.faults.fail(point)
+                            batch = self.writes(3)
+                            concurrent.futures.wait(batch, 30)
+                            self.assertTrue(all(f.done() for f in batch), (first, second))
+                    self.faults.clear()  # a point no batch reached (connect, with none failed)
+                    self.assertEqual(self.writes()[0].result(30), self.n)
+                    self.settle()
+
+    def test_random_breaks_under_a_stream_of_writes(self):
+        rnd = random.Random(75)
+        with self.assertLogs("forza-live", "INFO"):
+            for _ in range(300):
+                if rnd.random() < 0.4:
+                    self.faults.fail(rnd.choice(Faults.POINTS))
+                self.writes(rnd.randrange(1, 6))
+                if rnd.random() < 0.7:  # else the next ones join the same transaction
+                    concurrent.futures.wait(list(self.futures.values()), 30)
+        kept = self.settle()
+        self.faults.clear()
+        self.assertEqual(self.writes()[0].result(30), self.n)
+        self.assertGreater(len(kept), 0)
+        self.assertGreater(sum(self.faults.hits.values()), 60)
+        self.assertGreater(min(self.faults.hits.values()), 0)  # every point was reached
+        with plain(self.db.path) as conn:
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+
+class Boom(BaseException):
+    """What no `except Exception` catches: a bug of the writer itself, as far as it knows."""
+
+
+class WriterDeathTest(Base):
+    def test_a_writer_that_stops_answers_everything_and_takes_nothing_more(self):
+        go = self.held()
+
+        def boom(conn):
+            raise Boom("a bug")
+        before = self.db.submit(put, 1)  # in the same transaction as the bug
+        bug = self.db.submit(boom)
+        queued = [self.db.submit(put, n) for n in range(2, 600)]  # and behind it
+        with self.assertLogs("forza-live", "ERROR") as logs:
+            go.set()
+            self.db.thread.join(30)
+        self.assertIn("the writer of forza_live.sqlite3 stopped", logs.output[0])
+        self.assertFalse(self.db.thread.is_alive())
+        for f in [before, bug] + queued:
+            self.assertTrue(f.done())
+            self.assertIsInstance(f.exception(), storage.Closed)
+        self.assertTrue(self.db.closed)
+        self.assertIsInstance(self.db.died, Boom)
+        later = self.db.submit(put, 9999)  # not queued for nobody: refused at once
+        self.assertTrue(later.done())
+        self.assertIsInstance(later.exception(), storage.Closed)
+        self.assertTrue(self.db.queue.empty())
+        self.assertEqual(self.db.read(rows), [])  # nothing of that transaction kept
+        again = storage.database(self.dir)  # a new writer for the next one who asks
+        self.assertIsNot(again, self.db)
+        self.assertEqual(again.call(put, 5, timeout=30), 5)
+
+    def test_a_writer_thread_gone_without_a_word_is_noticed(self):
+        """However the thread ended (here: it was told to stop behind close()'s back), the next
+        submit sees it, and is refused rather than queued for nobody."""
+        self.db.queue.put(None)
+        self.db.thread.join(30)
+        self.assertFalse(self.db.thread.is_alive())
+        self.assertFalse(self.db.closed)
+        f = self.db.submit(put, 1)
+        self.assertIsInstance(f.exception(5), storage.Closed)
+        self.assertTrue(self.db.closed)
+        self.assertTrue(self.db.queue.empty())
+
+
 class CloseTest(Base):
     def test_the_stop_commits_what_is_queued(self):
         go = self.held()
@@ -149,11 +386,61 @@ class CloseTest(Base):
 
 class VersionTest(Base):
     def test_tables_of_a_newer_version_refuse_the_start(self):
-        storage.ensure(self.db, "test", 1, TABLES)  # again: nothing to do
+        storage.ensure(self.db, KIND)  # again: nothing to do
         self.db.call(lambda conn: conn.execute(storage.STORES.update().values(version=2)))
         with self.assertLogs("forza-live", "ERROR") as logs, self.assertRaises(storage.Refused):
-            storage.ensure(self.db, "test", 1, TABLES)
+            storage.ensure(self.db, KIND)
         self.assertIn("written by a newer server", logs.output[0])
+
+    def kind_v2(self, steps):
+        tables = MetaData()
+        Table("test_rows", tables, Column("n", Integer, primary_key=True), Column("text", Text),
+              Column("extra", Text))
+        Table("test_more", tables, Column("k", Text, primary_key=True))
+        return storage.Kind("test", 2, tables, None, None, None, None, steps=steps)
+
+    def test_older_tables_are_upgraded_after_a_copy(self):
+        for n in range(3):
+            self.db.call(put, n, timeout=30)
+
+        def step(conn):
+            conn.exec_driver_sql("ALTER TABLE test_rows ADD COLUMN extra TEXT")
+            conn.exec_driver_sql("UPDATE test_rows SET extra = 'from v1'")
+        with self.assertLogs("forza-live", "INFO") as logs:
+            storage.ensure(self.db, self.kind_v2({1: step}))
+        self.assertIn("copied to forza_live.sqlite3.before-test-v2", logs.output[0])
+        self.assertIn("went from version 1 to 2", logs.output[-1])
+        with plain(self.db.path) as conn:
+            self.assertEqual(conn.execute("SELECT version FROM stores WHERE name = 'test'")
+                             .fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT n, extra FROM test_rows").fetchall(),
+                             [(0, "from v1"), (1, "from v1"), (2, "from v1")])
+            conn.execute("SELECT k FROM test_more")  # the new table, made
+        with plain(self.db.path + ".before-test-v2") as conn:  # the copy: version 1, as it was
+            self.assertEqual(conn.execute("SELECT version FROM stores WHERE name = 'test'")
+                             .fetchone()[0], 1)
+            self.assertEqual(len(conn.execute("SELECT * FROM test_rows").fetchall()), 3)
+        storage.ensure(self.db, self.kind_v2({1: step}))  # again: nothing to do
+
+    def test_an_upgrade_that_fails_leaves_the_tables_as_they_were(self):
+        self.db.call(put, 1, timeout=30)
+
+        def step(conn):
+            conn.exec_driver_sql("ALTER TABLE test_rows ADD COLUMN extra TEXT")
+            raise ValueError("a bug in the step")
+        with self.assertLogs("forza-live", "INFO") as logs, self.assertRaises(storage.Refused):
+            storage.ensure(self.db, self.kind_v2({1: step}))
+        self.assertIn("could not be made or upgraded", logs.output[-1])
+        with plain(self.db.path) as conn:
+            self.assertEqual(conn.execute("SELECT version FROM stores WHERE name = 'test'")
+                             .fetchone()[0], 1)
+            self.assertEqual([c[1] for c in conn.execute("PRAGMA table_info(test_rows)")],
+                             ["n", "text"])
+
+    def test_older_tables_without_their_upgrade_refuse_the_start(self):
+        with self.assertLogs("forza-live", "ERROR") as logs, self.assertRaises(storage.Refused):
+            storage.ensure(self.db, self.kind_v2({}))
+        self.assertIn("no upgrade from version 1", logs.output[0])
 
     def test_the_revision_counts_the_commits(self):
         for n in range(3):
