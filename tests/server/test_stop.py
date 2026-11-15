@@ -208,9 +208,13 @@ class StopAcceptingTest(unittest.IsolatedAsyncioTestCase):
         srv.stop_accepting(listening)
         writer.write(b"open before\n")
         self.assertEqual(await asyncio.wait_for(reader.readline(), 5), b"ok\n")
-        late = socket.create_connection(("127.0.0.1", port), timeout=2)  # the kernel's backlog
-        self.addCleanup(late.close)
-        late.sendall(b"opened after\n")
+        try:
+            late = socket.create_connection(("127.0.0.1", port), timeout=2)  # the backlog
+        except OSError:  # Windows: Server.close(), the port refuses it
+            pass
+        else:
+            self.addCleanup(late.close)
+            late.sendall(b"opened after\n")
         await asyncio.sleep(0.2)
         self.assertEqual(served, [b"open before\n"])
 
