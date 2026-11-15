@@ -492,8 +492,16 @@ class FlagTest(unittest.TestCase):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         def end():
-            proc.terminate()
-            proc.wait()
+            # Python 3.12 can lose a SIGTERM: its KeyboardInterrupt, raised while a weakref
+            # callback runs, is only "ignored" there (once in a few hundred stops). Once more,
+            # then kill: a test never waits for good.
+            for stop in (proc.terminate, proc.terminate, proc.kill):
+                stop()
+                try:
+                    proc.wait(15)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
         self.addCleanup(end)
         return proc, "http://127.0.0.1:%d/status" % http
 
