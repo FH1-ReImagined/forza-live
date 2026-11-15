@@ -161,6 +161,7 @@ def one(args, signals, template):
     return {"started": started, "lost": lost, "rc": proc.returncode, "took": round(took, 4),
             "saved": saved, "traceback": "Traceback" in text,
             "ignored": "Exception ignored" in text, "last": lines[-2:], "phases": phases,
+            "again": sum(" again while " in line for line in lines),
             "tail": text[-4000:] if bad else ""}
 
 
@@ -208,6 +209,9 @@ def main():
               sum(r["lost"] for r in results), sum(not r["saved"] for r in results),
               sum(r["rc"] != 0 for r in results), sum(r["traceback"] for r in results),
               sum(r["ignored"] for r in results), sum(not r["started"] for r in results)))
+    if len(signals) > 1:
+        print("the log said a signal was ignored during the saves in %d runs (%d lines)" % (
+            sum(r["again"] > 0 for r in results), sum(r["again"] for r in results)))
     phases = [r["phases"] for r in results if r["phases"]]
     if phases:
         print("of which (the log's millisecond clock), median / max: signal to the stop's first "
