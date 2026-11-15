@@ -63,18 +63,10 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         put_back(self)
         self.loop = asyncio.get_running_loop()
-        self.addCleanup(self.take_off)
 
     def serving(self, stop):
         stop.serving = True  # as main() has it once the start is done
         return stop
-
-    def take_off(self):
-        for number in srv.STOP_SIGNALS:
-            try:
-                self.loop.remove_signal_handler(number)
-            except (NotImplementedError, RuntimeError):
-                pass
 
     async def test_the_old_way_loses_a_signal_in_a_weakref_callback(self):
         """Why (#78): with Python's handler the KeyboardInterrupt is raised inside the callback,
@@ -112,16 +104,13 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await stop.wait(5))
         self.assertEqual(stop.came, [signal.SIGTERM])
 
-    async def test_where_the_loop_has_no_signal_handlers_one_that_only_schedules(self):
-        """Windows' event loops have no add_signal_handler: a signal.signal handler that only
-        hands the note to the loop, which is what runs on Windows (this test runs it there, and
-        everywhere else with the loop's own refused)."""
-        refused = mock.patch.object(self.loop, "add_signal_handler",
-                                    side_effect=NotImplementedError)
-        with refused:
-            stop = srv.StopRequest().install(self.loop)
-        self.assertEqual(stop.taken, [])
-        self.assertEqual(signal.getsignal(signal.SIGINT), stop.schedule)
+    async def test_the_handler_only_schedules_the_note(self):
+        """A signal.signal handler that only hands the note to the loop, on every system (the
+        loop's add_signal_handler is not used: Windows' loops have none, and elsewhere the loop
+        puts Python's default handlers back as it lets go of them)."""
+        stop = srv.StopRequest().install(self.loop)
+        for number in srv.STOP_SIGNALS:
+            self.assertEqual(signal.getsignal(number), stop.schedule)
         reached = []
 
         def callback():
@@ -178,62 +167,49 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         status instead of 0 (a third signal 20 ms into a stop of the busy server, 179 times in
         700)."""
         stop = srv.StopRequest().install(self.loop)
-        stop.end()
-        for number in srv.STOP_SIGNALS:
-            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
+        stop.end()  # main(), after the saves
         signal.raise_signal(signal.SIGINT)  # nothing happens
         signal.raise_signal(signal.SIGTERM)
         await asyncio.sleep(0.05)
         self.assertEqual(stop.came, [])
+        self.assertFalse(stop.stopping.is_set())
         stop.end()  # (run() again, after main())
-        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+        stop.quiet()  # run(), last
+        for number in srv.STOP_SIGNALS:
+            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
+        signal.raise_signal(signal.SIGINT)
+        signal.raise_signal(signal.SIGTERM)
+        self.assertEqual(stop.came, [])
 
 
 class EndTest(unittest.TestCase):
     def setUp(self):
         put_back(self)
 
-    def test_the_loops_close_no_longer_touches_the_signals(self):
-        """end() takes the signals off the loop while it is open: its close then leaves SIG_IGN
-        in place, and no thread still running can be ended by a SIGTERM with Python's default
-        action (the main thread's mask covered only the main thread)."""
-        loop = asyncio.new_event_loop()
-        try:
-            stop = srv.StopRequest().install(loop)
-            stop.end()
-            self.assertEqual(stop.taken, [])
-        finally:
-            loop.close()
-        for number in srv.STOP_SIGNALS:
-            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
+    def test_python_s_default_action_is_never_put_back(self):
+        """From install() to quiet() the handler is ours, then SIG_IGN: never SIG_DFL, nor
+        Python's default_int_handler, not even for a moment (the loop's close put them back
+        when the loop had the signals, and a SIGTERM then, taken by a thread still running,
+        ended a stop of a flood of signals with -15 after its saves)."""
+        seen = []
+        real = signal.signal
 
-    def test_a_sigint_in_the_moment_the_loop_lets_go(self):
-        """The loop's remove_signal_handler gives SIGINT Python's default handler back before
-        end() sets SIG_IGN: a SIGINT then (a flood, taken by another thread while the main one
-        blocks it) raised KeyboardInterrupt out of end(), and the rest of main()'s stop after
-        the saves was skipped."""
+        def setting(number, handler):
+            seen.append(handler)
+            return real(number, handler)
         loop = asyncio.new_event_loop()
-        try:
-            stop = srv.StopRequest().install(loop)
-            if signal.SIGINT not in stop.taken:
-                self.skipTest("the loop has no signal handlers here")
-            real, raised = loop.remove_signal_handler, []
-
-            def remove(number):
-                found = real(number)
-                if number == signal.SIGINT and not raised:
-                    self.assertIs(signal.getsignal(number), signal.default_int_handler)
-                    raised.append(number)
-                    signal.raise_signal(signal.SIGINT)  # (no mask: pthread_sigmask is mocked)
-                return found
-            with mock.patch.object(loop, "remove_signal_handler", remove), \
-                    mock.patch.object(signal, "pthread_sigmask", lambda how, mask: set()):
-                try:
-                    stop.end()
-                except KeyboardInterrupt:
-                    self.fail("end() raised the SIGINT's KeyboardInterrupt")
-        finally:
-            loop.close()
+        with mock.patch.object(signal, "signal", setting):
+            try:
+                stop = srv.StopRequest().install(loop)
+                held = srv.hold_stop_signals()
+                srv.release_stop_signals(held)
+                stop.end()
+            finally:
+                loop.close()
+            stop.quiet()
+        self.assertTrue(seen)
+        self.assertNotIn(signal.SIG_DFL, seen)
+        self.assertNotIn(signal.default_int_handler, seen)
         for number in srv.STOP_SIGNALS:
             self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
 
@@ -311,8 +287,8 @@ class HeldTest(unittest.TestCase):
 
     def test_a_flood_costs_the_saves_nothing(self):
         """Once a held signal is noted it is SIG_IGN until the log has told of it: a flood of
-        them is not a handler's call each, nor a byte each in the loop's wakeup pipe (which
-        filled, and printed a warning for every signal after)."""
+        them is not a handler's call each (a flood of thousands a second starved the boards'
+        write past the stop's 20 s)."""
         signal.signal(signal.SIGTERM, signal.default_int_handler)
         held = srv.hold_stop_signals()
         noted = signal.getsignal(signal.SIGTERM)

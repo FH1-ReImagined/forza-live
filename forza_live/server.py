@@ -2251,41 +2251,38 @@ class StopRequest:
     "Exception ignored in ..."): the server ran on until the container runtime killed it, and
     none of the stop's saves were made.
 
-    install(loop) takes the signals with loop.add_signal_handler; where the loop has none
-    (Windows), with a signal.signal handler that only schedules the note onto the loop
-    (call_soon_threadsafe). Either way nothing is raised where the signal lands, and every
-    signal after the first is noted and changes nothing."""
+    install(loop) takes them with a signal.signal handler that only hands the note to the loop
+    (call_soon_threadsafe): nothing is raised where the signal lands, and every signal after
+    the first is noted and changes nothing. Not with loop.add_signal_handler: the loop puts
+    Python's default handlers back as it lets go of them (remove_signal_handler, its close), and
+    a SIGTERM in that moment, taken by any thread still running, ended the process with -15
+    after the saves (a flood of signals: 1 stop in 50)."""
 
     def __init__(self):
         self.came = []  # the stop signals, in the order they came
         self.during_start = False  # the first one came before the server was serving
         self.serving = False  # main() sets it once the start is done
+        self.ended = False  # end(): the stop is done, a signal is nothing from here
         self.stopping = asyncio.Event()
         self.loop = None
-        self.taken = []  # the signals the loop's add_signal_handler has
 
     def install(self, loop):
         """The signals are this loop's from here. Nothing in a thread other than the main one,
         where signals cannot be set (none is delivered there either)."""
         self.loop = loop
-        for number in STOP_SIGNALS:
-            try:
-                loop.add_signal_handler(number, self.note, number)
-                self.taken.append(number)
-                continue
-            except NotImplementedError:  # Windows' event loops: the handler below instead
-                pass
-            except (RuntimeError, ValueError):  # not the main thread
-                break
-            try:
+        try:
+            for number in STOP_SIGNALS:
                 signal.signal(number, self.schedule)
-            except ValueError:  # not the main thread
-                break
+        except ValueError:  # not the main thread
+            pass
         return self
 
     def schedule(self, number, frame):
-        """The signal.signal handler (Windows): it runs wherever the main thread is, so it only
-        hands the note to the loop, which cannot fail there."""
+        """The handler: it runs in the main thread wherever that is (a weakref callback, a
+        __del__, the loop's own code), so it only hands the note to the loop, which cannot fail
+        there, nor raise. After end(), nothing."""
+        if self.ended:
+            return
         try:
             self.loop.call_soon_threadsafe(self.note, number)
         except RuntimeError:  # the loop is closed: the stop is over
@@ -2337,44 +2334,35 @@ class StopRequest:
         return "stop: %s: the server stops" % signal_name(self.came[0])
 
     def end(self):
-        """The stop is done (main() once its saves are, run() after main()): from here to the end
-        of the process a stop signal is ignored (a container runtime's second SIGTERM, a second
-        Ctrl+C), and the loop no longer has them. Its close would put Python's default handlers
-        back, and a signal then ended the process with that signal's status instead of 0 (from
-        a thread still running too, when the main thread only blocked it): SIG_IGN instead, set
-        while the loop is still open, and the main thread blocks the signals for the moment the
-        loop's handler is taken off. Nothing is noted from here: the stop is under way."""
-        blocked = None
-        if self.taken and hasattr(signal, "pthread_sigmask"):
-            blocked = signal.pthread_sigmask(signal.SIG_BLOCK, self.taken)
+        """The stop is done (main() once its saves are, run() after main()): from here a stop
+        signal is nothing at all (a container runtime's second SIGTERM, a second Ctrl+C), and
+        the handler stays ours, so that no thread can be ended by Python's default action while
+        the loop closes and its threads are joined (quiet() then)."""
+        self.ended = True
         try:
-            for number in self.taken:
-                while True:
-                    try:
-                        try:
-                            self.loop.remove_signal_handler(number)  # SIG_DFL: SIG_IGN at once
-                        except (RuntimeError, ValueError):  # the loop is closed, another thread
-                            pass
-                        signal.signal(number, signal.SIG_IGN)
-                        break
-                    except KeyboardInterrupt:  # a SIGINT that met the default handler the
-                        continue  # loop gave back for that moment: the stop is under way
-            del self.taken[:]
-            self.quiet()
-        finally:
-            if blocked is not None:  # a signal that came meanwhile is dropped (SIG_IGN)
-                signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+            for number in STOP_SIGNALS:
+                signal.signal(number, self.schedule)  # (the held signals' handler, until now)
+        except ValueError:  # not the main thread
+            pass
 
     def quiet(self):
-        """Every stop signal ignored, to the end of the process (end(), and run() as it ends
-        some other way). SIG_IGN rather than a handler of ours: Python puts the default action
-        back for its own handlers as the interpreter ends, and a signal then would end the
-        process with that signal's status instead of 0."""
+        """Every stop signal ignored, to the end of the process: run() calls it last, once the
+        loop is closed and its threads joined. SIG_IGN rather than a handler of ours: Python
+        puts the default action back for its own handlers as the interpreter ends, and a signal
+        then ended the process with that signal's status instead of 0. The main thread blocks
+        the signals meanwhile: one that comes then is dropped, rather than met in Python's
+        handler table by SIG_IGN ("Signal 2 ignored due to race condition", printed)."""
+        blocked = None
         try:
+            if hasattr(signal, "pthread_sigmask"):
+                blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
             for number in STOP_SIGNALS:
                 signal.signal(number, signal.SIG_IGN)
         except ValueError:  # not the main thread
             pass
+        finally:
+            if blocked is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 
 def stop_accepting(listening):
@@ -2739,6 +2727,7 @@ def run(came=()):
                 runner.run(main(stop))
             finally:
                 stop.end()  # (main() did, but for the relay and the other ways it ends)
+        # the loop is closed, its threads joined: SIG_IGN to the end (finally)
     except KeyboardInterrupt:  # not a stop signal any more (those are the loop's): kept as before
         pass
     except journal.Unreadable:
