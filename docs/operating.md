@@ -727,7 +727,7 @@ The signal only asks for the stop: the server ends what it is doing at that mome
 request, a tick of its timers) and then stops, in this order:
 
 1. `stop: SIGTERM: the server stops` in the log (`SIGINT` for Ctrl+C).
-2. The HTTP port closes: no new connection from here. Those already open end once the saves are
+2. The HTTP port takes no new connection from here. Those already open end once the saves are
    done.
 3. The [event loop's watchdog](#what-holds-the-event-loop) is turned off: the saves hold the loop,
    on purpose.

@@ -190,6 +190,31 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop.came, [])
 
 
+class StopAcceptingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_no_new_connection_is_served_and_the_open_ones_go_on(self):
+        served = []
+
+        async def handler(reader, writer):
+            served.append(await reader.readline())
+            writer.write(b"ok\n")
+            await writer.drain()
+            writer.close()
+        listening = await asyncio.start_server(handler, "127.0.0.1", 0)
+        self.addCleanup(listening.close)
+        port = listening.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        self.addCleanup(writer.close)
+        await asyncio.sleep(0.05)  # accepted
+        srv.stop_accepting(listening)
+        writer.write(b"open before\n")
+        self.assertEqual(await asyncio.wait_for(reader.readline(), 5), b"ok\n")
+        late = socket.create_connection(("127.0.0.1", port), timeout=2)  # the kernel's backlog
+        self.addCleanup(late.close)
+        late.sendall(b"opened after\n")
+        await asyncio.sleep(0.2)
+        self.assertEqual(served, [b"open before\n"])
+
+
 class HeldTest(unittest.TestCase):
     """During the stop's saves the signals are held: noted, and the log says so."""
 

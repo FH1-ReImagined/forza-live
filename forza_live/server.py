@@ -2359,6 +2359,21 @@ class StopRequest:
                 self.blocked = None
 
 
+def stop_accepting(listening):
+    """No new connection on the HTTP port from here, the server object left as it is: its
+    listening sockets are taken off the loop. Server.close() would do it too, but on Python
+    3.13 and later a connection accepted just before it then fails in the accept (an assertion,
+    silent) and again as the process ends ("Exception ignored ... _SelectorTransport.__del__",
+    the closed server woken a second time): about one busy stop in 20 on 3.14. Windows' loops
+    accept another way (no remove_reader): Server.close() there."""
+    loop = asyncio.get_running_loop()
+    try:
+        for sock in listening.sockets:
+            loop.remove_reader(sock.fileno())
+    except NotImplementedError:
+        listening.close()
+
+
 SMALL_STORES = "the registrations, co-op ledger and friends"
 JOURNALED_STORES = "notifications.json and scoreboards.json"
 
@@ -2640,7 +2655,7 @@ async def main(stop=None):
         if stop.said():
             log.info("%s", stop.said())
         if listening is not None:
-            listening.close()  # no new connection from here (those open end with the loop)
+            stop_accepting(listening)  # no new connection from here (those open end with the loop)
         watchdog.WATCH.stop()  # the stop's saves hold the loop, on purpose
         counting.cancel()
         writing.cancel()
