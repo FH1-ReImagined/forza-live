@@ -14,3 +14,4 @@ accounts/static
 accounts/.venv
 accounts/**/*.sqlite3
 video
+.venv

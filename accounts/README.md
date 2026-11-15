@@ -55,7 +55,9 @@ readers, and uses them on the game server's data folder, mounted read-only.
 - The launcher's link calls come the same way, to `https://forza.dyotson.dev/api/game/...`,
   signed with the player's key (`X-Forza-Auth`).
 - This service reads the game server's data folder (`FORZA_GAME_DATA`, mounted read-only):
-  `friends.json` for the public key each XUID is bound to, `players/<XUID>.json` for the gamertag,
+  the friends in the game server's database (`forza_live.sqlite3`, read-only, a record at a time;
+  `friends.json` while the database does not hold them, for a game server from before it or
+  rolled back to one, so that the two can be updated in either order) for the public key each XUID is bound to, `players/<XUID>.json` for the gamertag,
   the first result on the boards (and the signed sign-ins, for the optional likes wait), `banned_xuids.json`, and `community.json`, `videos.json` and `designs.json` for the
   photos, videos and designs and who owns them.
 - It calls the game server for one thing only: deleting a player's own photo, video or design, through
@@ -258,7 +260,7 @@ only when they are plain files, never through a link.
 Both sides approve every link, so a token, code or address that leaks is useless alone:
 
 1. In the launcher, Online > Online > Website account > **Link**. The launcher signs
-   `game/link/start`. The service checks the signature with the key `friends.json` binds the
+   `game/link/start`. The service checks the signature with the key the game server's friends bind the
    XUID to (`forza_live.core.auth.check_request`: the server name `forza.dyotson.dev` only, the
    120-second clock window, the nonce used once in every worker), that the XUID is not banned,
    and that `players/<XUID>.json` has a gamertag and a result on the boards (`firstScore`: one
@@ -279,7 +281,7 @@ Rules:
   even if someone else took over the web account. A player who lost their Discord login or
   mailbox makes a new account and moves the link to it.
 - The website can unlink too (with a sign-in in the past 10 minutes).
-- **Pinning.** The link keeps the public key it was made with. When `friends.json` binds the XUID
+- **Pinning.** The link keeps the public key it was made with. When the game server's friends bind the XUID
   to another key (the operator re-keyed it), the link is **frozen**: the new key cannot see the
   account, unlink it, sign it out or put a new link in its place (starting or confirming one is
   409 `this link needs the operator`). The operator checks with the player and unfreezes it in
@@ -333,7 +335,7 @@ file (mode 600) that only this container reads. Never commit it.
 | `FORZA_EMAIL_PEPPER_FILE` | `$FORZA_ACCOUNTS_DATA/email_pepper.bin` | 32 random bytes made at the first email sign-in. Back it up with the database: without it, no email account can be matched again |
 | `FORZA_ACCOUNTS_BACKUPS` | `$FORZA_ACCOUNTS_DATA/backups` | where `nightly` writes its copies |
 | `FORZA_ACCOUNTS_PROXY` | none | the website nginx's address or network (`<web-nginx-ip>` or `<web-network-cidr>`): `X-Real-IP` is believed only from there. Without it every visitor counts as nginx for the rate limits |
-| `FORZA_GAME_DATA` | none | the game server's data folder, mounted read-only (`friends.json`, `players/`, `banned_xuids.json`, `community.json`, `designs.json`). Without it, linking, likes and My items are off (503) |
+| `FORZA_GAME_DATA` | none | the game server's data folder, mounted read-only (`forza_live.sqlite3` with its `-wal` and `-shm` files, `players/`, `banned_xuids.json`, `community.json`, `designs.json`). Without it, linking, likes and My items are off (503) |
 | `FORZA_GAME_URL` | none | the game server's HTTP port as this container reaches it (`http://<game-server-address>:21201`), for deleting a player's own items. Straight to the port, never through the tunnel or a proxy: the game server refuses those. The address this container comes from must not be one of the game server's `--trusted-proxy` addresses |
 | `FORZA_OWNER_TOKEN` (`_FILE`) | none | the game server's `FORZA_OWNER_TOKEN` (`openssl rand -hex 32`), a token of its own, never the admin token. Without `FORZA_GAME_URL` and this, deleting from the account page is off (503) |
 | `FORZA_ACCOUNTS_LINKS_DAILY` | `200` | new game links a day in all |
@@ -407,7 +409,8 @@ The mail is fixed plain text with the code and a same-browser link
 Build it from the repository's root: the image copies the game server's `forza_live/` package
 for its signed-request check. `<game-server-data>` is the game server's data volume or folder
 (its `--data-dir`); mount it read-only (`:ro`). The container's user (uid 10001) needs to read
-it.
+it, `forza_live.sqlite3-wal` and `forza_live.sqlite3-shm` included (the game server makes them
+with the database's own mode).
 
 A game server that runs with `--network host` is reached at the host's address on the
 container's network (its gateway), as the screening worker reaches it.

@@ -5,4 +5,6 @@ Django==5.2.19
 django-allauth[socialaccount]==65.21.1
 django-ninja==1.7.3
 gunicorn==26.2.0
+# The game server's code it reads the data folder with (forza_live/, its database: core/storage.py)
+SQLAlchemy==2.1.8
 whitenoise==6.12.0

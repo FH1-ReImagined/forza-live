@@ -6,7 +6,15 @@
 `python3 forza_live_server.py --help` lists every option.
 """
 
-from forza_live.server import run
+import sys
+
+try:
+    import sqlalchemy  # noqa: F401 - the server's one dependency (forza_live/core/storage.py)
+except ImportError:
+    sys.exit("Forza Live needs SQLAlchemy: python3 -m pip install --require-hashes -r "
+             "requirements.txt (README.md, Development)")
+
+from forza_live.server import run  # noqa: E402
 
 if __name__ == "__main__":
     run()

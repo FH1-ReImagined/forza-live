@@ -8,7 +8,7 @@ the admin token, see lsp.is_admin): /admin/mute?who=<gamertag|XUID>&minutes=N
 (0 lifts it) stops a player's messages, /admin/kick?who=...&minutes=N drops the player and
 refuses its sign-in for N minutes (a ban; 0 lifts it). Mutes and bans are kept in
 DATA_DIR/moderation.json until they run out. Players mute others for themselves (MUTE;
-kept in friends.json with their friends); a player's blocks (friends.py) hide its
+kept with their friends, friends.py); a player's blocks (friends.py) hide its
 messages too, both ways.
 
 Games say they have chat with HELLO features 0x04 (FEATURE); games without it neither send
@@ -343,7 +343,7 @@ class Chat:
                 muted[k] = time.time()
             elif not on:
                 muted.pop(k, None)
-            self.store.dirty = True
+            self.store.touch(peer.xuid)
             self.send_muted(peer)
         elif op == SAY:
             channel, target = struct.unpack_from(">BQ", body, 1)

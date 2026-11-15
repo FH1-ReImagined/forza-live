@@ -66,6 +66,11 @@ def replace(tmp, path, backup=True):
         pass  # no previous file, or a file system without links: the save still goes on
     os.replace(tmp, path)
     _FROM_BAK.discard(os.path.abspath(path))
+    sync_folder(path)
+
+
+def sync_folder(path):
+    """The folder entry of path (a rename, a new name) flushed to disk."""
     try:
         _fsync_path(os.path.dirname(os.path.abspath(path)), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     except OSError:

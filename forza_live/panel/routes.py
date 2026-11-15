@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 import urllib.parse
 
@@ -518,7 +519,7 @@ def search(server, query):
 
 def key_state(p):
     if not p:
-        return {"state": "unknown", "text": "not in friends.json (never signed in with friends)"}
+        return {"state": "unknown", "text": "no friends record (never signed in with friends)"}
     if p.get("pub"):
         return {"state": "signed", "text": "bound to a signed game's public key",
                 "public_key": p["pub"][:16] + "..."}
@@ -999,9 +1000,21 @@ def challenges_view(server, query):
 # ---- community events (events.py, tools/event_admin.py) ----
 
 def events_call(server, method, path, data):
-    import sqlite3
     try:
-        return 200, server.events.handle(method, path, data)
+        result = server.events.handle(method, path, data)
+    except (ValueError, TypeError, sqlite3.IntegrityError) as e:
+        return 400, {"error": str(e)}
+    except (OSError, sqlite3.Error):
+        log.exception("operator panel: community event storage unavailable")
+        return 500, {"error": "event storage unavailable"}
+    if asyncio.iscoroutine(result):  # an enrollment awaiting its binding's write (events.enroll)
+        return events_later(result)
+    return 200, result
+
+
+async def events_later(result):
+    try:
+        return 200, await result
     except (ValueError, TypeError, sqlite3.IntegrityError) as e:
         return 400, {"error": str(e)}
     except (OSError, sqlite3.Error):

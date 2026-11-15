@@ -28,6 +28,7 @@ from forza_live import server as srv
 from forza_live.competition import scores
 from forza_live.core import durable
 from forza_live.core import journal
+from forza_live.core import storage
 from forza_live.core import limits
 from forza_live.network import xtsw_all as A
 from forza_live.social import friends
@@ -787,6 +788,7 @@ class StopTest(Base):
         server.transport = FakeTransport()
         server.state_path = self.path(srv.STATE_FILE)
         server.friends.store.path = self.path(friends.FILE)
+        self.addCleanup(storage.close_all)  # the friends' database, before the folder goes
         return server
 
     def test_the_stores_without_a_journal_are_saved_before_the_boards(self):
@@ -932,7 +934,7 @@ class TwoFaultsTest(Base):
     def test_a_store_that_fails_at_the_stop_logs_its_own_error_only(self):
         server = self.server()
 
-        def friends_save():
+        def friends_save(timeout=None):
             try:
                 raise ValueError("the friends' own first error")
             except ValueError:

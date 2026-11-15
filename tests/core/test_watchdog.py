@@ -10,7 +10,6 @@ import os
 import re
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 import types
@@ -22,7 +21,7 @@ from unittest import mock
 from forza_live import server as srv
 from forza_live.core import watchdog
 from forza_live.title_services import lsp
-from tests.support import FakeTransport, ROOT
+from tests.support import PYTHON, FakeTransport, ROOT, child_env
 
 HELD = re.compile(r"held the event loop (\d+) ms")
 LATE = re.compile(r"the event loop was (\d+) ms late")
@@ -485,11 +484,10 @@ class FlagTest(unittest.TestCase):
         self.addCleanup(data.cleanup)
         http = free_port(socket.SOCK_STREAM)
         proc = subprocess.Popen(
-            [getattr(sys, "_base_executable", sys.executable),
-             os.path.join(ROOT, "forza_live_server.py"),
+            [PYTHON, os.path.join(ROOT, "forza_live_server.py"),
              "--host", "127.0.0.1", "--port", str(free_port(socket.SOCK_DGRAM)),
              "--http-port", str(http), "--data-dir", data.name, *flags],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_env())
 
         def end():
             # Python 3.12 can lose a SIGTERM: its KeyboardInterrupt, raised while a weakref

@@ -31,6 +31,7 @@ from forza_live.competition import objectives, scores, stats
 from forza_live.content import market
 from forza_live.core import durable
 from forza_live.core import journal
+from forza_live.core import storage
 from forza_live.network import xtsw as x
 from forza_live.social import clubs, friends
 from forza_live.social import notifications as notices
@@ -631,6 +632,7 @@ class StopTest(Base):
         server.state_path = self.path(srv.STATE_FILE)
         server.friends.store.path = self.path(friends.FILE)
         self.addCleanup(server.events.db.close)
+        self.addCleanup(storage.close_all)  # the friends' database, before the folder goes
         return server
 
     def test_the_server_writes_it_before_the_boards_whatever_happens_to_it(self):

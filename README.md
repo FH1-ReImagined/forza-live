@@ -9,7 +9,8 @@ Forza Live is the online server of
 [Forza Horizon 1: ReImagined](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined). It
 stands in for Xbox LIVE and Turn 10's title services, so the PC port can play online: sign-in,
 friends and chat, the Horizon World, the Co-op Festival, leaderboards and Rivals, car clubs,
-photos, videos and designs. One Python 3 program, standard library only.
+photos, videos and designs. One Python 3 program, with one dependency: SQLAlchemy, for its
+database (`forza_live/core/storage.py`).
 
 - **UDP 21200**: sign-in, presence, rendezvous (UDP hole punching) and a relay for the players
   who cannot reach each other directly.
@@ -25,7 +26,7 @@ server on the player's own machine, and a server added by its address connects t
 |------|------|
 | `forza_live_server.py` | the entry point: `python3 forza_live_server.py --help` lists every option |
 | `forza_live/server.py` | the server: the UDP port, the HTTP port, the command line |
-| `forza_live/core/` | signed requests (`auth`, `ed25519`), the signed list of servers (`server_list`), the volunteer relays' list, secrets and tickets (`relays`), abuse limits (`limits`), saves that survive a power cut (`durable`), the journal beside a file too big to write at every change (`journal`), the converted worlds' rooms (`rooms`), the event loop's watchdog (`watchdog`) |
+| `forza_live/core/` | signed requests (`auth`, `ed25519`), the signed list of servers (`server_list`), the volunteer relays' list, secrets and tickets (`relays`), abuse limits (`limits`), saves that survive a power cut (`durable`), the journal beside a file too big to write at every change (`journal`), the database and its writer thread (`storage`), the converted worlds' rooms (`rooms`), the event loop's watchdog (`watchdog`) |
 | `forza_live/network/` | the title services' wire format (`xtsw`) and all its records (`xtsw_all`), the PROXY protocol behind a tunnel (`proxy`), a volunteer relay (`relay_node`, `--relay-only`) and the main server's side of the relays (`relay_broker`) |
 | `forza_live/title_services/` | Turn 10's title services on the HTTP port (`lsp`) and the playlists' round presets (`playground_rounds.xml`) |
 | `forza_live/social/` | friends, chat, car clubs, Message Center notifications, the Discord status message |
@@ -46,13 +47,21 @@ server on the player's own machine, and a server added by its address connects t
 | `accounts/` | the website accounts service for forza.dyotson.dev/api/ (Django, django-allauth, django-ninja): its own dependencies, image and tests ([`accounts/README.md`](accounts/README.md)) |
 | `screening/` | the screening worker for community photos, videos and designs (its own Docker image, [`screening/README.md`](screening/README.md)) |
 | `video/` | the video converter: the game's movie uploads to MP4 with ffmpeg, in a container with no network (its own Docker image, [`video/README.md`](video/README.md)) |
+| `requirements.in`, `requirements.txt` | the server's one dependency (SQLAlchemy), pinned by version and hash |
 | `Dockerfile`, `compose.yaml`, `.env.example` | the server's image and how to run it |
 
 ## Development
 
-Run the server from a checkout (Python 3.12 or newer, nothing to install):
+Run the server from a checkout (Python 3.12 or newer) with its one dependency installed, pinned
+by hash (in a virtual environment if your system's Python wants one: `python3 -m venv .venv`, then
+`.venv/bin/python` in place of `python3`):
 
+    python3 -m pip install --require-hashes -r requirements.txt
     python3 forza_live_server.py --http-port 21201
+
+Its data folder (`--data-dir`, `forza_live_data/` by default) holds `forza_live.sqlite3`, the
+database, beside the stores that still have their own JSON files;
+[operating](docs/operating.md#the-database) says how to back it up and read it.
 
 Run the tests:
 

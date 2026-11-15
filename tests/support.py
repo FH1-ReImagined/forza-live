@@ -4,7 +4,9 @@ that the stored files' running totals are right."""
 
 import contextlib
 import os
+import site
 import struct
+import sys
 import threading
 import time
 import zlib
@@ -22,6 +24,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # is that repository's server/ submodule, or where FORZA_REPO_TOOLS says (the CI checks the files
 # out).
 GAME_TOOLS = os.environ.get("FORZA_REPO_TOOLS") or os.path.join(ROOT, "..", "tools")
+# The interpreter a test starts a server process with: the base one, because a Windows venv's
+# python.exe is a launcher, and terminating it leaves its child server running (holding the data
+# folder's databases open at cleanup). child_env() gives it this interpreter's packages
+# (SQLAlchemy) when the tests run in a venv.
+PYTHON = getattr(sys, "_base_executable", sys.executable)
+
+
+def child_env(env=None, **extra):
+    """os.environ (or env) and extra, with the venv's site-packages on PYTHONPATH in a venv."""
+    env = dict(os.environ if env is None else env, **extra)
+    if sys.prefix != sys.base_prefix:  # a venv: PYTHON is its base, without its packages
+        paths = [p for p in site.getsitepackages() if os.path.isdir(p)]
+        if env.get("PYTHONPATH"):
+            paths.append(env["PYTHONPATH"])
+        env["PYTHONPATH"] = os.pathsep.join(paths)
+    return env
 
 
 class RaceClock:

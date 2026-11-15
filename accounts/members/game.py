@@ -2,8 +2,11 @@
 
 The game server (forza_live/) keeps its data in FORZA_GAME_DATA, which this service mounts
 read-only. It reads, with the game server's own code:
-- friends.json (forza_live.social.friends.Store): the public key each XUID is bound to, read
-  again whenever the file changes;
+- the friends (forza_live.social.friends.Reader): the public key each XUID is bound to, a record
+  at a time, from its database, forza_live.sqlite3, as its last commit has it, or from
+  friends.json while the database does not hold them (a game server from before the database,
+  or rolled back to one), so that this service and the game server can be updated in either
+  order;
 - players/<XUID>.json (forza_live.core.durable): the gamertag, the first result on the boards
   (firstScore: lsp.first_score, and lsp.backfill_first_scores for results from before it) and,
   for the optional likes wait only, the signed sign-ins (firstSigned, signedDays:
@@ -35,7 +38,7 @@ from members.models import SignedNonce
 log = logging.getLogger("members")
 
 _lock = threading.Lock()
-_store = {"mtime": None, "store": None}
+_store = {"store": None}
 _configured = {"dir": None}
 
 
@@ -60,23 +63,21 @@ def configure():
         videos.configure(folder)
         auth.SERVER_NAMES.clear()
         auth.SERVER_NAMES.add(auth.server_name(settings.SITE_HOST))
-        _store.update({"mtime": None, "store": None})
+        with _lock:
+            if _store["store"] is not None:
+                _store["store"].close()
+            _store["store"] = None
         _configured["dir"] = folder
 
 
 def store():
-    """The game server's friends.Store, as friends.json has it now."""
+    """The game server's friends, read-only and as it has them now (friends.Reader: a record at
+    a time, from its database or its friends.json, leaving out what the game server forgets at
+    its start, FORGET_DAYS)."""
     configure()
-    path = os.path.join(str(settings.GAME_DATA), friends.FILE)
-    try:
-        mtime = os.stat(path).st_mtime_ns
-    except OSError:
-        mtime = None
     with _lock:
-        if mtime != _store["mtime"] or _store["store"] is None:
-            s = friends.Store(path)
-            s.load()  # forgets what the game server forgets at its start (FORGET_DAYS)
-            _store.update({"mtime": mtime, "store": s})
+        if _store["store"] is None:
+            _store["store"] = friends.Reader(str(settings.GAME_DATA))
         return _store["store"]
 
 

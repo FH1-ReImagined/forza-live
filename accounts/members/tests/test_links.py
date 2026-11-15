@@ -1,10 +1,12 @@
 """The game link (members.links, members.game): the launcher's signed calls against a game
-server's data folder made here (friends.json, players/, banned_xuids.json), and the website's
+server's data folder made here (its friends database, players/, banned_xuids.json), and the website's
 peek, claim and remove. Every check of a signed request (signature, server name, path, clock,
 replay in this worker and in another, unbound and legacy keys, browsers), the start's checks
 (ban, a result on the boards, limits), both confirmations, the rules (one key per account, moving, once a
 day, unlink and sign out from both sides) and the pinned key (frozen, waiting)."""
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -19,7 +21,8 @@ from django.core.management import call_command
 from django.test import Client, override_settings
 from django.utils import timezone
 
-from forza_live.core import auth, ed25519
+from forza_live.core import auth, ed25519, storage
+from forza_live.social import friends
 from members import api, links
 from members.management.commands import nightly
 from members.models import GameLink, LinkRequest, SignedNonce, User
@@ -46,13 +49,13 @@ class LinkTest(AccountsTest):
         super().setUp()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        self.addCleanup(storage.close_all)  # the game server's database, before the folder goes
         self.data = Path(tmp.name)
         (self.data / "players").mkdir()
         override = override_settings(GAME_DATA=self.data)
         override.enable()
         self.addCleanup(override.disable)
         self.friends = {}
-        self.stamp = 1_000_000_000_000_000_000
         self.player(XUID, SEED, "DriverA")
         self.game_client = Client(HTTP_HOST=HOST)
 
@@ -73,10 +76,10 @@ class LinkTest(AccountsTest):
         (self.data / "players" / ("%016X.json" % xuid)).write_text(json.dumps(record))
 
     def write_friends(self):
-        path = self.data / "friends.json"
-        path.write_text(json.dumps({"version": 1, "players": self.friends}))
-        self.stamp += 1_000_000  # a new mtime every time, however fast
-        os.utime(path, ns=(self.stamp, self.stamp))
+        """The friends as the game server keeps them: its database in the data folder."""
+        db = storage.database(str(self.data))
+        storage.ensure(db, friends.STORAGE)
+        db.call(friends.replace_all, self.friends)
 
     def ban(self, *xuids):
         (self.data / "banned_xuids.json").write_text(json.dumps(["%016X" % x for x in xuids]))
@@ -348,7 +351,7 @@ class StartChecks(LinkTest):
     def test_a_key_just_bound_is_found(self):
         stranger = 0x0009000000000077
         self.assertEqual(self.start(xuid=stranger, seed=SEED_C)[0].status_code, 401)
-        self.player(stranger, SEED_C, "Newcomer")  # friends.json written by the game server
+        self.player(stranger, SEED_C, "Newcomer")  # its binding written by the game server
         self.assertEqual(self.start(xuid=stranger, seed=SEED_C)[0].status_code, 200)
 
 
@@ -705,3 +708,66 @@ class Upkeep(LinkTest):
 
     def test_the_migrations_are_complete(self):
         call_command("makemigrations", "members", "--check", "--dry-run", verbosity=0)
+
+
+class FromFriendsJson:
+    """The same checks against a game server from before its database: the friends in
+    friends.json, as it wrote them (a new mtime at every write). The accounts service of this
+    version reads either, so it may be updated before the game server or after it."""
+
+    stamp = 1_000_000_000_000_000_000
+
+    def write_friends(self):
+        path = self.data / friends.FILE
+        path.write_text(json.dumps({"version": 1, "players": self.friends}))
+        FromFriendsJson.stamp += 1_000_000  # a new mtime every time, however fast
+        os.utime(path, ns=(self.stamp, self.stamp))
+
+
+class FlowFromFriendsJson(FromFriendsJson, Flow):
+    pass
+
+
+class StartChecksFromFriendsJson(FromFriendsJson, StartChecks):
+    pass
+
+
+class PinningFromFriendsJson(FromFriendsJson, Pinning):
+    pass
+
+
+class TheGameServerMovesToItsDatabase(FromFriendsJson, LinkTest):
+    """The game server updated while this service runs: links made against friends.json still
+    check out against the database it imported the file into, and a key bound after it is
+    found there; and back, when the operator rolls the game server back."""
+
+    def test_links_go_on_across_the_import_and_a_rollback(self):
+        self.player(XUID_B, SEED_B, "DriverB")
+        self.started(xuid=XUID_B, seed=SEED_B)  # friends.json only
+        store = friends.Store(str(self.data / friends.FILE))
+        with self.assertLogs("forza-live", "INFO"):
+            store.load()  # the game server's first start on its database
+        self.assertFalse((self.data / friends.FILE).exists())
+        self.started()  # a key from the file, read from the database now
+        stranger = 0x0009000000000077
+        self.assertEqual(self.start(xuid=stranger, seed=SEED_C)[0].status_code, 401)
+        store.get(stranger, create=True, own=True)
+        store.bind(store.get(stranger), pub=ed25519.public_key(SEED_C).hex(), xuid=stranger)
+        self.assertTrue(store.save())  # bound by the game server, in its database
+        self.player_record(stranger, "Newcomer")
+        self.assertEqual(self.start(xuid=stranger, seed=SEED_C)[0].status_code, 200)
+        storage.close_all()  # stopped, and rolled back to the version before the database
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(storage.main(["--data-dir", str(self.data), "rollback", "friends"]),
+                             0)
+        data = json.loads((self.data / friends.FILE).read_text())
+        data["players"]["%016X" % XUID_D] = dict(self.friends["%016X" % XUID_B],
+                                                pub=ed25519.public_key(SEED_D).hex())
+        (self.data / friends.FILE).write_text(json.dumps(data))  # that version binds a key
+        self.player_record(XUID_D, "DuringRollback")
+        self.started(xuid=XUID_D, seed=SEED_D)
+
+    def player_record(self, xuid, tag):
+        record = {"gamertag": tag, "logons": 1, "firstSigned": int(time.time()) - 86400,
+                  "signedDays": 1, "firstScore": int(time.time()) - 3600}
+        (self.data / "players" / ("%016X.json" % xuid)).write_text(json.dumps(record))

@@ -1,5 +1,6 @@
 """Friends on the Forza Live server (#92): requests by gamertag, accept or decline, remove
-and block, kept per player (XUID) in DATA_DIR/friends.json.
+and block, kept per player (XUID) in the server's database (core/storage.py, #75; before it in
+DATA_DIR/friends.json, which the first start imports).
 
 Games up to v0.1.14 count every player in their room as a friend (the room's roster,
 PEERS). A game that sends FEATURE_FRIENDS in its HELLO asks the server for its friends
@@ -43,23 +44,42 @@ bounded rate, auth.FirstUse) and as many without one, which only other players' 
 name someone blocked, a request to a player who has not signed in with a key): those never take
 a new player's place, and the oldest that hold nothing but a name go when there are too many. So
 no sender can grow the file without end, nor keep new players out of it.
+
+On disk (#75): two tables of the server's database (storage.FILE). friends_players has a row per
+record (xuid, name, seen, key, pub, the names of its maps, and any other field as JSON in extra);
+friends_relations a row per entry of its maps (xuid, map: friends, in, out, blocked or muted,
+other, since). The Store keeps every record in memory, as before, and every read is from there.
+How a change reaches the tables is storage.Records' (the Store is one, with KIND): a change
+marks the record (touch); right after the work that made it (loop.call_soon), the changed
+records' rows are made, on the loop, and handed to the database's writer thread as one write
+(write_rows), which replaces their rows; the loop never waits for the disk. save() waits for
+every change so far to be committed: the stop, and a tool; written() is the same for a
+coroutine, off the loop (an event's enrollment, events.enroll). A write that fails is made again
+with the records as they are then, at the next tick (maybe_save). A kill loses at most the
+changes of the last few milliseconds that were not committed yet; the database is never left
+half written.
 """
 
-import asyncio
+import collections
 import hashlib
 import json
 import logging
 import os
-import pickle
 import struct
 import threading
 import time
 import zlib
 
+from sqlalchemy import (Column, Float, ForeignKey, MetaData, Table, Text, bindparam,
+                        literal_column, select)
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
+
 from forza_live.core import auth
 from forza_live.core import bans
-from forza_live.core import limits
 from forza_live.core import durable
+from forza_live.core import limits
+from forza_live.core import storage
 
 log = logging.getLogger("forza-live")
 
@@ -70,7 +90,9 @@ R_LIST, R_SAME, R_RESULTS, R_NOTICE = 16, 17, 18, 19
 FRIEND, INCOMING, OUTGOING, BLOCKED = 1, 2, 3, 4
 N_REQUEST, N_ACCEPTED, N_TEXT = 1, 2, 3
 
-FILE = "friends.json"
+FILE = "friends.json"  # the store before the database (imported once, then kept as .imported)
+NAME = "friends"  # its row in the database's stores table
+VERSION = 1  # of the tables below
 MAX_FRIENDS = 200
 MAX_PENDING = 50
 MAX_BLOCKED = 200
@@ -86,6 +108,171 @@ FORGET_DAYS = 180
 SPARE_SEARCH = 60.0
 KEY_SIZE = 16
 STATUS_MAX = 60
+
+# --- the tables (the module's docstring, "On disk") ---
+
+TABLES = MetaData()
+PLAYERS = Table(
+    "friends_players", TABLES,
+    Column("xuid", Text, primary_key=True),  # the record's key: its XUID, 16 hex digits
+    Column("name", Text),  # NULL: the record has no such field (and so for seen, key and pub)
+    Column("seen", Float),
+    Column("key", Text),  # SHA-256 of a raw friends key, "" for none
+    Column("pub", Text),  # the public key it is bound to (hex)
+    Column("maps", Text, nullable=False),  # the record's maps, comma separated
+    Column("extra", Text))  # any other field, as JSON (NULL: none)
+RELATIONS = Table(
+    "friends_relations", TABLES,
+    Column("xuid", Text, ForeignKey("friends_players.xuid", ondelete="CASCADE"),
+           primary_key=True),
+    Column("map", Text, primary_key=True),  # friends, in, out, blocked, muted
+    Column("other", Text, primary_key=True),  # the other player's XUID
+    Column("since", Float))
+SCALARS = {"name": str, "seen": (int, float), "key": str, "pub": str}
+MAPS = ("friends", "in", "out", "blocked", "muted")
+ROWS_AT_ONCE = 500  # keys in one IN (...) of a write
+
+
+def _number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def rows_of(k, p):
+    """The record's row and its relations' rows. A field in its usual form is a column (a map of
+    XUID -> time is relations' rows); one in any other form goes as it is into extra, so that
+    every record reads back as it was."""
+    row = {"xuid": k, "name": None, "seen": None, "key": None, "pub": None}
+    maps, extra, relations = [], {}, []
+    for field, value in p.items():
+        kind = SCALARS.get(field)
+        if kind is not None and isinstance(value, kind) and (kind is str or _number(value)):
+            row[field] = value
+        elif field in MAPS and isinstance(value, dict) and all(
+                isinstance(o, str) and _number(t) for o, t in value.items()):
+            maps.append(field)
+            relations += [{"xuid": k, "map": field, "other": o, "since": t}
+                          for o, t in value.items()]
+        else:
+            extra[field] = value
+    row["maps"] = ",".join(maps)
+    row["extra"] = json.dumps(extra) if extra else None
+    return row, relations
+
+
+def read_all(conn):
+    """{xuid hex: record} as the tables have them, in the order the records were made (rowid)."""
+    maps = collections.defaultdict(dict)
+    for r in conn.execute(select(RELATIONS.c.xuid, RELATIONS.c.map, RELATIONS.c.other,
+                                 RELATIONS.c.since).order_by(literal_column("rowid"))):
+        maps[r.xuid, r.map][r.other] = r.since
+    players = {}
+    for r in conn.execute(select(PLAYERS).order_by(literal_column("rowid"))):
+        players[r.xuid] = _record(r, maps)
+    return players
+
+
+ONE = (select(PLAYERS, RELATIONS.c.map.label("rel_map"), RELATIONS.c.other, RELATIONS.c.since)
+       .select_from(PLAYERS.outerjoin(RELATIONS, RELATIONS.c.xuid == PLAYERS.c.xuid))
+       .where(PLAYERS.c.xuid == bindparam("k")).order_by(RELATIONS.c.xuid, literal_column(
+           "friends_relations.rowid")))
+
+
+def read_one(conn, k):
+    """The record of xuid hex k as the tables have it, or None: one statement."""
+    found = conn.execute(ONE, {"k": k}).all()
+    if not found:
+        return None
+    maps = collections.defaultdict(dict)
+    for e in found:
+        if e.rel_map is not None:
+            maps[k, e.rel_map][e.other] = e.since
+    return _record(found[0], maps)
+
+
+def _record(r, maps):
+    p = {f: getattr(r, f) for f in SCALARS if getattr(r, f) is not None}
+    for m in r.maps.split(",") if r.maps else ():
+        p[m] = maps.get((r.xuid, m), {})
+    if r.extra:
+        p.update(json.loads(r.extra))
+    return p
+
+
+def _chunks(items):
+    items = list(items)
+    for i in range(0, len(items), ROWS_AT_ONCE):
+        yield items[i:i + ROWS_AT_ONCE]
+
+
+def _insert(conn, rows, relations, upsert=False):
+    if rows:
+        stmt = sqlite_insert(PLAYERS)
+        if upsert:
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[PLAYERS.c.xuid],
+                set_={c.name: stmt.excluded[c.name] for c in PLAYERS.c if c.name != "xuid"})
+        conn.execute(stmt, rows)
+    if relations:
+        conn.execute(RELATIONS.insert(), relations)
+
+
+def replace_all(conn, players):
+    """The tables made to hold just `players` ({xuid hex: record}; the writer's)."""
+    conn.execute(RELATIONS.delete())
+    conn.execute(PLAYERS.delete())
+    rows, relations = [], []
+    for k, p in players.items():
+        row, rel = rows_of(k, p)
+        rows.append(row)
+        relations += rel
+    _insert(conn, rows, relations)
+
+
+def write_rows(conn, made, drop):
+    """The changed records' rows (rows_of's, as storage.Records.flush made them, in the order the
+    records changed): their relations replaced, the records in `drop` (gone, or made anew:
+    deleted first, so that a new one's row comes last, as its record does in memory) deleted,
+    the others put."""
+    rows = [row for row, _ in made]
+    relations = [r for _, rel in made for r in rel]
+    put = [r["xuid"] for r in rows]
+    keys = put + sorted(set(drop) - set(put))
+    for chunk in _chunks(keys):
+        conn.execute(RELATIONS.delete().where(RELATIONS.c.xuid.in_(chunk)))
+    for chunk in _chunks(drop):
+        conn.execute(PLAYERS.delete().where(PLAYERS.c.xuid.in_(chunk)))
+    _insert(conn, rows, relations, upsert=True)
+
+
+def parse_file(data):
+    """The records of a friends.json ({"version": 1, "players": {...}}), checked as the store's
+    load before the database read them: a file of another shape raises."""
+    players = data["players"]
+    if not isinstance(players, dict):
+        raise TypeError("players: not an object")
+    for k, p in players.items():
+        if not isinstance(p, dict) or not all(isinstance(p[m], dict) for m in MAPS[:4]):
+            raise TypeError("players[%r]: not a record" % k)
+    return players
+
+
+def export_data(conn):
+    """friends.json as the versions before the database wrote it (storage export)."""
+    return {"version": 1, "players": read_all(conn)}
+
+
+# The friends' tables for the storage layer (core/storage.py): its writes, import and export.
+STORAGE = storage.Kind(NAME, VERSION, TABLES, read_all, replace_all, rows_of, write_rows,
+                       file=FILE, parse_file=parse_file, export_data=export_data)
+
+
+def forgotten(p, cutoff):
+    """A record the start forgets: no key, nothing in its maps, not seen since cutoff. A record
+    with a key stays however long its player is away: forgotten, its XUID would go to the first
+    key that names it, with the player's record and scores."""
+    return not (p.get("friends") or p.get("in") or p.get("out") or p.get("blocked")
+                or p.get("pub") or p.get("key") or not _number(p.get("seen"))
+                or p["seen"] >= cutoff)
 
 
 def text8(s):
@@ -112,26 +299,38 @@ class Full(Exception):
     """The store has no room for another record without a key (Store.get)."""
 
 
-class Store:
+class Store(storage.Records):
     """The players' relations: {xuid: {"name", "seen", "key", "friends", "in", "out",
     "blocked"}}, each relation a {xuid hex: since} map, kept symmetric (A's "out" is B's
-    "in")."""
+    "in"). path: friends.json in the data folder, whose database (storage.FILE) the store is
+    kept in once loaded; None: in memory only. Its records, their changes and their writes are
+    storage.Records' (mark, flush, save, written)."""
+
+    KIND = STORAGE
 
     def __init__(self, path=None):
-        self.path = path
-        self.players = {}
-        self.dirty = False
-        self.saved = 0.0
+        super().__init__(path)
         self.on_rebind = []  # fn(xuid, old binding, new binding): auth.rebind
         self.first_use = auth.FirstUse()  # the budgets of new bindings
         self.checks = auth.Checks()  # and of signature checks per client address
         # The records with a key ("pub" or "key"): counted as they are bound (bind) and again
-        # at every load and save.
+        # at every load, and every 2 s while the store changes (maybe_save).
         self.keyed = 0
         self.searched = 0.0  # monotonic time until which spare() does not look for room again
-        self.saving = False  # a thread is writing the file (maybe_save)
-        self._file = threading.Lock()  # one writer of the file at a time
-        self._saves = self._written = 0  # saves begun, and the latest of them that is on disk
+        self._counted = 0.0  # monotonic time of the last count() by maybe_save
+
+    @property
+    def players(self):
+        return self.records
+
+    @players.setter
+    def players(self, players):
+        """Replaced as a whole (a test, a tool): written as a whole."""
+        self.records = players
+
+    def touch(self, xuid):
+        """The XUID's record changed (a caller that changes it in place, chat's mutes)."""
+        self.mark(self.hx(xuid))
 
     @staticmethod
     def hx(xuid):
@@ -168,7 +367,7 @@ class Store:
                                                        or p["blocked"] or p.get("muted")))
         for _, k in names[:over + max(1, cap // 10)]:  # a tenth at once: not a scan for each
             del self.players[k]
-            self.dirty = True
+            self.mark(k)
         if len(self.players) - self.keyed < cap:
             return True
         self.searched = now + SPARE_SEARCH
@@ -187,18 +386,25 @@ class Store:
                            % len(self.players))
             p = self.players[k] = {"name": "", "seen": time.time(), "key": "", "friends": {},
                                    "in": {}, "out": {}, "blocked": {}}
-            self.dirty = True
+            self.mark(k, fresh=True)
         return p
 
-    def bind(self, p, pub="", key=""):
-        """Binds the record to a public key (hex), or to the SHA-256 of a raw friends key."""
+    def bind(self, p, pub="", key="", xuid=None):
+        """Binds the record (of `xuid`) to a public key (hex), or to the SHA-256 of a raw friends
+        key."""
         if not self.has_key(p):
             self.keyed += 1
         if pub:
             p["pub"], p["key"] = pub, ""
         else:
             p["key"] = key
-        self.dirty = True
+        if xuid is not None:
+            self.mark(self.hx(xuid))
+        else:  # found by the record itself: a binding is rare, a scan is cheap enough
+            for k, q in self.players.items():
+                if q is p:
+                    self.mark(k)
+                    break
 
     def relation(self, a, b):
         """What b is to a (FRIEND, INCOMING, OUTGOING, BLOCKED, or 0)."""
@@ -222,10 +428,10 @@ class Store:
         name = limits.clean_gamertag(name, xuid) if name else name
         if name and p["name"] != name:
             p["name"] = name
-            self.dirty = True
+            self.touch(xuid)
         if time.time() - p["seen"] > 3600:
             p["seen"] = time.time()
-            self.dirty = True
+            self.touch(xuid)
 
     def claim(self, xuid, key):
         """True if this raw friends key may use the XUID's friends (binding it on first use).
@@ -241,7 +447,7 @@ class Store:
             return False
         h = key_hash(key)
         if not p["key"]:
-            self.bind(p, key=h)
+            self.bind(p, key=h, xuid=xuid)
             return True
         return p["key"] == h
 
@@ -250,13 +456,13 @@ class Store:
         pa, pb = self.get(a), self.get(b)
         ka, kb = self.hx(a), self.hx(b)
         changed = False
-        for p, k in ((pa, kb), (pb, ka)):
+        for p, k, own in ((pa, kb, ka), (pb, ka, kb)):
             if not p:
                 continue
             for field in ("friends", "in", "out"):
                 if p[field].pop(k, None) is not None:
                     changed = True
-        self.dirty |= changed
+                    self.mark(own)
         return changed
 
     def befriend(self, a, b):
@@ -264,23 +470,25 @@ class Store:
         now = time.time()
         self.get(a, True)["friends"][self.hx(b)] = now
         self.get(b, True)["friends"][self.hx(a)] = now
-        self.dirty = True
+        self.touch(a)
+        self.touch(b)
 
     def ask(self, a, b):
         now = time.time()
         self.get(a, True)["out"][self.hx(b)] = now
         self.get(b, True)["in"][self.hx(a)] = now
-        self.dirty = True
+        self.touch(a)
+        self.touch(b)
 
     def block(self, a, b):
         self.unlink(a, b)
         self.get(a, True)["blocked"][self.hx(b)] = time.time()
-        self.dirty = True
+        self.touch(a)
 
     def unblock(self, a, b):
         p = self.get(a)
         if p and p["blocked"].pop(self.hx(b), None) is not None:
-            self.dirty = True
+            self.touch(a)
             return True
         return False
 
@@ -295,89 +503,157 @@ class Store:
         p = self.get(xuid)
         return limits.clean_gamertag(p["name"] if p else "", xuid)
 
-    # --- the file ---
+    # --- the database (the module's docstring, "On disk"; core/storage.py's Records) ---
 
     def load(self):
+        """The records from the database in the data folder (friends.json imported into it at
+        the first start: storage.import_once), what a start forgets left out (and deleted from
+        the tables). storage.Refused, logged, when they cannot be read: the server does not start
+        on an empty store, whose first change would put it over what it could not read."""
         if not self.path:
             return
-        try:
-            data = durable.load(self.path)
-            players = data["players"]
-            cutoff = time.time() - FORGET_DAYS * 86400
-            # A record with a key stays however long its player is away: forgotten, its XUID
-            # would go to the first key that names it, with the player's record and scores.
-            self.players = {k: p for k, p in players.items()
-                            if p["friends"] or p["in"] or p["out"] or p["blocked"]
-                            or p.get("pub") or p.get("key") or p["seen"] >= cutoff}
-            self.count()
-            log.info("friends: %d player(s) from %s, %d with a key", len(self.players), self.path,
-                     self.keyed)
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-            log.warning("cannot read %s: %s", self.path, e)
-
-    def write(self, save, players):
-        """The file written and flushed. players: the records, or a pickle of them (a thread's
-        own copy). False, logged, when it could not be written. A save older than the one on
-        disk writes nothing: a thread's copy never lands on a later save()."""
-        with self._file:
-            if save < self._written:
-                return True
-            if isinstance(players, bytes):
-                players = pickle.loads(players)
-            try:
-                tmp = self.path + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"version": 1, "players": players}, f)
-                durable.replace(tmp, self.path)
-            except OSError as e:
-                log.warning("cannot write %s: %s", self.path, e)
-                return False
-            self._written = save
-            return True
-
-    def save(self):
-        """The file written here and now: True when it is on disk. On the event loop only where
-        the caller needs that answer (an event's enrollment, the server's stop): the file is
-        megabytes, see maybe_save."""
-        if not self.path:
-            return False
-        self._saves += 1
-        if not self.write(self._saves, self.players):
-            return False
-        self.dirty = False
-        self.saved = time.monotonic()
+        players = self.open()
+        cutoff = time.time() - FORGET_DAYS * 86400
+        kept = {k: p for k, p in players.items() if not forgotten(p, cutoff)}
+        self.loaded(kept, gone=[k for k in players if k not in kept])
         self.count()
-        return True
+        log.info("friends: %d player(s) from %s, %d with a key", len(self.players), self.db.name,
+                 self.keyed)
+
+    def save(self, timeout=storage.CLOSE_WAIT):
+        ok = super().save(timeout)
+        if self.path:
+            self.count()
+        return ok
 
     def maybe_save(self):
-        """Every second from the main loop: a changed store is written, at most every 2 s, by
-        a thread, from a copy made here. The copy (a pickle) takes 3 ms for a file of 1.7 MB on
-        a fast desktop, where writing the JSON on the loop took 45 ms, and more on a slower
-        server (#67). A write that fails leaves the store changed, for the next round."""
-        if not self.dirty or self.saving or time.monotonic() - self.saved < 2:
-            return
+        """Every second from the main loop: a write that failed is made again (Records.tick),
+        and the records with a key are counted again every 2 s while the store changes. A change
+        is handed to the writer right after the work that made it; this is for what is left."""
+        changed = self.tick()
+        now = time.monotonic()
+        if changed and now - self._counted >= 2:
+            self._counted = now
+            self.count()
+
+
+class Reader:
+    """The records as the server has them now, one at a time and read-only, for another process:
+    the website accounts service reads the data folder through a read-only mount
+    (accounts/members/game.py). get() as Store.get (what a start forgets left out), with the
+    has_key and hx of a Store, so that auth.bound_pub and auth.check_request take it as one.
+
+    It reads whichever the server keeps the friends in, so that the accounts service and the
+    server can be updated in either order: the database once it holds the store
+    (storage.holds: it imported friends.json, or started without one, and no rollback is
+    waiting), else friends.json while it is there (a server from before the database, one that
+    has not imported it yet, a rollback to one), read whole as the previous versions read it,
+    again whenever it changes. Each thread keeps its connection to the database while the file
+    stays the same file (an open connection reads every commit; a restored copy is a new file);
+    one that could only read the file as it is (the server stopped, the folder read-only) is not
+    kept, so the next get sees a server that started meanwhile."""
+
+    hx = staticmethod(lambda xuid: "%016X" % xuid)
+
+    def __init__(self, folder):
+        self.path = os.path.join(folder, storage.FILE)
+        self.file = os.path.join(folder, FILE)
+        self.engines = None
+        self.local = threading.local()
+        self._lock = threading.Lock()  # the file's records, read again by one thread at a time
+        self._from_file = (None, {})  # (the file's stat, its records)
+
+    @staticmethod
+    def has_key(p):
+        return Store.has_key(p)
+
+    def get(self, xuid, create=False, own=False):
+        p = self._read(self.hx(xuid))
+        if p is None or forgotten(p, time.time() - FORGET_DAYS * 86400):
+            return None
+        return p
+
+    def _read(self, k):
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self.save()  # no event loop (a tool, a test): here
-            return
-        if not self.path:
-            return
-        self._saves += 1
-        copy = pickle.dumps(self.players, pickle.HIGHEST_PROTOCOL)
-        self.dirty, self.saving, self.saved = False, True, time.monotonic()
-        self.count()
+            file_there = os.path.lexists(self.file)
+            st = os.stat(self.path)
+        except OSError:  # no database: a server from before it (or none yet)
+            self._drop()
+            return self._file_record(k) if file_there else None
+        if self.engines is None:
+            self.engines = (storage.engine_for(self.path, read_only=True, fallback=False),
+                            storage.engine_for(self.path, read_only=True, immutable=True))
+        local, same = self.local, (st.st_dev, st.st_ino)
+        if getattr(local, "conn", None) is not None and local.file != same:
+            self._drop()
+        try:
+            conn, kept = getattr(local, "conn", None), True
+            if conn is None:
+                try:
+                    conn = self.engines[0].connect()
+                except SQLAlchemyError:
+                    conn, kept = self.engines[1].connect(), False
+                if kept:
+                    local.conn, local.file = conn, same
+            try:
+                with conn.begin():
+                    # friends.json beside it: the database is the store only once it holds it
+                    from_file = file_there and not storage.holds(*_note(conn))
+                    p = None if from_file else read_one(conn, k)
+            finally:
+                if not kept:
+                    conn.close()
+        except SQLAlchemyError as e:  # no tables yet (a server before its first start), a lock
+            self._drop()
+            if file_there:
+                return self._file_record(k)
+            log.warning("friends: %s cannot be read now: %s", self.path, e)
+            return None
+        return self._file_record(k) if from_file else p
 
-        def done(written):
-            self.saving = False
-            if written.cancelled() or written.exception() or not written.result():
-                self.dirty = True
-                if not written.cancelled() and written.exception():  # write() logs an OSError
-                    log.error("cannot write %s: %r", self.path, written.exception())
+    def _file_record(self, k):
+        """The record in friends.json, read whole when the file changed (durable.load: its .bak
+        when it is damaged), or None."""
+        with self._lock:
+            try:
+                st = os.stat(self.file)
+                stamp = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            except OSError:
+                return None
+            if self._from_file[0] != stamp:
+                try:
+                    players = parse_file(durable.load(self.file))
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                    log.warning("friends: %s cannot be read now: %s", self.file, e)
+                    return None
+                self._from_file = (stamp, players)
+            return self._from_file[1].get(k)
 
-        loop.run_in_executor(None, self.write, self._saves, copy).add_done_callback(done)
+    def _drop(self):
+        conn = getattr(self.local, "conn", None)
+        self.local.conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except SQLAlchemyError:
+                pass
+
+    def close(self):
+        """This thread's connection closed, and the engines (another thread's connection closes
+        with its thread)."""
+        self._drop()
+        for engine in self.engines or ():
+            engine.dispose()
+        self.engines = None
+        self._from_file = (None, {})
+
+
+def _note(conn):
+    """The friends' (revision, note) in the stores table, (0, {}) without one."""
+    try:
+        return storage.state(conn, NAME)
+    except SQLAlchemyError:  # a database without the stores table
+        return 0, {}
 
 
 class Friends:

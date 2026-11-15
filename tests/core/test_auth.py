@@ -18,6 +18,7 @@ from unittest import mock
 
 from forza_live.core import auth
 from forza_live.core import ed25519
+from forza_live.core import storage
 from forza_live.social import friends
 from forza_live.title_services import lsp
 from forza_live import server as srv
@@ -140,6 +141,7 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         lsp.DATA_DIR = self.old_dir
+        storage.close_all()  # a friends database a test made there, before the folder goes
         self.tmp.cleanup()
         reset_auth()
 
