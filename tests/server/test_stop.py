@@ -178,16 +178,34 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         status instead of 0 (a third signal 20 ms into a stop of the busy server, 179 times in
         700)."""
         stop = srv.StopRequest().install(self.loop)
-        stop.block()  # run(): the loop's close puts Python's handlers back meanwhile
-        self.take_off()
-        if stop.blocked is not None:  # (POSIX) a signal then waits, and is dropped after
-            signal.raise_signal(signal.SIGTERM)
-        stop.quiet()
-        self.assertIsNone(stop.blocked)
+        stop.end()
         for number in srv.STOP_SIGNALS:
             self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
         signal.raise_signal(signal.SIGINT)  # nothing happens
+        signal.raise_signal(signal.SIGTERM)
+        await asyncio.sleep(0.05)
         self.assertEqual(stop.came, [])
+        stop.end()  # (run() again, after main())
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
+
+class EndTest(unittest.TestCase):
+    def setUp(self):
+        put_back(self)
+
+    def test_the_loops_close_no_longer_touches_the_signals(self):
+        """end() takes the signals off the loop while it is open: its close then leaves SIG_IGN
+        in place, and no thread still running can be ended by a SIGTERM with Python's default
+        action (the main thread's mask covered only the main thread)."""
+        loop = asyncio.new_event_loop()
+        try:
+            stop = srv.StopRequest().install(loop)
+            stop.end()
+            self.assertEqual(stop.taken, [])
+        finally:
+            loop.close()
+        for number in srv.STOP_SIGNALS:
+            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
 
 
 class StopAcceptingTest(unittest.IsolatedAsyncioTestCase):
@@ -243,6 +261,32 @@ class HeldTest(unittest.TestCase):
             "were written: ignored until they were"])
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.default_int_handler)
 
+    def test_a_flood_costs_the_saves_nothing(self):
+        """After the first held signal the signals are SIG_IGN until the log has told of it: a
+        flood of them is not a handler's call each, nor a byte each in the loop's wakeup pipe
+        (which filled, and printed a warning for every signal after)."""
+        signal.signal(signal.SIGTERM, signal.default_int_handler)
+        held = srv.hold_stop_signals()
+        noted = signal.getsignal(signal.SIGTERM)
+        signal.raise_signal(signal.SIGINT)
+        for number in srv.STOP_SIGNALS:
+            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
+        for _ in range(2000):
+            signal.raise_signal(signal.SIGTERM)  # ignored by the system itself
+        self.assertEqual(held[0], [signal.SIGINT])
+        with self.assertLogs("forza-live", "INFO") as logs:
+            srv.tell_held(held, srv.SMALL_STORES)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIs(signal.getsignal(signal.SIGTERM), noted)  # the next part notes one again
+        for _ in range(2000):
+            signal.raise_signal(signal.SIGTERM)
+        with self.assertLogs("forza-live", "INFO") as more:
+            srv.release_stop_signals(held, srv.JOURNALED_STORES)
+        self.assertEqual(more.output, [
+            "INFO:forza-live:stop: SIGTERM again while notifications.json and scoreboards.json "
+            "were written: ignored until they were"])
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.default_int_handler)
+
 
 def free_port(kind=socket.SOCK_DGRAM):
     s = socket.socket(socket.AF_INET, kind)
@@ -279,6 +323,45 @@ class Stop(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Stop())
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+# A server with a Discord status whose update takes 3 s (a slow network: it can take tens of
+# seconds), its ticks 100 times faster (the update every 0.3 s instead of 30 s), and a line
+# when its HTTP port takes no new connection.
+SLOW_DISCORD = """
+import logging, os, sys, time
+sys.path.insert(0, os.getcwd())
+from forza_live import server as srv
+from forza_live.social import discord_status
+log = logging.getLogger("forza-live")
+def update(status, data_dir, now=None):
+    log.info("test: the status update starts")
+    time.sleep(3)
+    log.info("test: the status update ends")
+discord_status.enabled = lambda: True
+discord_status.update = update
+discord_status.offline = lambda data_dir: log.info("test: the status says offline")
+real_wait = srv.StopRequest.wait
+async def wait(self, seconds):
+    return await real_wait(self, seconds / 100)
+srv.StopRequest.wait = wait
+real_stop_accepting = srv.stop_accepting
+def stop_accepting(listening):
+    real_stop_accepting(listening)
+    log.info("test: no new connection")
+srv.stop_accepting = stop_accepting
+sys.argv = ["forza_live_server.py"] + sys.argv[1:]
+srv.run()
+"""
+# A server whose HTTP port cannot be taken off the loop at the stop (a closed socket's fd -1).
+FAILED_STEP = """
+import os, sys
+sys.path.insert(0, os.getcwd())
+from forza_live import server as srv
+def stop_accepting(listening):
+    raise ValueError("Invalid file descriptor: -1")
+srv.stop_accepting = stop_accepting
+sys.argv = ["forza_live_server.py"] + sys.argv[1:]
+srv.run()
 """
 
 
@@ -407,6 +490,47 @@ class RealStopTest(unittest.TestCase):
                                         os.path.join(ROOT, "forza_live_server.py")])
         self.assert_stopped_cleanly(*self.ended(proc, log), first="stop: SIGTERM during the "
                                     "start: the server stops now that it is done")
+
+    def test_the_saves_do_not_wait_for_the_discord_status(self):
+        """A stop while the tick waits for the Discord status update: the saves at once, then
+        the update's end, then the offline status (the last edit). They used to come once the
+        update was done, and an update past the stop's 20 s cost them all."""
+        proc, log, http = self.start(head=[PYTHON, "-c", SLOW_DISCORD])
+        deadline = time.monotonic() + 30
+        while "test: the status update starts" not in (log.seek(0) or log.read()):
+            self.assertLess(time.monotonic(), deadline, "no status update")
+            self.assertIsNone(proc.poll())
+            time.sleep(0.02)
+        proc.send_signal(signal.SIGTERM)
+        status, lines = self.ended(proc, log)
+        text = "\n".join(lines)
+        self.assertEqual(status, 0, text)
+        self.assertNotIn("Traceback", text)
+        said = [line.split(" ", 2)[2] for line in lines]
+        order = [said.index(line) for line in (
+            "stop: SIGTERM: the server stops", "test: no new connection",
+            "test: the status update ends", "test: the status says offline")]
+        self.assertEqual(order, sorted(order), text)
+        saves = [i for i, line in enumerate(said) if line.startswith(
+            ("notifications: notifications.json written whole at the stop", "scoreboards: "))
+            and "at the stop" in line]
+        self.assertEqual(len(saves), 2, text)
+        self.assertTrue(order[1] < saves[0] < saves[1] < order[2], text)
+        self.assertEqual(said.index("test: the status says offline"), len(said) - 1, text)
+
+    def test_a_step_before_the_saves_that_fails_does_not_skip_them(self):
+        proc, log, http = self.start(head=[PYTHON, "-c", FAILED_STEP])
+        self.ready(proc, http)
+        proc.send_signal(signal.SIGTERM)
+        status, lines = self.ended(proc, log)
+        text = "\n".join(lines)
+        self.assertEqual(status, 0, text)
+        self.assertIn("stop: the steps before the saves failed; the saves are made all the same",
+                      text)
+        self.assertIn("ValueError: Invalid file descriptor: -1", text)
+        self.assertRegex(lines[-2], r"notifications: notifications\.json written whole at the "
+                                    r"stop")
+        self.assertRegex(lines[-1], r"scoreboards: .*at the stop")
 
     def test_a_relay(self):
         relay_port = free_port()
