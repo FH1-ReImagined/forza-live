@@ -204,8 +204,8 @@ class Store:
 
     def load(self):
         """The boards from scoreboards.json and its journal, once. journal.Unreadable when the
-        file is there but cannot be read, nor its .bak: the server does not start on empty
-        boards. The store is loaded only once this succeeded: a load that raised is made again
+        file is there but cannot be read, nor its .bak, or is damaged and its .bak is there but
+        cannot be read: the server does not start on empty boards. The store is loaded only once this succeeded: a load that raised is made again
         at the next call, never taken for boards with nothing on them (#70)."""
         if self.loaded:
             return

@@ -896,6 +896,62 @@ class TwoFaultsTest(Base):
         self.assertTrue(os.path.isdir(self.path("scoreboards.json")))
         self.assertTrue(os.path.exists(self.path("scoreboards.journal")))
 
+    def test_a_damaged_file_and_a_copy_that_cannot_be_read_refuses_the_start(self):
+        self.trap(A_XUID, 50.0)
+        scores.STORE.write()
+        self.trap(B_XUID, 60.0)
+        scores.STORE.write()
+        self.trap(C_XUID, 70.0)  # in the journal only
+        kept = tables()
+        size = os.path.getsize(self.path("scoreboards.json"))
+        with open(self.path("scoreboards.json"), "wb") as f:  # zeros, as after a power cut
+            f.write(b"\0" * size)
+        with open(self.path("scoreboards.json.bak"), "rb") as f:
+            bak = f.read()
+        real = open
+
+        def failing(name, *args, **kw):  # and the .bak's mode, or the disk, refuses it
+            if os.path.abspath(name) == self.path("scoreboards.json.bak"):
+                raise PermissionError(13, "Permission denied", name)
+            return real(name, *args, **kw)
+        scores.configure(self.dir.name, "main-1")
+        with mock.patch.object(durable, "open", failing, create=True), \
+                self.assertLogs("forza-live", "ERROR") as logs, \
+                self.assertRaises(journal.Unreadable):
+            scores.STORE.load()
+        self.assertRegex(logs.output[-1], r"scoreboards\.json is damaged .* its previous copy "
+                                          r"scoreboards\.json\.bak .* cannot be read .* not started")
+        self.assertFalse(scores.STORE.loaded)
+        with open(self.path("scoreboards.json.bak"), "rb") as f:
+            self.assertEqual(f.read(), bak)  # not replaced by the zeros
+        self.assertEqual([n for n in os.listdir(self.dir.name) if "unused" in n], [])
+        with self.assertLogs("forza_live", "WARNING"):  # readable again: every score is back
+            self.restart()
+        self.assertEqual(tables(), kept)
+
+    def test_a_store_that_fails_at_the_stop_logs_its_own_error_only(self):
+        server = self.server()
+
+        def friends_save():
+            try:
+                raise ValueError("the friends' own first error")
+            except ValueError:
+                raise OSError(28, "No space left on device")
+        server.friends.store.dirty = True
+        server.friends.store.save = friends_save
+        self.trap(A_XUID, 50.0)
+        with self.assertLogs("forza-live", "INFO") as logs:
+            try:  # the stop runs in main()'s finally, while the signal is being handled
+                raise KeyboardInterrupt
+            except KeyboardInterrupt:
+                srv.save_at_stop(server)
+        [failed] = [line for line in logs.output if "could not be written" in line]
+        self.assertIn("No space left on device", failed)
+        self.assertIn("the friends' own first error", failed)  # its own chain stays
+        self.assertNotIn("KeyboardInterrupt", failed)
+        self.assertEqual(failed.count("During handling"), 1, failed)  # its own, only
+        self.assertRegex(logs.output[-1], "written whole at the stop")
+
     def test_the_server_does_not_start_on_a_file_it_cannot_read(self):
         os.mkdir(self.path("scoreboards.json"))
         done = subprocess.run([sys.executable, os.path.join(ROOT, "forza_live_server.py"),

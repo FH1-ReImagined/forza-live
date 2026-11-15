@@ -335,9 +335,10 @@ class JournalTest(Base):
         kv.checkpoint()
         kv.set(d=4)
         kv.set(e=5)
-        head, a, b, c, d, e, end = self.lines()
+        # a: dropped by the second whole write (no .bak then: the file before it holds a)
+        head, b, c, d, e, end = self.lines()
         with open(self.path("store.journal"), "wb") as f:  # one the file has, one it lacks
-            f.write(b"\n".join([head, a, b, b"{\"c\": ", b"[1, 2]", e, end]))
+            f.write(b"\n".join([head, b, b"{\"c\": ", b"[1, 2]", e, end]))
         with self.assertLogs("forza-live", "WARNING") as logs:
             found = self.kv()
         self.assertIn("2 damaged lines skipped, 1 changes applied", logs.output[0])
@@ -368,12 +369,13 @@ class JournalTest(Base):
         kv.set(a=1)
         kv.checkpoint()
         kv.set(b=2)
-        kv.checkpoint()  # the stop: the file has everything
+        kv.set(c=3)
+        kv.checkpoint()  # the stop: the file has everything (and the journal b and c)
         with open(self.path("store.json"), "w") as f:
-            json.dump({"a": 1, "b": 2, "edited": True}, f)
+            json.dump({"a": 1, "b": 2, "c": 3, "edited": True}, f)
         with self.assertLogs("forza-live", "INFO") as logs:
             found = self.kv()
-        self.assertEqual(found.data, {"a": 1, "b": 2, "edited": True})
+        self.assertEqual(found.data, {"a": 1, "b": 2, "c": 3, "edited": True})
         # every change was in the last file the server wrote; whether the file here was made
         # from that one (as it was) or is an older copy, the server cannot know: it does not say
         self.assertEqual([r.levelname for r in logs.records], ["WARNING"])
@@ -627,6 +629,95 @@ class TwoFaultsTest(Base):
         os.rmdir(self.path("store.json"))  # to start without it on purpose: move it away
         with self.assertLogs("forza-live", "INFO"):
             self.assertEqual(self.kv().data, {})
+
+    def bak_unreadable(self):
+        """A read error on store.json.bak only, as long as it lasts."""
+        real = open
+
+        def failing(name, *args, **kw):
+            if os.path.abspath(name) == self.path("store.json.bak"):
+                raise OSError(errno.EIO, "Input/output error", name)
+            return real(name, *args, **kw)
+        return mock.patch.object(durable, "open", failing, create=True)
+
+    def test_a_damaged_file_and_a_copy_that_cannot_be_read_refuses_the_start(self):
+        kv = self.kv()
+        kv.set(a=1)
+        kv.checkpoint()
+        kv.set(b=2)
+        kv.checkpoint()
+        kv.set(c=3)
+        kv.journal.close()
+        size = os.path.getsize(self.path("store.json"))
+        with open(self.path("store.json"), "wb") as f:  # zeros, as a power cut leaves them
+            f.write(b"\0" * size)
+        before = {name: open(self.path(name), "rb").read() for name in os.listdir(self.dir)}
+        with self.bak_unreadable(), self.assertLogs("forza-live", "ERROR") as logs, \
+                self.assertRaises(journal.Unreadable):
+            journal.Journal(self.path("store.json")).load()
+        self.assertIn("store.json.bak", logs.output[-1])
+        self.assertIn("not started", logs.output[-1])
+        self.assertEqual({name: open(self.path(name), "rb").read()
+                          for name in os.listdir(self.dir)}, before)  # nothing changed
+        with self.assertLogs("forza_live", "WARNING"):  # the .bak readable again: all back
+            self.assertEqual(self.kv().data, {"a": 1, "b": 2, "c": 3})
+        self.assertEqual([n for n in os.listdir(self.dir) if "unused" in n], [])
+
+    def test_a_damaged_file_and_no_copy_still_starts(self):
+        with open(self.path("store.json"), "wb") as f:
+            f.write(b"\0" * 10)
+        with self.assertLogs("forza-live", "ERROR") as logs:
+            self.assertEqual(self.kv().data, {})
+        self.assertIn("starting without what it held", logs.output[0])
+
+    def test_without_hard_links_the_journal_stays_short(self):
+        def no_link(*args):
+            raise OSError(errno.EPERM, "Operation not permitted")
+
+        for case in ("no .bak", "a .bak the journal does not name"):
+            with self.subTest(case=case), mock.patch.object(os, "link", no_link):
+                for name in os.listdir(self.dir):
+                    os.remove(self.path(name))
+                if case != "no .bak":
+                    with open(self.path("store.json.bak"), "w") as f:
+                        json.dump({"an": "operator's copy"}, f)
+                wanted, n = {}, 0
+                for start in range(4):
+                    kv = self.kv()
+                    self.assertEqual(kv.data, wanted)
+                    for _ in range(20):
+                        for _ in range(3):
+                            kv.set(**{"k%d" % n: n})
+                            wanted["k%d" % n] = n
+                            n += 1
+                        kv.checkpoint()
+                        # the changes since the whole write before this one, no more
+                        self.assertLessEqual(len(self.lines()) - 2, 4)
+                    kv.set(last=start)
+                    wanted["last"] = start
+                    kv.journal.close()
+                self.assertEqual(self.kv().data, wanted)
+
+    def test_a_copy_that_cannot_be_read_at_a_whole_write_keeps_what_it_may_need(self):
+        kv = self.kv()
+        kv.set(a=1)
+        kv.checkpoint()
+        kv.set(b=2)
+        kv.checkpoint()  # the file {a, b}, its .bak {a}
+        kv.set(c=3)
+        with mock.patch.object(os, "link", side_effect=OSError(errno.EPERM, "no links")):
+            with self.bak_unreadable():  # which file the .bak is, the write cannot tell
+                kv.checkpoint()          # (and without links it stays the .bak it is)
+            kv.set(d=4)
+        cut = self.cut_short(self.dir)  # then the file in place is found damaged
+        with self.assertLogs("forza_live", "WARNING"):
+            self.assertEqual(self.kv(cut).data, {"a": 1, "b": 2, "c": 3, "d": 4})
+        self.assertEqual([n for n in os.listdir(cut) if "unused" in n], [])
+        kv.checkpoint()  # the .bak readable again: the journal is trimmed again
+        kv.set(e=5)
+        kv.checkpoint()
+        self.assertEqual(len(self.lines()) - 2, 2)  # d and e, which the .bak lacks
+        self.assertEqual(self.kv().data, {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5})
 
 
 class DurableTest(Base):

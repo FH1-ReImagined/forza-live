@@ -17,9 +17,10 @@ one change, a JSON object whose meaning is its store's:
 A file that is none of those was written by something else: a previous version of the server,
 a restored backup, an edit by hand. The journal is not applied to it and is kept as
 <file>.journal.unused.<n>, a new n each time. NO_FILE and UNREADABLE stand for a file that is
-not there and for one whose content is damaged, with no previous copy that is whole. A file that
-is there but cannot be read at all (a read error, its permissions), with no previous copy that
-can be, is no store to start from: load() raises Unreadable, and leaves every file as it is.
+not there and for one whose content is damaged, with no previous copy (or one damaged too). A
+file that is there but cannot be read at all (a read error, its permissions), with no previous
+copy that can be, is no store to start from, nor is a damaged file whose previous copy is there
+but cannot be read: load() raises Unreadable, and leaves every file as it is.
 
 A checkpoint, in this order: the new file is written beside the one in place (<file>.tmp) and
 flushed; the journal is rewritten to name it too, without the lines the .bak already holds;
@@ -27,11 +28,14 @@ the new file takes the place of the old one, which durable.replace keeps as .bak
 any point, the file in place and its .bak are both files the journal continues: the previous
 copy durable falls back to is made whole by it as the file itself is. Which file the .bak is, the
 checkpoint reads from the .bak itself (its SHA-256), not from the order of the names: a new file
-can have the very bytes of the .bak (#70).
+can have the very bytes of the .bak (#70). With no .bak (a file system without links has none),
+or one the journal does not name, the journal keeps only the lines the file in place lacks; with
+a .bak that is there but cannot be read, it keeps every name and line until it can be.
 
 Threads: append(), mark() and behind() are the event loop's, checkpoint() a thread's (or the
 stop's). A lock keeps the journal's file and what is known of it: the loop waits for it only
-while a checkpoint rewrites the journal, a file of three checkpoints' changes at most. And the
+while a checkpoint rewrites the journal, a file of three checkpoints' changes at most (unless
+the .bak cannot be read, above). And the
 new file is flushed as it is written (Paced), so that megabytes of it are never waiting for the
 disk at once: the journal's own flush, on the loop, would wait behind them.
 """
@@ -46,12 +50,14 @@ from forza_live.core import durable
 log = logging.getLogger("forza-live")
 
 NO_FILE, UNREADABLE = "none", "unreadable"
+NOT_READ = object()  # Journal._bak(): a .bak that is there but cannot be read
 FLUSH_EVERY = 1 << 20  # characters of a new file between two flushes to disk (Paced)
 
 
 class Unreadable(OSError):
-    """The file is there but cannot be read, and neither can its previous copy: a start would
-    have none of what it holds. Logged by Journal.load, which raises it."""
+    """The file is there but cannot be read, and neither can its previous copy; or the file is
+    damaged and its previous copy is there but cannot be read: a start would have none of what
+    they hold. Logged by Journal.load, which raises it."""
 
 
 class Paced:
@@ -82,6 +88,7 @@ class Journal:
         self._writing = threading.Lock()  # one checkpoint at a time
         self._whole = False     # the journal's file is whole; if not, the next append makes it anew
         self.closed = False
+        self._warned = False    # the log was told the .bak cannot be read, at a checkpoint
         self.base = NO_FILE     # the file in place, by its SHA-256
         # As the first line has it: how many of `lines` each file holds, the oldest file first
         self.continues = {NO_FILE: 0}
@@ -90,14 +97,27 @@ class Journal:
 
     def load(self):
         """(what the file holds, or None; the changes it lacks, in order). A file whose content
-        is damaged, with no whole previous copy, is logged and counts as none, a journal that
-        cannot be used is put aside. Unreadable when the file is there but cannot be read, nor
-        its previous copy: nothing is changed then, nor put aside."""
+        is damaged, with no previous copy or a damaged one, is logged and counts as none, a
+        journal that cannot be used is put aside. Unreadable when the file is there but cannot
+        be read, nor its previous copy, or when it is damaged and its previous copy is there but
+        cannot be read: nothing is changed then, nor put aside."""
         try:
             data, self.base = durable.load_digest(self.path)
         except FileNotFoundError:
             data, self.base = None, NO_FILE
         except ValueError as e:
+            try:
+                durable.digest(self.path + ".bak")
+            except FileNotFoundError:
+                pass
+            except OSError as b:
+                # Damaged, and the .bak that could have taken its place is there but cannot be
+                # read: running on empty boards would make the damaged file the next .bak.
+                log.error("%s is damaged (%s), and its previous copy %s.bak is there but cannot "
+                          "be read (%s): not started, rather than run without what they hold. "
+                          "Make the .bak readable again, or move both out of the folder to start "
+                          "without them", self.path, e, os.path.basename(self.path), b)
+                raise Unreadable(b.errno, "%s.bak cannot be read: %s" % (self.path, b)) from b
             log.error("%s cannot be read (%s): starting without what it held", self.path, e)
             data, self.base = None, UNREADABLE
         except OSError as e:
@@ -244,15 +264,27 @@ class Journal:
                 # file in place has them as well). Not the lines the file in place holds: it is
                 # not the .bak before the rename below, and a start that falls back to the
                 # .bak, at whatever moment this stopped, needs them.
-                before = bak if bak in self.continues else None  # the .bak, if the journal has it
                 held = self.continues.get(self.base, 0)
-                drop = min(self.continues[before], held) if before else 0
+                if bak is NOT_READ:
+                    # The .bak is there and could not be read: it may be any file the journal
+                    # names, so every name stays, with every line, until it can be read again.
+                    if not self._warned:
+                        log.warning("%s.bak cannot be read: %s keeps every change until it "
+                                    "can be", self.path, self.name)
+                        self._warned = True
+                    older, drop = list(self.continues.items()), 0
+                elif bak in self.continues:
+                    older = [(bak, self.continues[bak])]
+                    drop = min(self.continues[bak], held)
+                else:
+                    # No .bak (a file system without links has none), or one the journal does
+                    # not continue: a start that falls back to it does not apply the journal.
+                    # Only the file in place needs lines, those it lacks.
+                    older, drop = [], held
                 continues = {}
-                for name, count in ((before, self.continues[before] if before else 0),
-                                    (self.base, held), (new, mark - self.first)):
-                    if name is not None:
-                        continues.pop(name, None)  # the same bytes twice: once, as the later file
-                        continues[name] = count - drop
+                for name, count in older + [(self.base, held), (new, mark - self.first)]:
+                    continues.pop(name, None)  # the same bytes twice: once, as the later file
+                    continues[name] = count - drop
                 self._rewrite(continues, self.lines[drop:])
                 self.first += drop
             durable.replace(tmp, self.path)
@@ -261,12 +293,17 @@ class Journal:
             return True
 
     def _bak(self):
-        """The SHA-256 of the .bak there is now, or None: what a start that falls back to it
-        reads. Read from the file, the order of the names cannot say it (#70)."""
+        """The SHA-256 of the .bak there is now: what a start that falls back to it reads. Read
+        from the file, the order of the names cannot say it (#70). None when there is no .bak,
+        NOT_READ when it is there but could not be read."""
         try:
-            return durable.digest(self.path + ".bak")
-        except OSError:
+            found = durable.digest(self.path + ".bak")
+        except FileNotFoundError:
             return None
+        except OSError:
+            return NOT_READ
+        self._warned = False
+        return found
 
     def _rewrite(self, continues, lines):
         """The journal's file made anew with these (the lock is held): written beside it and

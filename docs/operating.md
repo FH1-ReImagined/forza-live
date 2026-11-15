@@ -670,7 +670,8 @@ records, the indexes of photos, videos and designs, and the others) are saved wh
 one in place and renamed over it, and the file they replace is kept as `<name>.bak`. The `.bak` is
 itself replaced in one step (a second link made as `<name>.bak.tmp` and renamed over it): a kill or
 a power cut at any moment leaves the file in place and a `.bak`, the one before or the new one. A
-`<name>.bak.tmp` left by a kill is removed at the next save.
+`<name>.bak.tmp` left by a kill is removed at the next save. On a file system without hard links
+there is no `.bak`: the saves go on without one.
 
 When a file is empty, damaged, or cannot be read at all (a read error of the disk, permissions
 that refuse the server), the server reads its `.bak` instead, with a warning in the log:
@@ -679,7 +680,8 @@ scoreboards.json.bak` (`is damaged` for damaged content). The next save of that 
 that `.bak` as it is rather than make the file that failed the new `.bak`; the save after it
 rotates them as usual again. A file that is not there is not looked for in its `.bak`. When
 neither can be used, each store does what it did before: most start without what the file held
-and log it, and the boards refuse to start when the file cannot be read (next section).
+and log it, and the boards refuse to start when the file cannot be read, or is damaged with a
+`.bak` that is there but cannot be read (next section).
 
 ### Scores on disk
 
@@ -695,7 +697,11 @@ The boards are more than one file in the data folder:
 - `scoreboards.journal`: the latest changes, a line each (a new best, a ghost's id, a 1000 Club
   medal, an operator's unrank or delete), flushed to disk before the game is answered. It has
   every change `scoreboards.json` lacks, and those its `.bak` lacks. Its first line names the
-  files it continues, by SHA-256.
+  files it continues, by SHA-256. It holds a few minutes of changes at most: each whole write
+  drops what both files already have (with no `.bak`, what `scoreboards.json` has). While a
+  `.bak` is there but cannot be read, it keeps every change instead, and the log says so once
+  (`scoreboards.json.bak cannot be read: ... scoreboards.journal keeps every change until it can
+  be`): make the `.bak` readable again, or remove it.
 - `ghosts/`: the Rivals ghosts, a file each, as before.
 
 A start reads `scoreboards.json` and then the journal's lines it lacks (`scoreboards: 37 changes
@@ -726,10 +732,10 @@ does (rolling back, below).
 
 The stores that have no journal (the registrations in `live_state.json`, the co-op ledger and
 friends) are written first, each whatever became of the others (an error in one is logged as
-`stop: the friends could not be written` with its traceback, and the others and the boards are
-still written). While they are written a second stop signal (a second `docker compose stop`,
-Ctrl+C) is ignored and logged (`stop: SIGTERM again while the registrations, co-op ledger and
-friends were written: ignored until they were`); once they are, a signal ends the stop again,
+`stop: the friends could not be written` with that save's own traceback, and the others and the
+boards are still written). While they are written a second stop signal (a second `docker compose
+stop`, Ctrl+C) is ignored and logged (`stop: SIGTERM again while the registrations, co-op ledger
+and friends were written: ignored until they were`); once they are, a signal ends the stop again,
 which costs the boards nothing.
 
 **A `scoreboards.json` that cannot be read.** When the file is there but cannot be read (a read
@@ -741,12 +747,19 @@ the same line until the file is put right:
 
     /data/scoreboards.json cannot be read ([Errno 13] Permission denied: '/data/scoreboards.json'), and there is no previous copy scoreboards.json.bak that can be: not started, rather than run without what it holds. Make it readable again, or move it out of the folder to start without it
 
+The same holds when the file is damaged (empty, zeros after a power cut, cut short) and its
+`.bak` is there but cannot be read (its owner or mode, a read error): the `.bak` may have every
+board, and a start on empty boards would make the damaged file the next `.bak`. The line is then
+
+    /data/scoreboards.json is damaged (Expecting value: line 1 column 1 (char 0)), and its previous copy scoreboards.json.bak is there but cannot be read ([Errno 13] Permission denied: '/data/scoreboards.json.bak'): not started, rather than run without what they hold. Make the .bak readable again, or move both out of the folder to start without them
+
 Nothing in the folder is changed, renamed or put aside meanwhile. Fix what the error names (the
-file's owner or mode, the disk) and start again. To start without those boards on purpose, stop
-the container and move `scoreboards.json` (and `scoreboards.json.bak`, if there is one) out of the
-data folder: the next start finds no file and starts empty, and a journal that continued the
-file is kept as `scoreboards.journal.unused.<n>` (below). A file whose content is damaged, with
-no `.bak` to fall back to, is not refused: the boards start with what the journal has on top of
+file's owner or mode, the disk) and start again: with the `.bak` readable, the boards come from it
+and the journal. To start without those boards on purpose, stop the container and move
+`scoreboards.json` (and `scoreboards.json.bak`, if there is one) out of the data folder: the next
+start finds no file and starts empty, and a journal that continued the file is kept as
+`scoreboards.journal.unused.<n>` (below). A file whose content is damaged, with no `.bak` (or a
+`.bak` damaged too), is not refused: the boards start with what the journal has on top of
 nothing, as before, and the log says `scoreboards.json cannot be read (...): starting without what
 it held`.
 

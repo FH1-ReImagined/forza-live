@@ -2220,6 +2220,25 @@ def release_stop_signals(held):
                  "ignored until they were", signal.Signals(came[0]).name)
 
 
+def own_error(error, handled):
+    """error, for the log, without the exception that was being handled when it was raised
+    (`handled`, and what led to it): a store's save that fails at the stop is raised while the
+    signal's KeyboardInterrupt and CancelledError are, and its traceback would be theirs too.
+    What the save's own code raised on the way is kept."""
+    seen, todo = set(), [error]
+    while todo and handled is not None:
+        e = todo.pop()
+        if id(e) in seen:
+            continue
+        seen.add(id(e))
+        if e.__cause__ is handled:
+            e.__cause__ = None
+        if e.__context__ is handled:
+            e.__context__ = None
+        todo.extend(x for x in (e.__cause__, e.__context__) if x is not None)
+    return type(error), error, error.__traceback__
+
+
 def save_at_stop(server, held=None):
     """What the server writes as it stops, the boards last: their last write is megabytes, and
     whatever ends it early (a second signal, the stop's time running out) costs the boards
@@ -2237,14 +2256,16 @@ def save_at_stop(server, held=None):
 
     if held is None:
         held = hold_stop_signals()
+    stopping = sys.exc_info()[1]  # what ends main(): the signal's KeyboardInterrupt, ...
     try:
         # the registrations first: a restart now keeps the players (#93)
         for what, save in (("registrations", server.save_state), ("co-op ledger", ledger),
                            ("friends", friends_store)):
             try:
                 save()
-            except Exception:  # noqa: BLE001 - the stores after it, and the boards, go on
-                log.exception("stop: the %s could not be written", what)
+            except Exception as e:  # noqa: BLE001 - the stores after it, and the boards, go on
+                log.error("stop: the %s could not be written", what,
+                          exc_info=own_error(e, stopping))
     finally:
         release_stop_signals(held)
     scores.STORE.stop()  # scoreboards.json gets what only its journal had
@@ -2410,8 +2431,9 @@ def run():
     except KeyboardInterrupt:
         pass
     except journal.Unreadable:
-        # scoreboards.json is there and cannot be read, nor its .bak: the log has said so, and
-        # the server does not start on empty boards (docs/operating.md, "Scores on disk")
+        # scoreboards.json is there and cannot be read, nor its .bak (or it is damaged and the
+        # .bak cannot be read): the log has said so, and the server does not start on empty
+        # boards (docs/operating.md, "Scores on disk")
         sys.exit(1)
 
 
