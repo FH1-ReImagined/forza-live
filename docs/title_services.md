@@ -1271,7 +1271,9 @@ to `0x82A93090`, so their layouts can be read from the image without a running g
 
 Reading a message calls `Notifications.MarkRead(id)`, X DELETE and a collected gift
 `Clear(id)`; the server keeps the read flag and drops cleared ones
-(`DATA_DIR/notifications.json`, per recipient, 30 days).
+(`DATA_DIR/notifications.json`, per recipient, 30 days; then they expire and are dropped too).
+Each change is a line of `notifications.journal` before the answer, and the file is written
+whole by a thread ([operating](operating.md#notifications-on-disk)).
 
 **What sends them.** `Scoreboard.NotifyRival` (a player beat their rival's time): RIVAL
 CHALLENGE to the rival, from the player's best on that board. `Gifting.SendCarGift`: NEW

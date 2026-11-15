@@ -30,7 +30,6 @@ nobody wrote have a new player's defaults (games 0, mu 3, sigma 1, skill 1). Kep
 DATA_DIR/stats.json, at most limits.MAX_PLAYERS players and MAX_VIEWS views each.
 """
 
-import json
 import logging
 import math
 import os
@@ -145,10 +144,7 @@ class Store:
 
     def save(self):
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = self.path() + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"players": self.players}, f, indent=1)
-        durable.replace(tmp, self.path())
+        durable.write_json(self.path(), {"players": self.players})  # the C encoder (durable)
 
     def view(self, xuid, view, gamertag=None, create=False):
         self.load()

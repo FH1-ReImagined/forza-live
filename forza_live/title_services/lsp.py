@@ -272,6 +272,8 @@ def configure(args):
     market.configure(DATA_DIR)
     clubs.configure(DATA_DIR, load_player)
     notifications.configure(DATA_DIR)
+    # Read now: one that cannot be read stops the start (journal.Unreadable), as the boards do
+    notifications.STORE.load()
     community.configure(DATA_DIR, gamertag=lambda xuid: load_player(xuid).get("gamertag", ""))
     videos.configure(DATA_DIR)
     # a finished upload is a movie (videos.py) or a picture (community.py)

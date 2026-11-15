@@ -31,8 +31,8 @@ class BroadcastTest(unittest.TestCase):
         self.addCleanup(lambda: notices.configure(old))
 
     def stored(self):
-        with open(notices.STORE.path()) as f:
-            return json.load(f)
+        """What a start reads: notifications.json and its journal."""
+        return notices.Store().load()
 
     def test_every_player_gets_it_once_stored(self):
         nid = notices.broadcast(notices.NEWS, {"Message": "Join the Discord"})
