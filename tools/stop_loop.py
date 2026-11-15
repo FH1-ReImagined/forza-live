@@ -82,6 +82,14 @@ def load(http, udp, stop):
     junk.close()
 
 
+def stamp(line):
+    """The time of a log line ("2026-11-15 13:13:44,695 ..."), or None."""
+    try:
+        return time.mktime(time.strptime(line[:19], "%Y-%m-%d %H:%M:%S")) + int(line[20:23]) / 1000
+    except (ValueError, IndexError):
+        return None
+
+
 def one(args, signals, template):
     with tempfile.TemporaryDirectory() as top:
         data = os.path.join(top, "data")
@@ -108,7 +116,7 @@ def one(args, signals, template):
         loader = threading.Thread(target=load, args=(http, udp, stop), daemon=True)
         loader.start()
         time.sleep(random.uniform(0.2, 1.2))
-        sent = time.monotonic()
+        sent, sent_at = time.monotonic(), time.time()
         for i, name in enumerate(signals):
             if i:
                 time.sleep(args.gap)
@@ -116,17 +124,19 @@ def one(args, signals, template):
                 proc.send_signal(getattr(signal, name))
             except ProcessLookupError:
                 pass
-        lost = False
-        try:
-            proc.wait(STOP_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            lost = True
+        # a blocking wait, timed to the moment the process ends (wait(timeout) polls, with
+        # sleeps of up to 50 ms)
+        waiter = threading.Thread(target=proc.wait, daemon=True)
+        waiter.start()
+        waiter.join(STOP_TIMEOUT)
+        lost = waiter.is_alive()
+        if lost:
             if args.diag:
                 proc.send_signal(signal.SIGUSR1)
                 time.sleep(1.0)
             proc.kill()
-            proc.wait()
-        took = time.monotonic() - sent
+            waiter.join()
+        took, ended_at = time.monotonic() - sent, time.time()
         stop.set()
         loader.join()
         with open(log_path, errors="replace") as f:
@@ -138,11 +148,19 @@ def one(args, signals, template):
              and any("notifications: notifications.json written whole at the stop" in line
                      for line in lines)
              and any("scoreboards:" in line and "at the stop" in line for line in lines))
+    # the log's clock: from the signal to the stop's first line (a version without one: its first
+    # save line), then to its last save line, then to the process's end (the loop's close, the
+    # connections still open, the exit)
+    phases = None
+    stamps = [stamp(line) for line in lines if " stop: " in line or "at the stop" in line]
+    if stamps and None not in stamps:
+        phases = [round(stamps[0] - sent_at, 4), round(stamps[-1] - stamps[0], 4),
+                  round(ended_at - stamps[-1], 4)]
     bad = (lost or not saved or proc.returncode != 0 or "Traceback" in text
            or "Exception ignored" in text)
     return {"started": started, "lost": lost, "rc": proc.returncode, "took": round(took, 4),
             "saved": saved, "traceback": "Traceback" in text,
-            "ignored": "Exception ignored" in text, "last": lines[-2:],
+            "ignored": "Exception ignored" in text, "last": lines[-2:], "phases": phases,
             "tail": text[-4000:] if bad else ""}
 
 
@@ -190,6 +208,12 @@ def main():
               sum(r["lost"] for r in results), sum(not r["saved"] for r in results),
               sum(r["rc"] != 0 for r in results), sum(r["traceback"] for r in results),
               sum(r["ignored"] for r in results), sum(not r["started"] for r in results)))
+    phases = [r["phases"] for r in results if r["phases"]]
+    if phases:
+        print("of which (the log's millisecond clock), median / max: signal to the stop's first "
+              "line %s, its saves %s, the end after them %s" % tuple(
+                  "%.3f / %.3f s" % (statistics.median(p[k] for p in phases),
+                                     max(p[k] for p in phases)) for k in range(3)))
     if took:
         print("stop time, first signal to exit: median %.3f s, 99th percentile %.3f s, "
               "max %.3f s" % (statistics.median(took),
