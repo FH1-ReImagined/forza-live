@@ -279,6 +279,22 @@ class LiveSizeTest(Base, unittest.IsolatedAsyncioTestCase):
         self.assertLess(os.path.getsize(self.path("notifications.json")),
                         os.path.getsize(LIVE[1]))
 
+    def test_the_dump_writes_in_short_steps(self):
+        """The thread pauses for the loop only between two of the dump's writes (journal.Paced):
+        none of them is more than a player's notifications, or a receipt, a player's
+        broadcast state or a broadcast."""
+        writes = []
+
+        class File:
+            def write(self, text):
+                writes.append(len(text))
+        notices.dump(File(), notices.STORE.snapshot()[2], time.time())
+        biggest = max(len(json.dumps(mine)) + 64 * len(mine)
+                      for mine in notices.STORE.data["byRecipient"].values())
+        self.assertGreater(sum(writes), 8e6)
+        self.assertLess(max(writes), biggest)
+        self.assertLess(max(writes), 16384)
+
     async def test_write_refuses_to_run_on_the_loop(self):
         with self.assertRaisesRegex(RuntimeError, "never on the event loop"):
             notices.STORE.write()

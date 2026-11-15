@@ -387,6 +387,10 @@ def dump(f, tables, now):
     def lines(items, pad):
         return ",\n".join(pad + item for item in items)
 
+    def each(items, pad):  # a write per item: each is a short step of the interpreter
+        for m, item in enumerate(items):
+            f.write("%s%s%s" % (",\n" if m else "", pad, item))
+
     f.write("{")
     for n, (name, value) in enumerate(tables.items()):
         f.write("%s\n %s: " % ("," if n else "", json.dumps(name)))
@@ -401,10 +405,13 @@ def dump(f, tables, now):
                     m += 1
             f.write("\n }" if m else "}")
         elif isinstance(value, dict) and value:
-            f.write("{\n%s\n }" % lines(("%s: %s" % (json.dumps(k), json.dumps(v))
-                                         for k, v in value.items()), "  "))
+            f.write("{\n")
+            each(("%s: %s" % (json.dumps(k), json.dumps(v)) for k, v in value.items()), "  ")
+            f.write("\n }")
         elif isinstance(value, list) and value:
-            f.write("[\n%s\n ]" % lines((json.dumps(v) for v in value), "  "))
+            f.write("[\n")
+            each((json.dumps(v) for v in value), "  ")
+            f.write("\n ]")
         else:
             f.write(json.dumps(value))
     f.write("\n}\n")

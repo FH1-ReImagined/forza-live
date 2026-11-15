@@ -831,7 +831,9 @@ rewards, the operator's messages and broadcasts) are kept the way the boards are
   each time, and a club's news (to each member) as many times over. A thread writes it whole once
   a minute while there is something new (`notifications: notifications.json written whole in
   0.15 s, off the event loop`), and the server writes it once more as it stops, before the
-  boards.
+  boards. The thread pauses after each millisecond of its work, so a notification sent during
+  that write takes about what it takes at any other time, 2 ms, most of it the disk's flush (the
+  boards' writes pause the same way).
 - `notifications.json.bak`: the file before that one.
 - `notifications.journal`: the latest changes, a line each (notifications sent, read or
   cleared, a broadcast, a receipt), flushed to disk before the game or the caller is answered.
@@ -886,3 +888,8 @@ market's `auctions.json` and `gifts.json` are still written whole at the change 
 before the game is answered, but as compact JSON in one step of the encoder: half a megabyte took
 20 ms of the event loop indented, 6 to 8 ms now, most of it the disk's flush. Every version reads
 them the same.
+
+A player's record (`players/<xuid>.json`, a few KB) is written whole on the event loop as
+before, at each sign-in, race result and profile update: 4 ms, most of it the disk's flush. A
+new player's first record also counts the folder against the players' limit, which takes 14 ms
+with 20,000 players and their `.bak` copies in it.
