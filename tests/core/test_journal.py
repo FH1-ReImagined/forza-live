@@ -6,6 +6,7 @@ file the journal does not continue is left as it is, and the journal kept.
 Run: python3 -m unittest discover -s tests -t .
 """
 
+import errno
 import json
 import os
 import random
@@ -334,9 +335,10 @@ class JournalTest(Base):
         kv.checkpoint()
         kv.set(d=4)
         kv.set(e=5)
-        head, a, b, c, d, e, end = self.lines()
+        # a: dropped by the second whole write (no .bak then: the file before it holds a)
+        head, b, c, d, e, end = self.lines()
         with open(self.path("store.journal"), "wb") as f:  # one the file has, one it lacks
-            f.write(b"\n".join([head, a, b, b"{\"c\": ", b"[1, 2]", e, end]))
+            f.write(b"\n".join([head, b, b"{\"c\": ", b"[1, 2]", e, end]))
         with self.assertLogs("forza-live", "WARNING") as logs:
             found = self.kv()
         self.assertIn("2 damaged lines skipped, 1 changes applied", logs.output[0])
@@ -367,12 +369,13 @@ class JournalTest(Base):
         kv.set(a=1)
         kv.checkpoint()
         kv.set(b=2)
-        kv.checkpoint()  # the stop: the file has everything
+        kv.set(c=3)
+        kv.checkpoint()  # the stop: the file has everything (and the journal b and c)
         with open(self.path("store.json"), "w") as f:
-            json.dump({"a": 1, "b": 2, "edited": True}, f)
+            json.dump({"a": 1, "b": 2, "c": 3, "edited": True}, f)
         with self.assertLogs("forza-live", "INFO") as logs:
             found = self.kv()
-        self.assertEqual(found.data, {"a": 1, "b": 2, "edited": True})
+        self.assertEqual(found.data, {"a": 1, "b": 2, "c": 3, "edited": True})
         # every change was in the last file the server wrote; whether the file here was made
         # from that one (as it was) or is an older copy, the server cannot know: it does not say
         self.assertEqual([r.levelname for r in logs.records], ["WARNING"])
@@ -508,6 +511,213 @@ class JournalTest(Base):
         self.assertEqual((again.data, again.applied), ({"a": 5, "b": 2}, 2))
         kv.checkpoint()
         self.assertEqual(durable.load(self.path("store.json")), {"a": 5, "b": 2})
+
+
+class TwoFaultsTest(Base):
+    """The cases the reviews of #69 left (#70): two faults close together."""
+
+    def test_after_a_start_on_a_cut_line_the_previous_copy_is_still_covered(self):
+        kv = self.kv()
+        for n in range(3):
+            kv.set(**{"k%d" % n: n})
+            kv.checkpoint()
+        kv.set(only_in_the_journal=1)
+        with open(self.path("store.journal"), "ab") as f:
+            f.write(b'{"cut": ')  # the machine went down in the middle of a line
+        with self.assertLogs("forza-live", "INFO") as logs:
+            again = self.kv()
+        self.assertIn("cut short", logs.output[0])
+        again.set(after=2)  # the start answers a change, and is killed before a whole write
+        wanted = {"k0": 0, "k1": 1, "k2": 2, "only_in_the_journal": 1, "after": 2}
+        self.assertEqual(self.kv().data, wanted)
+        cut = self.cut_short(self.dir)  # and then the file in place is found damaged
+        with self.assertLogs("forza_live", "WARNING"):
+            self.assertEqual(self.kv(cut).data, wanted)
+        self.assertEqual([n for n in os.listdir(cut) if "unused" in n], [])
+        with open(self.path("store.journal"), "rb") as f:  # the cut tail is gone
+            for line in f.read().split(b"\n")[:-1]:
+                json.loads(line)
+
+    def test_a_whole_file_with_the_bytes_of_the_previous_copy(self):
+        class Killed(BaseException):
+            pass
+
+        real = durable.replace
+
+        def killed_before_the_rename(tmp, path, backup=True):
+            if path.endswith("store.json"):
+                raise Killed
+            return real(tmp, path, backup)
+
+        def checkpoint_killed(kv):
+            with mock.patch.object(durable, "replace", killed_before_the_rename):
+                self.assertRaises(Killed, kv.checkpoint)
+            kv.journal.close()
+
+        kv = self.kv()
+        kv.set(a=1)
+        kv.checkpoint()
+        kv.set(b=1)
+        kv.checkpoint()
+        kv.set(b=0)
+        kv.checkpoint()  # the file {a: 1, b: 0}; its .bak {a: 1, b: 1}
+        kv.set(b=1)      # back to the .bak's bytes
+        checkpoint_killed(kv)
+        kv = self.kv()
+        kv.set(b=0)      # acknowledged
+        checkpoint_killed(kv)
+        bak = durable.digest(self.path("store.json.bak"))
+        with open(self.path("store.journal"), "rb") as f:
+            self.assertIn(bak, json.loads(f.readline())["continues"])
+        self.assertEqual(self.kv().data, {"a": 1, "b": 0})
+        cut = self.cut_short(self.dir)
+        with self.assertLogs("forza_live", "WARNING"):
+            self.assertEqual(self.kv(cut).data, {"a": 1, "b": 0})
+        self.assertEqual([n for n in os.listdir(cut) if "unused" in n], [])
+
+    def test_names_of_journals_put_aside_that_are_not_numbers(self):
+        for odd in ("\u00b2", "\u2460", "x", "", "1.5", "-3"):  # isdigit() is true of the first two
+            with open(self.path("store.journal.unused." + odd), "w") as f:
+                f.write("someone's")
+        with open(self.path("store.journal.unused.\u0663"), "w") as f:  # Arabic-Indic 3: a decimal
+            f.write("someone's")
+        kv = self.kv()
+        kv.set(a=1)
+        kv.journal.close()
+        with open(self.path("store.json"), "w") as f:
+            json.dump({"b": 2}, f)
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            self.assertEqual(self.kv().data, {"b": 2})
+        self.assertIn("Kept as %s" % self.path("store.journal.unused.4"), logs.output[0])
+
+    def test_a_file_that_cannot_be_read_uses_its_copy_and_the_journal(self):
+        kv = self.kv()
+        kv.set(a=1)
+        kv.checkpoint()
+        kv.set(b=2)
+        kv.checkpoint()
+        kv.set(c=3)
+        real = open
+
+        def failing(name, *args, **kw):
+            if os.path.abspath(name) == self.path("store.json"):
+                raise OSError(errno.EIO, "Input/output error", name)
+            return real(name, *args, **kw)
+        with mock.patch.object(durable, "open", failing, create=True), \
+                self.assertLogs("forza_live", "WARNING"):
+            again = self.kv()
+        self.assertEqual(again.data, {"a": 1, "b": 2, "c": 3})
+
+    def test_a_file_that_cannot_be_read_and_no_copy_refuses_the_start(self):
+        kv = self.kv()
+        kv.set(a=1)
+        kv.checkpoint()
+        kv.set(b=2)
+        os.remove(self.path("store.journal"))
+        os.rename(self.path("store.json"), self.path("elsewhere"))
+        os.mkdir(self.path("store.json"))  # a folder in its place: it cannot be read
+        with open(self.path("store.journal"), "wb") as f:
+            f.write(b"")
+        before = sorted(os.listdir(self.dir))
+        with self.assertLogs("forza-live", "ERROR") as logs, \
+                self.assertRaises(OSError) as raised:
+            journal.Journal(self.path("store.json")).load()
+        self.assertIsInstance(raised.exception, journal.Unreadable)
+        self.assertIn("cannot be read", logs.output[0])
+        self.assertIn("not started", logs.output[0])
+        self.assertEqual(sorted(os.listdir(self.dir)), before)  # nothing put aside or written
+        os.rmdir(self.path("store.json"))  # to start without it on purpose: move it away
+        with self.assertLogs("forza-live", "INFO"):
+            self.assertEqual(self.kv().data, {})
+
+    def bak_unreadable(self):
+        """A read error on store.json.bak only, as long as it lasts."""
+        real = open
+
+        def failing(name, *args, **kw):
+            if os.path.abspath(name) == self.path("store.json.bak"):
+                raise OSError(errno.EIO, "Input/output error", name)
+            return real(name, *args, **kw)
+        return mock.patch.object(durable, "open", failing, create=True)
+
+    def test_a_damaged_file_and_a_copy_that_cannot_be_read_refuses_the_start(self):
+        kv = self.kv()
+        kv.set(a=1)
+        kv.checkpoint()
+        kv.set(b=2)
+        kv.checkpoint()
+        kv.set(c=3)
+        kv.journal.close()
+        size = os.path.getsize(self.path("store.json"))
+        with open(self.path("store.json"), "wb") as f:  # zeros, as a power cut leaves them
+            f.write(b"\0" * size)
+        before = {name: open(self.path(name), "rb").read() for name in os.listdir(self.dir)}
+        with self.bak_unreadable(), self.assertLogs("forza-live", "ERROR") as logs, \
+                self.assertRaises(journal.Unreadable):
+            journal.Journal(self.path("store.json")).load()
+        self.assertIn("store.json.bak", logs.output[-1])
+        self.assertIn("not started", logs.output[-1])
+        self.assertEqual({name: open(self.path(name), "rb").read()
+                          for name in os.listdir(self.dir)}, before)  # nothing changed
+        with self.assertLogs("forza_live", "WARNING"):  # the .bak readable again: all back
+            self.assertEqual(self.kv().data, {"a": 1, "b": 2, "c": 3})
+        self.assertEqual([n for n in os.listdir(self.dir) if "unused" in n], [])
+
+    def test_a_damaged_file_and_no_copy_still_starts(self):
+        with open(self.path("store.json"), "wb") as f:
+            f.write(b"\0" * 10)
+        with self.assertLogs("forza-live", "ERROR") as logs:
+            self.assertEqual(self.kv().data, {})
+        self.assertIn("starting without what it held", logs.output[0])
+
+    def test_without_hard_links_the_journal_stays_short(self):
+        def no_link(*args):
+            raise OSError(errno.EPERM, "Operation not permitted")
+
+        for case in ("no .bak", "a .bak the journal does not name"):
+            with self.subTest(case=case), mock.patch.object(os, "link", no_link):
+                for name in os.listdir(self.dir):
+                    os.remove(self.path(name))
+                if case != "no .bak":
+                    with open(self.path("store.json.bak"), "w") as f:
+                        json.dump({"an": "operator's copy"}, f)
+                wanted, n = {}, 0
+                for start in range(4):
+                    kv = self.kv()
+                    self.assertEqual(kv.data, wanted)
+                    for _ in range(20):
+                        for _ in range(3):
+                            kv.set(**{"k%d" % n: n})
+                            wanted["k%d" % n] = n
+                            n += 1
+                        kv.checkpoint()
+                        # the changes since the whole write before this one, no more
+                        self.assertLessEqual(len(self.lines()) - 2, 4)
+                    kv.set(last=start)
+                    wanted["last"] = start
+                    kv.journal.close()
+                self.assertEqual(self.kv().data, wanted)
+
+    def test_a_copy_that_cannot_be_read_at_a_whole_write_keeps_what_it_may_need(self):
+        kv = self.kv()
+        kv.set(a=1)
+        kv.checkpoint()
+        kv.set(b=2)
+        kv.checkpoint()  # the file {a, b}, its .bak {a}
+        kv.set(c=3)
+        with mock.patch.object(os, "link", side_effect=OSError(errno.EPERM, "no links")):
+            with self.bak_unreadable():  # which file the .bak is, the write cannot tell
+                kv.checkpoint()          # (and without links it stays the .bak it is)
+            kv.set(d=4)
+        cut = self.cut_short(self.dir)  # then the file in place is found damaged
+        with self.assertLogs("forza_live", "WARNING"):
+            self.assertEqual(self.kv(cut).data, {"a": 1, "b": 2, "c": 3, "d": 4})
+        self.assertEqual([n for n in os.listdir(cut) if "unused" in n], [])
+        kv.checkpoint()  # the .bak readable again: the journal is trimmed again
+        kv.set(e=5)
+        kv.checkpoint()
+        self.assertEqual(len(self.lines()) - 2, 2)  # d and e, which the .bak lacks
+        self.assertEqual(self.kv().data, {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5})
 
 
 class DurableTest(Base):

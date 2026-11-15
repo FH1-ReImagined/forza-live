@@ -14,6 +14,7 @@ import json
 import os
 import random
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -44,6 +45,8 @@ LIVE_MB = 26                 # scoreboards.json on the public server
 # journal takes 2 to 5 ms, most of it the disk's flush. The bounds leave room for a slow CI disk.
 LOOP_MEDIAN, LOOP_WORST = 0.05, 0.25
 LIVE = None  # (its folder, the file): made once, by setUpModule
+# The end of the stop's line: what the boards hold
+HELD = r": \d+ boards?, \d+ rows?, \d+ unranked rows?, \d+ players? in the 1000 Club$"
 
 
 def live_boards(megabytes=LIVE_MB, seed=67):
@@ -749,9 +752,9 @@ class RollbackTest(Base):
             self.assertEqual(done.returncode, 0, done.stderr)
             said.append(done.stderr.strip().splitlines()[-1])
         self.assertRegex(said[0], r"scoreboards\.json written whole at the stop in .* s: it has "
-                                  r"every change$")
+                                  r"every change" + HELD)
         self.assertRegex(said[1], r"nothing to write at the stop: scoreboards\.json has every "
-                                  r"change$")
+                                  r"change" + HELD)
         self.assertEqual(as_a_previous_version_reads_it(self.dir.name), kept)
         self.restart()
         self.assertEqual(tables(), kept)
@@ -807,12 +810,14 @@ class StopTest(Base):
         with self.assertLogs("forza-live", "INFO") as logs:
             srv.save_at_stop(self.server())
         self.assertRegex(logs.output[-1], r"scoreboards: scoreboards\.json written whole at the "
-                                          r"stop in \d+\.\d\d s: it has every change$")
+                                          r"stop in \d+\.\d\d s: it has every change: 1 board, "
+                                          r"1 row, 0 unranked rows, 0 players in the 1000 Club$")
         self.assertEqual(as_a_previous_version_reads_it(self.dir.name), tables())
         with self.assertLogs("forza-live", "INFO") as logs:
             scores.STORE.stop()  # stopped again with nothing new
         self.assertEqual(logs.output, ["INFO:forza-live:scoreboards: nothing to write at the "
-                                       "stop: scoreboards.json has every change"])
+                                       "stop: scoreboards.json has every change: 1 board, 1 row, "
+                                       "0 unranked rows, 0 players in the 1000 Club"])
 
     def test_a_stop_that_cannot_write_the_file_says_so_and_loses_nothing(self):
         self.trap(A_XUID, 50.0)
@@ -833,6 +838,239 @@ class StopTest(Base):
         with self.assertNoLogs("forza-live", "INFO"):
             scores.STORE.stop()
         self.assertEqual(os.listdir(self.dir.name), [])
+
+
+class TwoFaultsTest(Base):
+    """The cases the reviews of #69 left (#70): the boards' start and stop with two faults."""
+
+    def server(self):
+        server = StopTest.server(self)
+        self.addCleanup(server.events.db.close)
+        return server
+
+    def unreadable(self):
+        """scoreboards.json there but impossible to read: a folder in its place (a read error,
+        as a disk or the file's permissions give, that no test runner's root gets past)."""
+        os.remove(self.path("scoreboards.json"))
+        os.mkdir(self.path("scoreboards.json"))
+
+    def test_a_file_that_cannot_be_read_falls_back_to_its_copy(self):
+        self.trap(A_XUID, 50.0)
+        scores.STORE.write()
+        self.trap(B_XUID, 60.0)
+        scores.STORE.write()
+        self.trap(C_XUID, 70.0)  # in the journal only
+        kept = tables()
+        real = open
+
+        def failing(name, *args, **kw):  # a disk's read error, on the file in place only
+            if os.path.abspath(name) == self.path("scoreboards.json"):
+                raise OSError(5, "Input/output error", name)
+            return real(name, *args, **kw)
+        with mock.patch.object(durable, "open", failing, create=True), \
+                self.assertLogs("forza_live", "WARNING") as logs:
+            self.restart()
+        self.assertIn("cannot be read", logs.output[0])
+        self.assertEqual(tables(), kept)
+        scores.STORE.write()  # and the copy it read is kept, not the file that failed
+        self.assertEqual(durable.load(self.path("scoreboards.json"))["boards"], kept["boards"])
+        with open(self.path("scoreboards.json.bak")) as f:
+            self.assertEqual(list(json.load(f)["boards"][TRAP]), ["%016X" % A_XUID])
+        self.restart()  # and the next start reads the new file, with nothing put aside
+        self.assertEqual(tables(), kept)
+        self.assertEqual([n for n in os.listdir(self.dir.name) if "unused" in n], [])
+
+    def test_a_file_that_cannot_be_read_and_no_copy_refuses_the_start(self):
+        self.trap(A_XUID, 50.0)
+        scores.STORE.write()
+        self.unreadable()
+        scores.configure(self.dir.name, "main-1")
+        with self.assertLogs("forza-live", "ERROR") as logs, \
+                self.assertRaises(OSError) as raised:
+            scores.STORE.load()
+        self.assertIsInstance(raised.exception, journal.Unreadable)
+        self.assertIn("not started", logs.output[-1])
+        self.assertFalse(scores.STORE.loaded)  # not a store of empty boards
+        with self.assertRaises(journal.Unreadable), self.assertLogs("forza-live", "ERROR"):
+            scores.STORE.board(scores.SPEED_TRAP, 230, 0)  # nor later
+        self.assertTrue(os.path.isdir(self.path("scoreboards.json")))
+        self.assertTrue(os.path.exists(self.path("scoreboards.journal")))
+
+    def test_a_damaged_file_and_a_copy_that_cannot_be_read_refuses_the_start(self):
+        self.trap(A_XUID, 50.0)
+        scores.STORE.write()
+        self.trap(B_XUID, 60.0)
+        scores.STORE.write()
+        self.trap(C_XUID, 70.0)  # in the journal only
+        kept = tables()
+        size = os.path.getsize(self.path("scoreboards.json"))
+        with open(self.path("scoreboards.json"), "wb") as f:  # zeros, as after a power cut
+            f.write(b"\0" * size)
+        with open(self.path("scoreboards.json.bak"), "rb") as f:
+            bak = f.read()
+        real = open
+
+        def failing(name, *args, **kw):  # and the .bak's mode, or the disk, refuses it
+            if os.path.abspath(name) == self.path("scoreboards.json.bak"):
+                raise PermissionError(13, "Permission denied", name)
+            return real(name, *args, **kw)
+        scores.configure(self.dir.name, "main-1")
+        with mock.patch.object(durable, "open", failing, create=True), \
+                self.assertLogs("forza-live", "ERROR") as logs, \
+                self.assertRaises(journal.Unreadable):
+            scores.STORE.load()
+        self.assertRegex(logs.output[-1], r"scoreboards\.json is damaged .* its previous copy "
+                                          r"scoreboards\.json\.bak .* cannot be read .* not started")
+        self.assertFalse(scores.STORE.loaded)
+        with open(self.path("scoreboards.json.bak"), "rb") as f:
+            self.assertEqual(f.read(), bak)  # not replaced by the zeros
+        self.assertEqual([n for n in os.listdir(self.dir.name) if "unused" in n], [])
+        with self.assertLogs("forza_live", "WARNING"):  # readable again: every score is back
+            self.restart()
+        self.assertEqual(tables(), kept)
+
+    def test_a_store_that_fails_at_the_stop_logs_its_own_error_only(self):
+        server = self.server()
+
+        def friends_save():
+            try:
+                raise ValueError("the friends' own first error")
+            except ValueError:
+                raise OSError(28, "No space left on device")
+        server.friends.store.dirty = True
+        server.friends.store.save = friends_save
+        self.trap(A_XUID, 50.0)
+        with self.assertLogs("forza-live", "INFO") as logs:
+            try:  # the stop runs in main()'s finally, while the signal is being handled
+                raise KeyboardInterrupt
+            except KeyboardInterrupt:
+                srv.save_at_stop(server)
+        [failed] = [line for line in logs.output if "could not be written" in line]
+        self.assertIn("No space left on device", failed)
+        self.assertIn("the friends' own first error", failed)  # its own chain stays
+        self.assertNotIn("KeyboardInterrupt", failed)
+        self.assertEqual(failed.count("During handling"), 1, failed)  # its own, only
+        self.assertRegex(logs.output[-1], "written whole at the stop")
+
+    def test_the_server_does_not_start_on_a_file_it_cannot_read(self):
+        os.mkdir(self.path("scoreboards.json"))
+        done = subprocess.run([sys.executable, os.path.join(ROOT, "forza_live_server.py"),
+                               "--host", "127.0.0.1", "--port", "0", "--data-dir", self.dir.name],
+                              cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(done.returncode, 0)
+        last = done.stderr.strip().splitlines()[-1]
+        self.assertRegex(last, r"scoreboards\.json cannot be read .* not started")
+        self.assertNotIn("listening", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+
+    def test_a_start_that_fails_leaves_the_store_unread(self):
+        self.trap(A_XUID, 50.0)
+        scores.configure(self.dir.name, "main-1")
+        with mock.patch.object(journal.Journal, "load", side_effect=RuntimeError("a bug")):
+            self.assertRaises(RuntimeError, scores.STORE.load)
+        self.assertFalse(scores.STORE.loaded)
+        scores.STORE.load()  # the next one reads the boards
+        self.assertEqual(scores.STORE.boards[TRAP]["%016X" % A_XUID]["score"], 50.0)
+
+    def test_an_earlier_save_that_fails_never_skips_the_boards(self):
+        for n, failing in enumerate(("save_state", "ledger", "friends")):
+            with self.subTest(failing=failing):
+                server, ledger = self.server(), mock.Mock(dirty=True)
+                server.friends.store.seen(A_XUID, "DriverA")
+                self.trap(A_XUID, 50.0 + n)  # a new best each time
+                if failing == "save_state":
+                    server.save_state = mock.Mock(side_effect=TypeError("a bug"))
+                elif failing == "ledger":
+                    ledger.save.side_effect = ValueError("a bug")
+                else:
+                    server.friends.store.save = mock.Mock(side_effect=RuntimeError("a bug"))
+                with mock.patch.object(coop_ledger, "LEDGER", ledger), \
+                        self.assertLogs("forza-live", "INFO") as logs:
+                    srv.save_at_stop(server)
+                self.assertTrue(any("a bug" in line for line in logs.output), logs.output)
+                self.assertRegex(logs.output[-1], "written whole at the stop")
+                self.assertEqual(as_a_previous_version_reads_it(self.dir.name), tables())
+                if failing != "ledger":
+                    ledger.save.assert_called_once_with()
+                if failing != "friends":
+                    again = friends.Store(server.friends.store.path)
+                    again.load()
+                    self.assertEqual(again.name(A_XUID), "DriverA")
+
+    def test_a_second_stop_signal_waits_for_the_small_stores(self):
+        server, ledger = self.server(), mock.Mock(dirty=True)
+        server.friends.store.seen(A_XUID, "DriverA")
+        self.trap(A_XUID, 50.0)
+        saved = server.save_state
+
+        def save_state():
+            signal.raise_signal(signal.SIGTERM)  # docker stop again, at the first save
+            return saved()
+        server.save_state = save_state
+        previous = signal.signal(signal.SIGTERM, signal.default_int_handler)  # as run() has it
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        with mock.patch.object(coop_ledger, "LEDGER", ledger), \
+                self.assertLogs("forza-live", "INFO") as logs:
+            try:
+                srv.save_at_stop(server)
+            except KeyboardInterrupt:
+                self.fail("the second signal cut the stores' saves short")
+        ledger.save.assert_called_once_with()
+        again = friends.Store(server.friends.store.path)
+        again.load()
+        self.assertEqual(again.name(A_XUID), "DriverA")
+        self.assertTrue(os.path.exists(server.state_path))
+        self.assertTrue(any("ignored" in line for line in logs.output), logs.output)
+        self.assertEqual(as_a_previous_version_reads_it(self.dir.name), tables())
+        # and after them a signal ends the stop again: the boards' journal has every change
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.default_int_handler)
+
+    def test_the_stop_tells_the_truth_when_the_journal_cannot_take_the_last_change(self):
+        self.trap(A_XUID, 50.0)
+        scores.STORE.stop()
+        self.trap(B_XUID, 60.0)
+        scores.STORE.put("boards", TRAP, "%016X" % C_XUID,
+                         dict(scores.STORE.boards[TRAP]["%016X" % B_XUID], xuid="%016X" % C_XUID))
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(journal.Journal, "append", side_effect=full), \
+                mock.patch.object(scores, "dump", side_effect=full), \
+                self.assertLogs("forza-live", "INFO") as logs:
+            scores.STORE.stop()
+        self.assertEqual([r.levelname for r in logs.records], ["WARNING"])
+        self.assertNotIn("has every change", logs.output[0])
+        self.assertIn("could not be added to its journal", logs.output[0])
+        # and when only the journal fails, the whole file still takes the change
+        with mock.patch.object(journal.Journal, "append", side_effect=full), \
+                self.assertLogs("forza-live", "INFO") as logs:
+            scores.STORE.stop()
+        self.assertRegex(logs.output[-1], "written whole at the stop .*: it has every change")
+        self.assertIn("%016X" % C_XUID, as_a_previous_version_reads_it(self.dir.name)["boards"][TRAP])
+
+    def fold(self, folder):
+        """The last line of the operator's guide's command that puts the journal in the file."""
+        with open(os.path.join(ROOT, "docs", "operating.md")) as f:
+            [line] = [line for line in f if "scores.STORE.stop()" in line]
+        code = line.strip().split(' -c "', 1)[1].rsplit('"', 1)[0].replace("'/data'", repr(folder))
+        done = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True,
+                              text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stderr.strip().splitlines()[-1]
+
+    def test_the_fold_command_says_what_it_read(self):
+        if not os.path.exists(os.path.join(ROOT, "docs", "operating.md")):
+            self.skipTest("no docs here")
+        wrong = os.path.join(self.dir.name, "not-the-data-folder")
+        os.mkdir(wrong)
+        last = self.fold(wrong)
+        self.assertNotIn("has every change", last)
+        self.assertRegex(last, r"no scoreboards\.json .* nothing to write")
+        self.trap(A_XUID, 50.0)
+        self.lap(B_XUID, 115.13)
+        self.medal(B_XUID, 1398, 1)
+        scores.STORE.stop()
+        last = self.fold(self.dir.name)
+        self.assertRegex(last, r"nothing to write at the stop: scoreboards\.json has every change: "
+                               r"2 boards, 2 rows, 0 unranked rows, 1 player in the 1000 Club$")
 
 
 CHILD = r"""
