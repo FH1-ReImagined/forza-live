@@ -167,7 +167,9 @@ class TwoFaults(Durable):
                     with self.assertLogs("forza_live", "WARNING"):
                         self.assertEqual(durable.load(self.path), {"n": 1})
                 copies = self.stopped_at_every_step(lambda: self.save({"n": 3}))
-                self.assertGreaterEqual(len(copies), 3)
+                # the flush and the rename, and without a start from the .bak its three steps
+                # (Windows makes no flush of the folder)
+                self.assertGreaterEqual(len(copies), 2 if after_a_start_from_it else 5)
                 for folder in copies:
                     path = os.path.join(folder, "scoreboards.json")
                     with self.subTest(stop=os.path.basename(folder)), \
