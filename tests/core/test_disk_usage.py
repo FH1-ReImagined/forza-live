@@ -235,6 +235,10 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(srv.keep_counted((("uploads", limits.STORED),), every=3600))
             clubs.write_blob("car1_tuning.bin", bytes(100))  # answered before any count
             await self.counted(limits.STORED)
+            for _ in range(4000):  # and the task's line, once it has the thread's count back
+                if any("disk usage: uploads:" in line for line in logs.output):
+                    break
+                await asyncio.sleep(0.005)
             with mock.patch.object(limits, "DISK_CAP", total + 1000):
                 for n in range(2, 11):
                     clubs.write_blob("car%d_tuning.bin" % n, bytes(100))
@@ -294,8 +298,8 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
             limits.wrote(3 << 20)  # counted, never written: the total is 3 MB too full
             total += fill(self.path("market", "copied"), 10, size=100)  # and files nobody told it of
             self.assertEqual(limits.usage(), total - 1000 + (3 << 20))
-            for _ in range(4000):
-                if limits.usage() == total:
+            for _ in range(4000):  # the thread's count, then the task's line once it has it back
+                if limits.usage() == total and "MB off" in " ".join(logs.output):
                     break
                 await asyncio.sleep(0.005)
             task.cancel()

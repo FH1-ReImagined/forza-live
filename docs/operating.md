@@ -1,6 +1,6 @@
 # Operating a public Forza Live server
 
-Day-to-day running of a server other people play on: the operator endpoints and the [operator panel](#operator-panel), chat, photo and design moderation, the score admin, the list of community servers, and backups. Options are in [configuration](configuration.md); the first setup is in the [hosting guide](hosting.md).
+Day-to-day running of a server other people play on: the operator endpoints and the [operator panel](#operator-panel), chat, photo and design moderation, the score admin, the list of community servers, [what holds the event loop](#what-holds-the-event-loop), and backups. Options are in [configuration](configuration.md); the first setup is in the [hosting guide](hosting.md).
 
 ## Operator endpoints
 
@@ -638,6 +638,69 @@ most once per address and reason every 5 minutes:
 | 6 `too many sign-ins from this address` | over 2 new sign-ins a second from one address: the game's next HELLO may get in |
 
 A HELLO that cannot be read is logged as `malformed`.
+
+## What holds the event loop
+
+The server is one event loop: the game's datagrams, its title-service calls, the website's
+routes and the operator's all take turns on it. Whatever runs long there pauses every player
+meanwhile (the scoreboards and the notifications were written whole on it until #69 and #73). The
+server times every piece of work on the loop and logs, as a warning, the ones that held it longer
+than `--stall-limit` (50 ms; `0` turns all of this off):
+
+    loop: datagram PRESENCE from #12 'Gamertag' held the event loop 61 ms (limit 50 ms)
+    loop: title Scoreboard.SubmitScore held the event loop 132 ms (limit 50 ms)
+    loop: http GET /community/gallery.json held the event loop 75 ms (limit 50 ms)
+    loop: operator POST /admin/scores/* held the event loop 210 ms (limit 50 ms)
+    loop: task expire held the event loop 58 ms (limit 50 ms)
+    loop: the event loop was 180 ms late, held by work that no entry point times or by many short pieces of work (limit 50 ms)
+
+The word after `loop:` is the kind of work, then what it was:
+
+| Kind | What it names |
+|---|---|
+| `datagram` | the packet type (`HELLO`, `RELAY`, `MATCH_SEARCH`, ...) and, for a signed-in player, `#id 'gamertag'` as the other datagram lines do; never an address |
+| `title` | the title service and method the game called (`Hopper.GetGameOptions`); no player |
+| `http` | any other route, the status page and the website's included: its method and the route the server knows, without the query, ids or file names (`/community/img/*`); `other` for a path the server has no route for, so that no word of a requester's own is shown |
+| `operator` | an operator route (`/admin/...`, `/operator/...`, `/gift`, `/notify`, `/broadcast`, `/world/event`), the same way |
+| `task` | a periodic task (`keep_written`, `keep_counted`, ...) or a step of the main loop's once-a-second tick (`expire`, `maybe_save_state`, `friends.maybe_save`, `world_tick`, `events.flush`, ...) |
+| `stall` | the loop was late and nothing timed explains it (below) |
+
+What is timed: each datagram from the moment the server gets it to the end of its handler; each
+stretch a connection's task runs between two waits, which for the game's title calls and the web
+and operator routes is the whole answer from the request read to the answer written (an answer
+that has to wait for its reader, or a signature check that waits for the budget, is two stretches,
+each timed on its own and named after its request); every other task's stretches the same way; and
+the tick's steps one at a time. A heartbeat wakes every 25 ms and notices when it woke late: what
+is late beyond the units already logged is a `stall` line. That catches the rest, the work no
+entry point times: the main loop between its timed steps, the transports' own work, a callback
+of the loop, or many short pieces of work that together held it (a line each would be one under
+the limit). The volunteer relay mode (`--relay-only`) has no watchdog.
+
+The worst ones also say where they were. The work is over when it is measured, so a watcher thread
+looks at the loop while it is held: once the loop has been held `--stall-stack` (250 ms; `0`: never),
+it logs the loop's stack, innermost first, once per stall, while the work still runs. The line of
+the work that held it then ends with the same number. An example (the clubs' file is far from that
+size today; the line numbers are those of the running version):
+
+    loop: stall 3: the event loop has been held 262 ms so far, at write_json (core/durable.py:85) < save (social/clubs.py:60) < accept_clan_invites (social/clubs.py:183) < service_call (title_services/lsp.py:974) < handle (title_services/lsp.py:1216) < lsp_answer (server.py:1866) < ...
+    loop: title Xls.User.AcceptClanInvites held the event loop 498 ms (limit 50 ms) (stall 3)
+
+A stall that never ends (the loop stuck for good) still has its stack line.
+
+At most 10 lines a minute of each kind (the stack lines are a kind too, `stack`) are logged; the rest are counted, and once the minute is
+over one line says how many were left out and which of them was the worst:
+
+    loop: 37 more datagram line(s) were left out in that minute; the worst of them held the loop 812 ms: datagram MATCH_SEARCH from #12 'Gamertag'
+
+The status page has the numbers without the log, and nothing about who it was (for an operator
+route, not even which: only the kind, `"kind": "operator"`, with no `what`):
+
+    "event_loop": {"limit_ms": 50, "over_limit_last_hour": 4, "over_limit_since_start": 19,
+                   "worst_last_hour": {"kind": "title", "what": "Scoreboard.SubmitScore", "ms": 132, "seconds_ago": 840}}
+
+(`{"limit_ms": 0}` when it is off.) Timing costs about 0.15 microseconds a datagram and 0.25 a
+task's stretch. A machine that is busy with other work makes the loop late too: a `stall` line
+with nothing else around it, now and then, can be the machine rather than the server.
 
 ## Website accounts
 
