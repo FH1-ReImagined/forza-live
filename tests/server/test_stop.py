@@ -207,6 +207,36 @@ class EndTest(unittest.TestCase):
         for number in srv.STOP_SIGNALS:
             self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
 
+    def test_a_sigint_in_the_moment_the_loop_lets_go(self):
+        """The loop's remove_signal_handler gives SIGINT Python's default handler back before
+        end() sets SIG_IGN: a SIGINT then (a flood, taken by another thread while the main one
+        blocks it) raised KeyboardInterrupt out of end(), and the rest of main()'s stop after
+        the saves was skipped."""
+        loop = asyncio.new_event_loop()
+        try:
+            stop = srv.StopRequest().install(loop)
+            if signal.SIGINT not in stop.taken:
+                self.skipTest("the loop has no signal handlers here")
+            real, raised = loop.remove_signal_handler, []
+
+            def remove(number):
+                found = real(number)
+                if number == signal.SIGINT and not raised:
+                    self.assertIs(signal.getsignal(number), signal.default_int_handler)
+                    raised.append(number)
+                    signal.raise_signal(signal.SIGINT)  # (no mask: pthread_sigmask is mocked)
+                return found
+            with mock.patch.object(loop, "remove_signal_handler", remove), \
+                    mock.patch.object(signal, "pthread_sigmask", lambda how, mask: set()):
+                try:
+                    stop.end()
+                except KeyboardInterrupt:
+                    self.fail("end() raised the SIGINT's KeyboardInterrupt")
+        finally:
+            loop.close()
+        for number in srv.STOP_SIGNALS:
+            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
+
 
 class StopAcceptingTest(unittest.IsolatedAsyncioTestCase):
     async def test_no_new_connection_is_served_and_the_open_ones_go_on(self):

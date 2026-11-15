@@ -2349,11 +2349,16 @@ class StopRequest:
             blocked = signal.pthread_sigmask(signal.SIG_BLOCK, self.taken)
         try:
             for number in self.taken:
-                try:
-                    self.loop.remove_signal_handler(number)  # SIG_DFL: SIG_IGN at once
-                except (RuntimeError, ValueError):  # the loop is closed, or another thread
-                    pass
-                signal.signal(number, signal.SIG_IGN)
+                while True:
+                    try:
+                        try:
+                            self.loop.remove_signal_handler(number)  # SIG_DFL: SIG_IGN at once
+                        except (RuntimeError, ValueError):  # the loop is closed, another thread
+                            pass
+                        signal.signal(number, signal.SIG_IGN)
+                        break
+                    except KeyboardInterrupt:  # a SIGINT that met the default handler the
+                        continue  # loop gave back for that moment: the stop is under way
             del self.taken[:]
             self.quiet()
         finally:
