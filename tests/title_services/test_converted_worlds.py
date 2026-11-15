@@ -524,6 +524,18 @@ class CoopInAWorldTest(CoopRoomCase):
         self.assertEqual(ledger.LEDGER.pending(self.b.xuid), [])
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, ledger.FILE)))
 
+    def test_the_ledger_does_not_open_a_world_s_round_while_it_is_raced(self):
+        """Also while the round is raced (an empty round is dropped when it closes anyway): no
+        round in the ledger, and so no campaign race multiplier for its players."""
+        self.say(self.a, "/event FR05")
+        self.server.world_tick()
+        self.game_options(self.a, lsp.COOP_HOPPER)
+        self.game_options(self.a, lsp.COOP_HOPPER)   # its prefetch: the round started
+        self.assertIn(self.sid, world.WORLDS.racing)
+        self.assertEqual(ledger.LEDGER.rounds, {})
+        self.assertIsNone(ledger.LEDGER.open_round_of(self.a.xuid))
+        self.assertIsNone(ledger.LEDGER.open_round_of(self.b.xuid))
+
 
 class CoopInColoradoTest(CoopRoomCase):
     """The same round in Colorado: the ledger has it and each player's result."""
