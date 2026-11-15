@@ -631,6 +631,20 @@ class ChallengesTest(Base):
             self.assertEqual((daily["progress"], daily["completed"]), (1, 1))
             self.assertEqual(objectives.document(LEGACY)["sets"][0]["objectives"][0]["progress"], 0)
 
+    def test_a_photo_from_a_converted_world_is_published_but_no_step(self):
+        """core/rooms.py: a player whose game is in a converted world (its room ends in "+anthem"
+        or "+fh2") gets its photo published, but the challenges are Colorado's."""
+        self.addCleanup(setattr, objectives, "ENABLED", objectives.ENABLED)
+        objectives.ENABLED = True
+        self.server.player_world = lambda xuid: ("anthem", 1, "+anthem#TU4") if xuid == ALICE else None
+        big_shot = objectives.objective("photo", "Upload a Big Shot", 1)
+        with mock.patch.object(objectives, "choose", lambda kind, pid, seed=None: [dict(big_shot)]):
+            self.upload(ALICE, make_jpeg())
+            self.assertEqual(self.only_photo()[1]["owner"], ALICE)
+            self.assertEqual(objectives.document(ALICE)["sets"][0]["objectives"][0]["progress"], 0)
+            self.upload(BOB, make_jpeg(), name="PHOTO2")
+            self.assertEqual(objectives.document(BOB)["sets"][0]["objectives"][0]["progress"], 1)
+
 
 class BigShotUploadTest(Base):
     """Photo mode's large photo: LargeFileUpload.Create(size, overwriteOldest false,

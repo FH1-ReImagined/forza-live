@@ -394,6 +394,29 @@ actions take an optional `{"note": "...", "expect": "pending"}`; with `expect` t
 only to a design in that state (409 otherwise), which is how the worker never overrides you: it
 releases, holds or hides only designs that are still pending.
 
+## Converted worlds
+
+The launcher can play Forza Horizon 2's and Fast & Furious's maps converted for FH1 (a "world")
+online. A world has a room of its own on the server: the player's room plus `+fh2` or `+anthem`
+(and `#TU4` after it for a Title Update 4 game), so its players meet only each other. The log's
+`join` line shows it: `join #N 'tag' xuid X room '+anthem#TU4'`.
+
+A world is another map with other roads, so the server takes nothing of Colorado's from a game in
+one: no leaderboard rows (events, Rivals, speed traps, speed zones, also unranked ones), ghosts,
+rival messages, 1000 Club medals, race stats, online profile (online XP), daily and weekly
+challenge progress (so no weekly gift from it), `firstScore`, co-op campaign results or Xbox LIVE
+stats. The game is told each call went through. Signing in, friends, chat, clubs, matchmaking in
+the room, the session's own play, photos, designs and videos are as in Colorado.
+[Title services](title_services.md#converted-worlds-rooms-forza_livecoreroomspy) has the calls,
+the answers and how the server finds a call's room.
+
+Nothing to set up. Only a room that ends in `+anthem` or `+fh2` is a world's; a player who names
+their own room that way by hand is in it too (the server cannot tell the two apart). The log says
+once per session and kind what it left out:
+`world: <XUID> in room '+fh2#TU4' (Forza Horizon 2's world): not kept, as Colorado's: race stats
+(first: User.WriteRaceStatsEx; told once per session)`. A row that is on a board already is
+not touched: `/admin/scores` (below) finds and moves rows as before.
+
 ## Score admin
 
 For a public server: start it with `--server-id main` (or `FORZA_SERVER_ID=main`), before the

@@ -61,6 +61,7 @@ from forza_live.competition import scores
 from forza_live.core import bans
 from forza_live.core import durable
 from forza_live.core import limits
+from forza_live.core import rooms
 
 log = logging.getLogger("forza-live")
 
@@ -283,6 +284,9 @@ def step(xuid, type_, match, now=None):
         return False
     trusted, build = scores.source()
     if not trusted:
+        return False
+    if rooms.call_world():  # a converted world's results are not Colorado's (core/rooms.py)
+        rooms.left_out("challenge progress", "a %s step" % type_)
         return False
     key = hx(xuid)
     if bans.refused(key, "challenge progress"):  # core/bans.py: no progress, so no gift either

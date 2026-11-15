@@ -413,6 +413,79 @@ its XSession and a player who came in during a round (`player #16927 is 0.77.0.1
 `joined 1 player(s), 6/8`), but nothing that names who was missing; finding out why that
 game left them out needs the logs of both.
 
+### Converted worlds' rooms (`forza_live/core/rooms.py`)
+
+Players meet only the others in their room: the game's `live_room` setting (or `FORZA_ROOM`),
+sent in its HELLO; a Title Update 4 game adds `#TU4`, so the default room of a TU4 game is
+`#TU4`. The launcher can play Forza Horizon 2's and Fast & Furious's maps converted for FH1 (a
+"world", [FH1 #832](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/pull/832)) online,
+and gives a world a room of its own: the player's room plus `+fh2` or `+anthem`
+(`launcher/forza_launcher/fh2ffworld.py`, `world_room`; the room is cut so that the ending stays
+whole in the game's 32 characters). So the players in a world meet each other, and the server
+sees `+anthem#TU4`, `club+fh2#TU4` and so on.
+
+A world is another map with other roads: the boards, the 1000 Club, the daily and weekly
+challenges and the co-op campaign are Colorado's. `rooms.world_key(room)` is `anthem`, `fh2` or
+None: only a room that **ends** in `+anthem` or `+fh2` (before `#TU4`), exactly as the launcher
+writes it, so the default room and the rooms players name are never caught. A room a player names
+`club+fh2` by hand is a world's room all the same: the server cannot tell it from the launcher's,
+and it is where the players of that world in the room `club` are.
+
+**Which world a call is from.** The title calls come over HTTP and name their player
+(`X-UserId`, signed); the room is the UDP session's. `ForzaLive.player_world(xuid)` looks at the
+player's live sessions (`rooms.world_of_sessions`):
+
+- a session in a world's room makes the call that world's, also when the player has another
+  session in Colorado (two games on one identity: the Colorado one loses its results while both
+  play; between two worlds, the session heard last);
+- only sessions that proved the XUID count (the HELLO's signature or friends key), or any
+  session of an XUID with no key on record: anyone can say HELLO with another player's XUID, and
+  a session like that in a world's room must not take that player's Colorado results;
+- with no session at all, the player's world session that left (BYE, timed out) in the last 10
+  minutes (`rooms.LEFT_KEEP`) still counts, for a call that comes between a game's last datagram
+  and its next HELLO; a new session decides as soon as it says HELLO. A room never changes within
+  a game's session (the game reads it once), so a player who moves between Colorado and a world
+  starts another game, which is another session.
+
+**What a world's call keeps: nothing of Colorado's.** `lsp.WORLD_ANSWERS` answers these calls
+as the server already answers a call it keeps nothing of, and does not run their handlers. The
+game takes each answer as done and does not send the call again:
+
+| Call | What it would keep | A world's answer |
+| --- | --- | --- |
+| `Scoreboard.SubmitScore`, `SubmitScoreEx` | event, Rivals, speed trap, speed zone rows (also unranked ones), the challenges' trap and zone steps, `firstScore` | success, a new `scoreId`, `uploadFiles` false: what a time that is not a best gets, or a banned player's. No ghost is asked for |
+| `Scoreboard.UploadFile` | a Rivals ghost | success with no results, as for a score the server never asked a ghost for |
+| `Scoreboard.NotifyRival` | the rival's "beat your time" message | success |
+| `Challenge.ChallengeCompleted` | a 1000 Club medal, the challenges' medal step, `firstScore` | success (it has no results) |
+| `User.WriteRaceStats`, `WriteRaceStatsEx` | the race stats in `players/<XUID>.json`, the challenges' race step, the co-op ledger's report and winnings | success (no results) |
+| `OnlineProfile.UpdateAll` | the profile: online XP (Race Central's ONLINE XP board, `GetRows` type 4), levels, credits, online races | success (no results) |
+
+And inside calls that stay:
+
+- `Hopper.GetGameOptions`: a Co-op Festival campaign round in a world is served as before, but
+  the co-op ledger does not open it (`world.Worlds.next_round`, `ledger_round`), so it has no
+  result for the launcher; `/event` there says so in the host's notice;
+- `Scoreboard.GetBestScores`: answered, but a world's race start is no score token;
+- the challenges (`objectives.step`, where every step goes) take no step from a world's call, so
+  a world's photo is published as a community photo but is not a photo step; `firstScore`
+  (`scores.scored`) is not set from one;
+- Xbox LIVE stats (UDP, `server.py` `on_stats`): a write from a world's game is dropped (no
+  rating, and no co-op ledger check), reads are answered.
+
+The server logs it once per session and kind: `world: <XUID> in room '+anthem#TU4' (Fast &
+Furious's world): not kept, as Colorado's: scores (first: Scoreboard.SubmitScoreEx; told once per
+session)`. The kinds: scores, ghosts, rival messages, 1000 Club medals, race stats, online profile
+(online XP), challenge progress, co-op campaign results, Xbox LIVE stats.
+
+What stays as it is in a world: signing in (`Logon2`, the player's record), presence, friends,
+chat and clubs, matchmaking in the room, the session's own play (the Horizon World and its
+events, Playground Games, head-to-head), reads of the boards, photos, designs and videos, the
+Auction House and gifts, community events (their attendance counts in the session the organizer
+names). The Horizon World's events and the head-to-head destinations are still Colorado's tracks
+and landmarks: the server sends them to a world as it does in Colorado. `tests/title_services/test_converted_worlds.py` checks each call from a world against the
+whole data folder and the stores in memory, and the same call from Colorado; `tests/core/test_rooms.py`
+the rooms and the lookup.
+
 ### XP and credits
 
 The game computes the rewards itself at the end of an online race ("XP REWARDS": finished

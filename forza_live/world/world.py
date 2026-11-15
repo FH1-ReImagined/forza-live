@@ -33,6 +33,7 @@ import random
 import sqlite3
 import time
 
+from forza_live.core import rooms
 from forza_live.world import campaign as forza_campaign
 from forza_live.world import coop_ledger as ledger
 
@@ -207,10 +208,12 @@ class Worlds:
                  event[3], event[4])
         return event
 
-    def next_round(self, sid, humans, trusted=True):
+    def next_round(self, sid, humans, trusted=True, ledger_round=True):
         """GetGameOptions from the host of world sid: the event's XML, or None (world).
         trusted: the call carries the host's own friends key (lsp.caller_trusted);
-        only such calls move a campaign round along (start it in the ledger, close it)."""
+        only such calls move a campaign round along (start it in the ledger, close it).
+        ledger_round False: the host's game is in a converted world (core/rooms.py), whose
+        campaign rounds are raced but never the career's: the ledger does not keep them."""
         st = self.state.get(sid)
         campaign = st.get("campaign") if st else None
         if not trusted and (campaign is not None or ledger.LEDGER.open_round(sid)):
@@ -237,8 +240,11 @@ class Worlds:
                 members = dict(self.members.get(sid, {}))
                 self.rounds[sid] = (st["campaign"], time.monotonic(), members, st.get("by", ""))
                 # the career's side: coop_ledger keeps the round and its results
-                ledger.LEDGER.start_round(sid, st["campaign"], st.get("by_xuid", 0),
-                                          st.get("by", ""), members)
+                if ledger_round:
+                    ledger.LEDGER.start_round(sid, st["campaign"], st.get("by_xuid", 0),
+                                              st.get("by", ""), members)
+                else:
+                    rooms.left_out("co-op campaign results", "a campaign round's start")
             del self.state[sid]
         elif trusted:  # the free-roam round after an event
             self.racing.discard(sid)

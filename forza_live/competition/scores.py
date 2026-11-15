@@ -59,6 +59,7 @@ from forza_live.competition import score_token
 from forza_live.core import bans
 from forza_live.core import journal
 from forza_live.core import limits
+from forza_live.core import rooms
 from forza_live.network import xtsw as x
 from forza_live.network import xtsw_all as A
 from forza_live.core import durable
@@ -452,7 +453,7 @@ def configure(data_dir, server=None, scored=None):
 def scored(xuid):
     """The SCORED hook: a failure there (a full disk, the players folder) is logged and never
     fails the result itself."""
-    if SCORED is not None:
+    if SCORED is not None and not rooms.call_world():  # a converted world's: not Colorado's
         try:
             SCORED(xuid)
         except Exception as e:  # noqa: BLE001 - the score counts whatever the hook does
@@ -1153,9 +1154,11 @@ def get_best_scores(xuid, body):
     time that beats it (FH1 #569): answering the board's record kept every slower time, and the
     player, off the board."""
     p, _ = x.decode(x.ScoreboardGetBestScores_Params, body)
-    # The event's race is loading: its start, for the result that follows (score_token).
-    score_token.start(xuid, p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"],
-                      source()[0])
+    # The event's race is loading: its start, for the result that follows (score_token). Not a
+    # converted world's race (core/rooms.py): its results are not taken.
+    if not rooms.call_world():
+        score_token.start(xuid, p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"],
+                          source()[0])
     best = own_best(xuid, p["scoreType"], p["gameScoreboardId"], p["isServerTimeTrial"])
     log.info("title: GetBestScores %016X board %d type %d car %d class %d: %s", xuid,
              p["gameScoreboardId"], p["scoreType"], p["carId"], p["carClassId"],

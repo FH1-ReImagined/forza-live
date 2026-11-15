@@ -40,6 +40,7 @@ from forza_live.social import friends
 from forza_live.competition import events
 from forza_live.core import limits
 from forza_live.core import media
+from forza_live.core import rooms
 from forza_live.content import online
 from forza_live.title_services import lsp
 from forza_live.network import proxy
@@ -344,6 +345,9 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.events = events.Events(self)
         self.chat.commands = self.chat_command
         self.world_keys = {}  # world session id -> its playlist (lsp.WORLD_HOPPERS)
+        # XUID -> (world key, token, room, monotonic time) of its last converted world session
+        # that left (player_world, rooms.LEFT_KEEP)
+        self.left_worlds = {}
         # session id -> (search key, record after the slots, monotonic time): the newest
         # description of a lobby from its host (op 1) or the game's host (op 4) (#391)
         self.lobby_tails = {}
@@ -1241,6 +1245,11 @@ class ForzaLive(asyncio.DatagramProtocol):
         """Xbox LIVE stats (stats.py): op 1 a write (for the player or a player in its
         room: a game's host writes everyone's result), op 2 a read answered with STATS_ROWS."""
         if body[0] == 1:
+            key = rooms.world_key(peer.room)
+            if key:  # a converted world's game: its results are not Colorado's (core/rooms.py)
+                rooms.left_out("Xbox LIVE stats", "a stats write", (key, peer.token, peer.room),
+                               peer.xuid)
+                return
             room = {p.xuid: p.name for p in self.room_peers(peer)}
             room[peer.xuid] = peer.name
             stats.write(peer.xuid, lambda x: room.get(x) or lsp.gamertag_of(x), body[1:],
@@ -1359,6 +1368,26 @@ class ForzaLive(asyncio.DatagramProtocol):
         found = [p.features for p in self.peers.values() if p.xuid == xuid]
         return max(found) if found else None
 
+    # --- the converted worlds' rooms (core/rooms.py) ---
+
+    def counts_for_world(self, peer):
+        """Whether this session's room speaks for its XUID: it proved the XUID (its HELLO's
+        friends key or signature), or the XUID has no key on record (then nothing can prove it,
+        and its results are unranked anyway). Anyone can say HELLO with another player's XUID in
+        a world's room: that must not take the player's Colorado results off the boards."""
+        return bool(peer.friends_ok) or not auth.bound(self.friends.store, peer.xuid)
+
+    def player_world(self, xuid):
+        """(world key, session token, room) of the converted world the player's game is in, or
+        None (Colorado): its live sessions' rooms, else its world session that left within
+        rooms.LEFT_KEEP (rooms.world_of_sessions). lsp.service_call asks it for every title
+        call."""
+        if not xuid:
+            return None
+        sessions = [(p.room, p.token, p.seen) for p in self.peers.values()
+                    if p.xuid == xuid and self.counts_for_world(p)]
+        return rooms.world_of_sessions(sessions, self.left_worlds.get(xuid), time.monotonic())
+
     def coop_placement(self, peer, found):
         """Co-op Festival placement: only worlds led by one of the searcher's friends (the
         friends list kept by friends.py, accepted both ways), both of them proven by
@@ -1449,6 +1478,9 @@ class ForzaLive(asyncio.DatagramProtocol):
             if event.loaners == 0:  # the lobby lends a stock car that meets it: there is none
                 text += (". No stock car fits it (%s): only players whose own upgraded car "
                          "fits can race it" % event.restriction_text())
+            if rooms.world_key(peer.room):  # a converted world: the campaign is Colorado's
+                text += (". This world's races are not the campaign's: no result is kept for "
+                         "your career")
             for p in self.world_members(sid):
                 if p.features & chat.FEATURE:
                     self.chat.notice(p, text)
@@ -1620,6 +1652,16 @@ class ForzaLive(asyncio.DatagramProtocol):
         return pid
 
     def drop(self, peer, why):
+        if self.counts_for_world(peer):
+            key = rooms.world_key(peer.room)
+            if key:
+                self.left_worlds[peer.xuid] = (key, peer.token, peer.room, time.monotonic())
+                if len(self.left_worlds) > 10000:
+                    now = time.monotonic()
+                    self.left_worlds = {x: v for x, v in self.left_worlds.items()
+                                        if now - v[3] < rooms.LEFT_KEEP}
+            else:
+                self.left_worlds.pop(peer.xuid, None)
         if why == "timed out":
             self.gone[peer.token] = (peer.id, peer.xuid, time.monotonic())
             while len(self.gone) > GONE_MAX:
