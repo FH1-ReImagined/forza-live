@@ -724,7 +724,8 @@ the routes are off and the account page cannot delete.
 
 `docker compose stop` (SIGTERM) and Ctrl+C in a terminal (SIGINT) stop the server the same way.
 The signal only asks for the stop: the server ends what it is doing at that moment (a datagram, a
-request, a tick of its timers) and then stops, in this order:
+request, a tick of its timers) and then stops, in this order. A Discord status update under way
+is not waited for: the saves come first.
 
 1. `stop: SIGTERM: the server stops` in the log (`SIGINT` for Ctrl+C).
 2. The HTTP port takes no new connection from here. Those already open end once the saves are
@@ -734,8 +735,10 @@ request, a tick of its timers) and then stops, in this order:
 4. The saves: the registrations (`live_state.json`), the co-op ledger and friends, then
    `notifications.json` and the boards' `scoreboards.json` last, each with its own line
    ([scores on disk](#scores-on-disk), [notifications on disk](#notifications-on-disk)).
-5. The Discord status says the server is offline (when it is set up), the UDP port closes, and
-   the process ends with exit status 0.
+5. When the Discord status is set up: an update that was under way when the signal came is given
+   up to 5 s more to end, then the status says the server is offline (with its own line only
+   when Discord cannot be reached). Then the UDP port closes, and the process ends with exit
+   status 0.
 
 So a stop ends with the notifications' line and then the boards' (after a second signal, one
 more line, below):
@@ -754,16 +757,22 @@ run (a file it cannot read) still ends with exit status 1 and its own line. A vo
 second `docker compose stop`, Ctrl+C pressed again) is noted and ignored until the process ends:
 no save is cut short, and the log says so once for each part of the stop it came in, the first
 line before the notifications' line, the second after the boards' line (the stop's last line
-then):
+then). After the first signal of each part the server ignores the others outright, so even a
+flood of them does not slow the saves:
 
     stop: SIGTERM again while the registrations, co-op ledger and friends were written: ignored until they were
     stop: SIGTERM again while notifications.json and scoreboards.json were written: ignored until they were
 
 The exit status stays 0, even for a signal that comes as the process ends.
 
-The stop takes a fraction of a second, most of it those last two writes; the compose file gives it
-20 s (`stop_grace_period`). Only a kill ends it earlier: Docker's at the end of that time,
-`docker compose kill`, or SIGKILL. A kill costs the boards and the notifications nothing (their
+The stop takes a fraction of a second, most of it those last two writes (a slow disk can make them
+take a few seconds), and on a bad network a few more for the Discord status after them; the
+compose file gives it 20 s (`stop_grace_period`). Only a kill ends it earlier: Docker's at the end
+of that time, `docker compose kill`, or SIGKILL. Since every signal after the first is ignored, a
+stop that does not end (the Discord status stuck on the network after the saves, say) is not
+ended by a second Ctrl+C either: in a terminal, Ctrl+\ (SIGQUIT) or `kill -9` ends it. Likewise
+a server whose event loop is held for good never gets to the stop: only a kill ends it, and the
+[watchdog's](#what-holds-the-event-loop) lines say what held the loop. A kill costs the boards and the notifications nothing (their
 journals have every change) and the other stores what changed since their last save; and it
 leaves `scoreboards.json` and `notifications.json` complete only together with their journals,
 which matters before a rollback ([scores on disk](#scores-on-disk)).
