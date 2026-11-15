@@ -27,6 +27,8 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | | `FORZA_DISK_CAP_MB` | cap of ghosts, cars and market blobs (default 4096) |
 | | `FORZA_MAX_PLAYERS` | cap of player records, and of the records with a key in `friends.json` (the players' keys, friends and blocks); as many again may have no key (a name another player blocked or asked) (default 20000) |
 | `--no-invites` | `FORZA_INVITES=0` | drop every game invite |
+| `--stall-limit MS` | | log what holds the event loop longer than this, and count it on the status page (default 50; `0`: off) ([what holds the event loop](operating.md#what-holds-the-event-loop)) |
+| `--stall-stack MS` | | also log where the loop was once it has been held this long (default 250; `0`: never) |
 | `--server-name HOST` | `FORZA_SERVER_NAMES` | the names players type to reach this server ([signed requests](#signed-requests)) |
 | `--rebind-legacy` | `FORZA_REBIND_LEGACY=1` | let an XUID bound to a friends key move to the first signed game |
 | `--raw-key-cutoff UNIX_TIME` | `FORZA_RAW_KEY_CUTOFF` | refuse friends keys sent raw after this time |

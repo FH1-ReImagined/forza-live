@@ -57,6 +57,7 @@ from forza_live.world import world
 from forza_live.world import world_host
 from forza_live.core import durable
 from forza_live.core import journal
+from forza_live.core import watchdog
 
 MAGIC = b"RLV1"
 VERSION = 1
@@ -92,6 +93,13 @@ CHAT = chat.KIND  # 23
 WORLD_EVENT = 18  # server -> a Horizon World's host: end the free roam for an event
 CHALLENGE = challenge.KIND  # 19: head-to-head challenges in the world (challenge.py)
 STATS, STATS_ROWS = 20, 21  # Xbox LIVE stats written and read, the rows (stats.py)
+# The datagrams' names, for the watchdog's lines (core/watchdog.py)
+DATAGRAM_NAMES = {
+    HELLO: "HELLO", BROADCAST: "BROADCAST", RELAY: "RELAY", LIST: "LIST", PRESENCE: "PRESENCE",
+    INVITE: "INVITE", BYE: "BYE", MATCH_PUBLISH: "MATCH_PUBLISH", MATCH_SEARCH: "MATCH_SEARCH",
+    CHALLENGE: "CHALLENGE", STATS: "STATS", FRIEND: "FRIEND", CHAT: "CHAT", events.KIND: "EVENT",
+    RELAY_INFO: "RELAY_INFO", relay_node.RELAY_LINK: "RELAY_LINK",
+    relay_node.RELAY_PONG: "RELAY_PONG"}
 MAX_MATCH_RECORD = 1300
 MATCH_RESULTS_MAX = 25  # sessions answered per search (Forza asks for up to 25)
 SESSION_INFO_SIZE = 0x3C  # XSESSION_INFO: session id, host XNADDR, key-exchange key
@@ -315,6 +323,7 @@ class ForzaLive(asyncio.DatagramProtocol):
         self.by_addr = {}  # (ip, port) -> Peer
         self.next_id = random.randrange(1, 0x1000)
         self.transport = None
+        self.handling = None  # the type of the datagram being handled, for the watchdog
         self.started = time.time()
         self.relayed_packets = 0
         self.http_port = 0  # TCP port of the title servers, told to clients; 0 = none
@@ -508,6 +517,25 @@ class ForzaLive(asyncio.DatagramProtocol):
         return entry[0]
 
     def datagram_received(self, data, addr):
+        """handle_datagram, timed by the watchdog (core/watchdog.py): a datagram that held the
+        loop over its limit is in the log with its type and its player."""
+        began = watchdog.clock()
+        self.handling = None
+        try:
+            self.handle_datagram(data, addr)
+        finally:
+            took = watchdog.clock() - began
+            if took > watchdog.LIMIT:
+                self.slow_datagram(addr, began, took)
+
+    def slow_datagram(self, addr, began, took):
+        kind = self.handling
+        peer = self.by_addr.get(addr)
+        watchdog.WATCH.report(
+            watchdog.DATAGRAM, "?" if kind is None else DATAGRAM_NAMES.get(kind, "type %d" % kind),
+            None if peer is None else "#%d %r" % (peer.id, peer.name), began, took)
+
+    def handle_datagram(self, data, addr):
         if self.proxy_udp and limits.is_trusted_proxy(addr[0]):
             # the tunnel agent's socket of one player's flow: every datagram, its header
             # too, counts against the flow's rate
@@ -523,7 +551,8 @@ class ForzaLive(asyncio.DatagramProtocol):
             if not take(self.packet_buckets, self.limit_key(addr), PACKETS_PER_IP):
                 self.dropped_packets += 1
                 return
-        kind, body = data[4], data[5:]
+        self.handling = kind = data[4]
+        body = data[5:]
         try:
             if kind == HELLO:
                 self.on_hello(body, addr)
@@ -1804,7 +1833,8 @@ class ForzaLive(asyncio.DatagramProtocol):
                 **self.challenges.status(), **self.friends.status(), **auth.status(),
                 **score_token.status(),
                 "chat": {"with_chat": len(self.chat.chatters()), "kept": len(self.chat.ring)},
-                **(self.relays.status() if self.relays.entries else {})}
+                **(self.relays.status() if self.relays.entries else {}),
+                **watchdog.WATCH.status()}
 
 
 # How long a kept-alive connection may sit idle between requests. The game opens one
@@ -2046,6 +2076,7 @@ async def http_handler(server, reader, writer):
                 who.address = ip
         while True:
             method, path, headers, body = await read_request(reader, idle)
+            watchdog.serving(method, path, headers)  # what this step of the task answers
             idle = KEEP_ALIVE_IDLE
             entry[1] = None
             keep = headers.get("connection", "").lower() == "keep-alive"
@@ -2346,6 +2377,13 @@ async def main():
                             "no more players than that carries (default: no limit but its slots)")
     relay.add_argument("--relay-allow-private", action="store_true",
                        help="also relay to private and loopback addresses (a test on one LAN)")
+    parser.add_argument("--stall-limit", type=float, default=watchdog.LIMIT_MS, metavar="MS",
+                        help="log what holds the event loop longer than this (a datagram, a "
+                             "title-service call, a web route, a timer): milliseconds, default "
+                             "%(default)g; 0 turns the watchdog off")
+    parser.add_argument("--stall-stack", type=float, default=watchdog.STACK_MS, metavar="MS",
+                        help="also log where the loop was when it is held longer than this: "
+                             "milliseconds, default %(default)g; 0: never")
     parser.add_argument("-v", "--verbose", action="store_true")
     lsp.add_arguments(parser)
     world.add_arguments(parser)
@@ -2367,6 +2405,8 @@ async def main():
     stats.on_skill_write = coop_ledger.LEDGER.host_score
     challenge.configure(args)
     set_rate_limit(args.rate_limit)
+    watchdog.WATCH.configure(args.stall_limit, args.stall_stack)
+    watchdog.WATCH.wrap()  # the tasks from here have their steps timed
     counting = asyncio.create_task(keep_counted())  # the disk totals, never on this loop (#64)
     writing = asyncio.create_task(scores.keep_written())  # scoreboards.json whole: a thread's (#67)
     noting = asyncio.create_task(notifications.keep_written())  # notifications.json too
@@ -2403,28 +2443,40 @@ async def main():
         await asyncio.start_server(lambda r, w: http_handler(server, r, w), args.host, args.http_port,
                                  limit=1 << 15)
         log.info("title servers and status page on http://%s:%d/", args.host, args.http_port)
+    if watchdog.WATCH.on:
+        log.info("event loop watchdog: logs what holds the loop over %g ms (stacks over %g ms)",
+                 args.stall_limit, args.stall_stack)
+    else:  # off: the datagrams are not even timed
+        server.datagram_received = server.handle_datagram
+    watchdog.WATCH.start()  # the heartbeat and the watcher thread: from here, not the start's loads
+    timed = watchdog.WATCH.call  # each piece of the tick, timed by itself
+
+    def flush_events():
+        try:
+            server.events.flush()
+        except (OSError, sqlite3.Error):
+            log.warning("community event delivery storage unavailable; retrying later")
+
     try:
         ticks = 0
         while True:
             await asyncio.sleep(1)
             ticks += 1
-            server.challenges.tick()
+            timed("challenges.tick", server.challenges.tick)
             if ticks % 2 == 0:
-                server.world_tick()
-                stats.settle()
+                timed("world_tick", server.world_tick)
+                timed("stats.settle", stats.settle)
             if ticks % 5 == 0:
-                server.expire()
-            server.maybe_save_state()
-            server.friends.store.maybe_save()
-            videos.tick()  # the video converter's results (videos.collect)
-            try:
-                server.events.flush()
-            except (OSError, sqlite3.Error):
-                log.warning("community event delivery storage unavailable; retrying later")
+                timed("expire", server.expire)
+            timed("maybe_save_state", server.maybe_save_state)
+            timed("friends.maybe_save", server.friends.store.maybe_save)
+            timed("videos.tick", videos.tick)  # the video converter's results (videos.collect)
+            timed("events.flush", flush_events)
             if ticks % 30 == 0 and discord_status.enabled():
                 # urllib blocks: off the event loop, and never fatal (it catches everything)
                 await asyncio.to_thread(discord_status.update, server.status(), args.data_dir)
     finally:
+        watchdog.WATCH.stop()  # the stop's saves hold the loop, on purpose
         held = hold_stop_signals()  # until the stores without a journal are written
         counting.cancel()
         writing.cancel()
