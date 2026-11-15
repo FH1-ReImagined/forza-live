@@ -661,7 +661,7 @@ the routes are off and the account page cannot delete.
 
 Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it.
 
-To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, put the journal in the file first ([scores on disk](#scores-on-disk) has the command). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
+To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, or from before the notifications' journal, put each journal in its file first ([scores on disk](#scores-on-disk) and [notifications on disk](#notifications-on-disk) have the commands). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
 
 ### The previous copies (`.bak`)
 
@@ -736,7 +736,10 @@ friends) are written first, each whatever became of the others (an error in one 
 boards are still written). While they are written a second stop signal (a second `docker compose
 stop`, Ctrl+C) is ignored and logged (`stop: SIGTERM again while the registrations, co-op ledger
 and friends were written: ignored until they were`); once they are, a signal ends the stop again,
-which costs the boards nothing.
+which costs the boards nothing. The notifications' last write comes between those stores and the
+boards: a signal while it runs ends it (`stop: KeyboardInterrupt while notifications.json was
+written whole: not written, its journal has every change; the boards are written all the same`, a
+warning) and the boards are still written; only a signal after that one cuts theirs short.
 
 **A `scoreboards.json` that cannot be read.** When the file is there but cannot be read (a read
 error, permissions) the boards come from its `.bak` and the journal, as above. When the `.bak`
@@ -815,3 +818,78 @@ What that means for you:
 
 `friends.json` is one file as before, written whole at most every 2 s after a change: by a
 thread too, from a copy the server takes in a few milliseconds.
+
+### Notifications on disk
+
+The Message Center's notifications (a rival who beat a player's time, gifts, club news, event
+rewards, the operator's messages and broadcasts) are kept the way the boards are:
+
+- `notifications.json`: every notification a player has not cleared and that has not expired,
+  each player's read and cleared broadcasts, and the event rewards' receipts, as plain JSON
+  with a notification to a line. It is 11 MB on the public server: it was written whole at every
+  notification sent, read or cleared, which stopped everything else for a quarter of a second
+  each time, and a club's news (to each member) as many times over. A thread writes it whole once
+  a minute while there is something new (`notifications: notifications.json written whole in
+  0.15 s, off the event loop`), and the server writes it once more as it stops, before the
+  boards. The thread pauses after each millisecond of its work, so a notification sent during
+  that write takes about what it takes at any other time, 2 ms, most of it the disk's flush (the
+  boards' writes pause the same way).
+- `notifications.json.bak`: the file before that one.
+- `notifications.journal`: the latest changes, a line each (notifications sent, read or
+  cleared, a broadcast, a receipt), flushed to disk before the game or the caller is answered.
+  It works as `scoreboards.journal` does, and a start reads the file and then the lines it lacks
+  (`notifications: 12 changes from notifications.journal on top of notifications.json`). A kill,
+  a crash or a power cut loses no notification that was sent, and no read or clear the game was
+  answered for: an event's reward is marked delivered only once its notification is on disk,
+  and a gift's notification is how its player collects it.
+
+**What is dropped, and when.** A notification expires 30 days after it was sent (the
+`expirationDate` the game is given); from then on the game is never shown it again. Expired
+notifications are left out of memory at the start (`notifications: 40 expired ones left out
+(the game is shown none of them)`) and out of the file at its next write. Nothing else is
+dropped: a notification that was delivered and read stays until the player clears it or it
+expires, since the Message Center lists what each poll returns, and a gift is still collected
+from a message that was read. The receipts stay too (a few dozen bytes each): they keep an
+event's reward from being sent twice.
+
+The stop's line is one of:
+
+- `notifications: notifications.json written whole at the stop in 0.14 s: it has every change:
+  29310 notifications for 3998 players, 5 broadcasts`
+- `notifications: nothing to write at the stop: notifications.json has every change: ...`
+- `notifications: ... not written at the stop (...); its journal has every change`, a warning.
+- `notifications: no notifications.json in /data, and no journal to apply: nothing was read,
+  nothing to write at the stop`
+
+As for the boards, a `notifications.json` that is there but cannot be read, with no `.bak` that
+can be, stops the start with exit code 1 and `/data/notifications.json cannot be read (...),
+and there is no previous copy notifications.json.bak that can be: not started, ...`; the
+previous version started without it and wrote over it at the next notification. Backups, a
+restored file and the `.unused.<n>` journals go as in [scores on disk](#scores-on-disk).
+
+**Rolling back to a version from before this journal**: that version reads
+`notifications.json` alone. After a clean stop the file has everything. Otherwise, with the
+server stopped and the image still this version's, put the journal in the file:
+
+    docker compose stop
+    docker compose run --rm --entrypoint python3 forza-live -c "import logging; logging.basicConfig(level=logging.INFO); from forza_live.social import notifications; notifications.configure('/data'); notifications.STORE.load(); notifications.STORE.stop()"
+
+It ends with one of the first two lines above. Without that step a rollback after a stop that
+was not clean loses the last minute's notifications, and reads and clears of that minute come
+back unread or uncleared. Those notifications are lost for good, and their ids are given out
+again: the file's next id is the one from its last write, and the previous version counts on from
+it. The previous version writes the file at its first notification, after which the journal no
+longer continues it and is put aside at the next update.
+
+### The other stores
+
+`clubs.json`, `objectives.json` (the daily and weekly challenges), `stats.json` and the
+market's `auctions.json` and `gifts.json` are still written whole at the change that needs them,
+before the game is answered, but as compact JSON in one step of the encoder: half a megabyte took
+20 ms of the event loop indented, 6 to 8 ms now, most of it the disk's flush. Every version reads
+them the same.
+
+A player's record (`players/<xuid>.json`, a few KB) is written whole on the event loop as
+before, at each sign-in, race result and profile update: 4 ms, most of it the disk's flush. A
+new player's first record also counts the folder against the players' limit, which takes 14 ms
+with 20,000 players and their `.bak` copies in it.

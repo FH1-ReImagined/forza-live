@@ -12,6 +12,7 @@ from forza_live.title_services import lsp
 from forza_live import server as srv
 from forza_live.content import market
 from forza_live.social import notifications as notices
+from forza_live.network import xtsw as x
 
 AUTH_PART = len(auth.welcome(None, type("P", (), {"xuid": 0, "addr": None})()))
 
@@ -185,7 +186,8 @@ class EventsTest(unittest.TestCase):
 
     def test_notification_receipt_survives_clear_and_restart(self):
         first = notices.send(self.player.xuid, 0x100, {"Message": "Event reward"}, idempotency_key="test-receipt")
-        notices.STORE.load()["byRecipient"] = {}; notices.STORE.save()
+        notices.update(self.player.xuid, bytes(x.encode(x.NotificationsId_Params,
+                                                        {"notificationId": first})), True)
         notices.configure(self.temp.name)
         self.assertEqual(notices.send(self.player.xuid, 0x100, {"Message": "Event reward"},
                                      idempotency_key="test-receipt"), first)

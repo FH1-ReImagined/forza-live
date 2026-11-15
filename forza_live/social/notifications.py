@@ -23,11 +23,22 @@ set for those that carry something to collect):
     0x0507 club: new member    0x0508 club: promotion             0x8501 club: shared car
 
 DATA_DIR/notifications.json keeps them per recipient until the game clears them
-(Notifications.Clear) or they expire. A broadcast (broadcast(), the operator's /broadcast) is
+(Notifications.Clear) or they expire (KEEP_DAYS after they were sent: the expirationDate the
+game is given, after which RetrieveForUser no longer returns them; they leave memory and the
+file then, Store.prune and dump). A broadcast (broadcast(), the operator's /broadcast) is
 stored once and shown to every player until it expires, players who sign in later included;
 each player's read and cleared broadcasts are kept apart (broadcastState).
+
+The file is megabytes on a busy server (11 MB on the public one), and was written whole on the
+event loop at every notification sent, read or cleared: a quarter of a second each time, one
+per member for a club's news. Now a change is a line in DATA_DIR/notifications.journal,
+flushed to disk before the caller is answered (Store.save), and the file is written whole by a
+thread every FULL_EVERY seconds while the journal has changes it lacks (keep_written), and once
+more as the server stops (Store.stop), as the boards are (core/journal.py, docs/operating.md
+"Notifications on disk"). The file is the JSON it always was, so a previous version reads it.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -35,7 +46,7 @@ import threading
 import time
 
 from forza_live.network import xtsw as x
-from forza_live.core import durable
+from forza_live.core import journal
 from forza_live.network.xtsw import BOOL, F32, I32, U8, U16, U32, U64, S, SYSTIME, WSTR
 
 log = logging.getLogger("forza-live")
@@ -134,33 +145,299 @@ CLUB_REQUEST, CLUB_INVITE, CLUB_KICK_RECOMMENDATION, CLUB_KICKED, CLUB_DEMOTION,
 CLUB_SHARED_CAR = 0x8501
 
 
+FULL_EVERY = 60.0  # seconds between two writes of the whole of notifications.json (keep_written)
+
+
 class Store:
+    """The notifications, in memory as notifications.json has them: {"nextId", "byRecipient":
+    {xuid hex: [notification, ...]}, "receipts": {idempotency key: id}, "broadcasts":
+    [notification, ...], "broadcastState": {xuid hex: {"read": [id], "cleared": [id]}}}.
+
+    A change is a line of notifications.journal, flushed to disk before the caller is answered
+    (save); the file is written whole by a thread (keep_written) and at the stop (stop), as the
+    boards are (core/journal.py). What lets a thread write it while the loop goes on: nothing a
+    snapshot holds is changed in place. A notification is never changed (read: a new record in
+    its place), nor a recipient's list, the broadcasts' list or a player's broadcast state (a
+    change makes a new one); snapshot copies only the three maps that hold them."""
+
     def __init__(self):
+        if getattr(self, "journal", None) is not None:
+            self.journal.close()  # configured again: the journal of the folder before
         self.data = {"nextId": 1, "byRecipient": {}}
         self.loaded = False
         self.lock = threading.Lock()
+        self.journal = None    # notifications.journal (load)
+        self.changes = {}      # since the last save(), as the journal's line will have them
 
     def path(self):
         return os.path.join(DATA_DIR, "notifications.json")
 
     def load(self):
-        if not self.loaded:
-            self.loaded = True
+        """The notifications from notifications.json and its journal, once, without the expired
+        ones (prune). journal.Unreadable when the file is there but cannot be read, nor its
+        .bak, or is damaged and its .bak is there but cannot be read: lsp.configure loads the
+        store at the start, which then stops, as for the boards, rather than run without what
+        the file holds and write over it. A load that raised is made again at the next call."""
+        if self.loaded:
+            return self.data
+        beside = journal.Journal(self.path())
+        found, changes = beside.load()
+        self.data = {"nextId": 1, "byRecipient": {}}
+        if isinstance(found, dict):
+            self.data.update(found)
+        elif found is not None:
+            log.error("%s holds no notifications (%s): starting without it", self.path(),
+                      type(found).__name__)
+        self.journal = beside
+        skipped = 0
+        for change in changes:
             try:
-                self.data.update(durable.load(self.path()))
-            except (OSError, ValueError):
-                pass
+                self.apply(change)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                skipped += 1
+        if changes:
+            log.log(logging.WARNING if skipped else logging.INFO,
+                    "notifications: %d changes from %s on top of %s%s", len(changes) - skipped,
+                    os.path.basename(beside.name), os.path.basename(self.path()),
+                    ", %d that cannot be read skipped" % skipped if skipped else "")
+        gone = self.prune()
+        if gone:
+            log.info("notifications: %d expired ones left out (the game is shown none of them); "
+                     "%s loses them at its next write", gone, os.path.basename(self.path()))
+        self.loaded = True
         return self.data
 
+    def apply(self, change):
+        """A line of the journal on data, in this order: {"add": {xuid hex: [notification]},
+        "read": {xuid hex: [id]}, "clear": {xuid hex: [id]}, "nextId": n, "receipts": {key: id},
+        "broadcasts": [every broadcast kept], "broadcastState": {xuid hex: state, or null for one
+        that went}}. Applied twice, or on a file that already has it, it changes nothing."""
+        d, by = self.data, self.data["byRecipient"]
+        for who, added in change.get("add", {}).items():
+            mine = by.get(who, [])
+            have = {n["id"] for n in mine}
+            new = [n for n in added if n["id"] not in have]
+            if new:
+                by[who] = mine + new
+        for who, ids in change.get("read", {}).items():
+            self._read(who, set(ids))
+        for who, ids in change.get("clear", {}).items():
+            self._clear(who, set(ids))
+        if "nextId" in change:
+            d["nextId"] = max(d["nextId"], int(change["nextId"]))
+        if change.get("receipts"):
+            d.setdefault("receipts", {}).update(change["receipts"])
+        if "broadcasts" in change:
+            d["broadcasts"] = list(change["broadcasts"])
+        for who, seen in change.get("broadcastState", {}).items():
+            state = d.setdefault("broadcastState", {})
+            if seen is None:
+                state.pop(who, None)
+            else:
+                state[who] = seen
+
+    def _read(self, who, ids):
+        mine = self.data["byRecipient"].get(who, [])
+        if any(n["id"] in ids and not n["read"] for n in mine):
+            self.data["byRecipient"][who] = [dict(n, read=True) if n["id"] in ids else n
+                                             for n in mine]
+
+    def _clear(self, who, ids):
+        by = self.data["byRecipient"]
+        kept = [n for n in by.get(who, []) if n["id"] not in ids]
+        if kept:
+            by[who] = kept
+        else:
+            by.pop(who, None)
+
+    def prune(self, now=None):
+        """The expired notifications out of memory; how many. RetrieveForUser shows none of them
+        (pending), so nothing anybody can see changes, and no line of the journal is needed: a
+        start drops them again. Read or not, a notification is kept until it expires: the game
+        lists what each poll returns, and a read gift is still collected from the Message
+        Center."""
+        now = time.time() if now is None else now
+        by, gone = self.data["byRecipient"], 0
+        for who, mine in list(by.items()):
+            live = [n for n in mine if n["expires"] > now]
+            if len(live) != len(mine):
+                gone += len(mine) - len(live)
+                if live:
+                    by[who] = live
+                else:
+                    del by[who]
+        return gone
+
+    def add(self, recipient, ntype, params, keep_days, now):
+        """A new notification in memory and in the changes for save() (the lock is held): its
+        id."""
+        d, who = self.data, key(recipient)
+        nid = d["nextId"]
+        d["nextId"] += 1
+        n = {"id": nid, "type": ntype, "params": params, "sent": now,
+             "expires": now + keep_days * 86400, "read": False}
+        # The recipient's expired ones go now: their list is made anew anyway.
+        d["byRecipient"][who] = [m for m in d["byRecipient"].get(who, [])
+                                 if m["expires"] > now] + [n]
+        self.changes.setdefault("add", {}).setdefault(who, []).append(n)
+        self.changes["nextId"] = d["nextId"]
+        return nid
+
     def save(self):
+        """The changes since the last save, on disk when this returns: one line appended to the
+        journal and flushed, milliseconds whatever the file's size. OSError when they could not
+        be written: they stay in memory and go with the next save."""
+        if not self.changes:
+            return
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = self.path() + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.data, f, indent=1)
-        durable.replace(tmp, self.path())
+        self.journal.append(self.changes)
+        self.changes = {}
+
+    def snapshot(self):
+        """What a write of the whole file needs, taken on the event loop: the journal, the place
+        in it, and a copy of the maps that change in place (byRecipient, receipts,
+        broadcastState). What they hold is never changed (the class's docstring)."""
+        with self.lock:
+            self.load()
+            d = self.data
+            tables = dict(d)  # keys this version does not know stay as they are
+            tables["byRecipient"] = dict(d["byRecipient"])
+            for name in ("receipts", "broadcastState"):
+                if name in d:
+                    tables[name] = dict(d[name])
+            return self.journal, self.journal.mark(), tables
+
+    def write(self, snapshot=None, stopping=False):
+        """notifications.json written whole and flushed, its journal cut back to what the file
+        before it lacked (journal.checkpoint). A thread's work (keep_written): on an event loop
+        it runs only as the server stops. Without a snapshot it takes one, which is right only
+        where nothing changes the store meanwhile (the stop, a tool, a test)."""
+        if not stopping:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError("Store.write() writes the whole of notifications.json: run "
+                                   "it in a thread (asyncio.to_thread), never on the event loop")
+        beside, mark, tables = snapshot or self.snapshot()
+        os.makedirs(os.path.dirname(beside.path) or ".", exist_ok=True)
+        now = time.time()
+        return beside.checkpoint(mark, lambda f: dump(f, tables, now))
+
+    def stop(self):
+        """The server is stopping: notifications.json gets what only its journal had, so the
+        file alone is complete (all a previous version of the server reads). The log says which
+        it was, in one line: written, nothing to write, or not written (the journal then has
+        what the file lacks, unless it could not take the last changes either)."""
+        if not self.loaded:
+            return
+        name = os.path.basename(self.path())
+        try:
+            self.save()
+            unsaved = None
+        except OSError as e:
+            unsaved = e  # still in memory: the whole file takes them, if it can be written
+        if unsaved is None and not self.journal.behind():
+            if self.journal.base not in (journal.NO_FILE, journal.UNREADABLE):
+                log.info("notifications: nothing to write at the stop: %s has every change: %s",
+                         name, self.held())
+            else:
+                log.info("notifications: %s, and no journal to apply: nothing was read, nothing "
+                         "to write at the stop", ("no %s in %s" if self.journal.base ==
+                                                  journal.NO_FILE else "%s in %s could not be "
+                                                  "read") % (name, os.path.abspath(DATA_DIR)))
+            return
+        began = time.monotonic()
+        try:
+            written = self.write(stopping=True)
+        except OSError as e:
+            if unsaved is None:
+                log.warning("notifications: %s not written at the stop (%s); its journal has "
+                            "every change", self.path(), e)
+            else:
+                log.warning("notifications: %s not written at the stop (%s), and the last "
+                            "changes could not be added to its journal either (%s): those are "
+                            "lost, the journal keeps the changes before them", self.path(), e,
+                            unsaved)
+            return
+        if written:
+            log.info("notifications: %s written whole at the stop in %.2f s: it has every "
+                     "change: %s", name, time.monotonic() - began, self.held())
+
+    def held(self):
+        """What the store holds, for the log: "120 notifications for 40 players, 1 broadcast"."""
+        by = self.data["byRecipient"]
+        count = sum(len(mine) for mine in by.values())
+        casts = len(self.data.get("broadcasts", []))
+        return "%d notification%s for %d player%s, %d broadcast%s" % (
+            count, "" if count == 1 else "s", len(by), "" if len(by) == 1 else "s",
+            casts, "" if casts == 1 else "s")
 
 
 STORE = Store()
+
+
+def dump(f, tables, now):
+    """A snapshot's tables as notifications.json, to the text file f: plain JSON as every
+    version reads it, a notification to a line, without the ones expired at `now`. One call of
+    the C encoder per notification: json.dump with an indent is the pure-Python encoder, and
+    one call for the whole file would hold the interpreter (and the event loop with it, thread
+    or not) for as long as it ran."""
+    def lines(items, pad):
+        return ",\n".join(pad + item for item in items)
+
+    def each(items, pad):  # a write per item: each is a short step of the interpreter
+        for m, item in enumerate(items):
+            f.write("%s%s%s" % (",\n" if m else "", pad, item))
+
+    f.write("{")
+    for n, (name, value) in enumerate(tables.items()):
+        f.write("%s\n %s: " % ("," if n else "", json.dumps(name)))
+        if name == "byRecipient":
+            m = 0
+            f.write("{")
+            for who, mine in value.items():
+                live = [json.dumps(x) for x in mine if x["expires"] > now]
+                if live:
+                    f.write("%s\n  %s: [\n%s\n  ]" % ("," if m else "", json.dumps(who),
+                                                       lines(live, "   ")))
+                    m += 1
+            f.write("\n }" if m else "}")
+        elif isinstance(value, dict) and value:
+            f.write("{\n")
+            each(("%s: %s" % (json.dumps(k), json.dumps(v)) for k, v in value.items()), "  ")
+            f.write("\n }")
+        elif isinstance(value, list) and value:
+            f.write("[\n")
+            each((json.dumps(v) for v in value), "  ")
+            f.write("\n ]")
+        else:
+            f.write(json.dumps(value))
+    f.write("\n}\n")
+
+
+async def keep_written(every=None):
+    """The server's task: every FULL_EVERY seconds, when the journal has changes that
+    notifications.json lacks, the file is written whole by a thread from a snapshot taken here.
+    A write that fails is logged and made again at the next round; nothing is lost meanwhile,
+    the journal has every change."""
+    while True:
+        await asyncio.sleep(FULL_EVERY if every is None else every)
+        store = STORE
+        if not store.loaded or not store.journal.behind():
+            continue
+        began = time.monotonic()
+        try:
+            snapshot = store.snapshot()
+            written = await asyncio.to_thread(store.write, snapshot)
+        except Exception:
+            log.exception("notifications: writing %s failed; the journal keeps every change",
+                          store.path())
+            continue
+        if written:
+            log.info("notifications: %s written whole in %.2f s, off the event loop",
+                     os.path.basename(store.path()), time.monotonic() - began)
 
 
 def configure(data_dir):
@@ -173,8 +450,15 @@ def key(xuid):
     return "%016X" % xuid
 
 
+def logged(nid, recipient, ntype, params):
+    log.info("title: notification %d to %016X: %s %s", nid, recipient, TYPES[ntype][0],
+             {k: v for k, v in params.items() if not k.endswith("Xuid")})
+
+
 def send(recipient, ntype, params, keep_days=KEEP_DAYS, idempotency_key=None):
-    """Queues a notification of type ntype (TYPES) for recipient; returns its id."""
+    """Queues a notification of type ntype (TYPES) for recipient; returns its id once it is on
+    disk (a line of the journal). OSError when it could not be written: it is kept in memory
+    and goes with the next save, and a retry with the same idempotency_key writes it then."""
     if ntype not in TYPES:
         raise ValueError("unknown notification type %#x" % ntype)
     x.encode(TYPES[ntype][1], params)  # fails now rather than in a reply
@@ -185,17 +469,52 @@ def send(recipient, ntype, params, keep_days=KEEP_DAYS, idempotency_key=None):
         if idempotency_key is not None and idempotency_key in receipts:
             STORE.save()  # retry a previous failed persistence before acknowledging it
             return receipts[idempotency_key]
-        nid = d["nextId"]
-        d["nextId"] += 1
-        d["byRecipient"].setdefault(key(recipient), []).append({
-            "id": nid, "type": ntype, "params": params, "sent": time.time(),
-            "expires": time.time() + keep_days * 86400, "read": False})
+        nid = STORE.add(recipient, ntype, params, keep_days, time.time())
         if idempotency_key is not None:
             receipts[idempotency_key] = nid
+            STORE.changes.setdefault("receipts", {})[idempotency_key] = nid
         STORE.save()
-    log.info("title: notification %d to %016X: %s %s", nid, recipient, TYPES[ntype][0],
-             {k: v for k, v in params.items() if not k.endswith("Xuid")})
+    logged(nid, recipient, ntype, params)
     return nid
+
+
+def send_many(recipients, ntype, params, keep_days=KEEP_DAYS):
+    """The same notification for each of recipients (a club's members): their ids, all on disk
+    in one line of the journal."""
+    if ntype not in TYPES:
+        raise ValueError("unknown notification type %#x" % ntype)
+    x.encode(TYPES[ntype][1], params)
+    now = time.time()
+    with STORE.lock:
+        STORE.load()
+        ids = [STORE.add(r, ntype, params, keep_days, now) for r in recipients]
+        STORE.save()
+    for nid, recipient in zip(ids, recipients):
+        logged(nid, recipient, ntype, params)
+    return ids
+
+
+def set_state(who, seen):
+    """A player's broadcast state ({"read", "cleared"}), or None for none: in memory and in
+    the changes (the lock is held)."""
+    state = STORE.data.setdefault("broadcastState", {})
+    if seen is None:
+        state.pop(who, None)
+    else:
+        state[who] = seen
+    STORE.changes.setdefault("broadcastState", {})[who] = seen
+
+
+def keep_broadcasts(live):
+    """The broadcasts kept from now (the lock is held), each player's state without the ids
+    that are not among them."""
+    STORE.data["broadcasts"] = live
+    STORE.changes["broadcasts"] = live
+    ids = {b["id"] for b in live}
+    for who, seen in list(STORE.data.get("broadcastState", {}).items()):
+        kept = {k: [i for i in seen.get(k, []) if i in ids] for k in ("read", "cleared")}
+        if any(kept[k] != seen.get(k, []) for k in kept):
+            set_state(who, kept if kept["read"] or kept["cleared"] else None)
 
 
 def broadcast(ntype, params, keep_days=KEEP_DAYS):
@@ -206,20 +525,12 @@ def broadcast(ntype, params, keep_days=KEEP_DAYS):
     now = time.time()
     with STORE.lock:
         d = STORE.load()
-        live = [b for b in d.get("broadcasts", []) if b["expires"] > now]
         nid = d["nextId"]
         d["nextId"] += 1
-        live.append({"id": nid, "type": ntype, "params": params, "sent": now,
-                     "expires": now + keep_days * 86400})
-        d["broadcasts"] = live
-        ids = {b["id"] for b in live}
-        state = d.setdefault("broadcastState", {})
-        for who in list(state):  # forget expired broadcasts
-            seen = state[who]
-            for k in ("read", "cleared"):
-                seen[k] = [i for i in seen.get(k, []) if i in ids]
-            if not seen["read"] and not seen["cleared"]:
-                del state[who]
+        STORE.changes["nextId"] = d["nextId"]
+        keep_broadcasts([b for b in d.get("broadcasts", []) if b["expires"] > now] + [
+            {"id": nid, "type": ntype, "params": params, "sent": now,
+             "expires": now + keep_days * 86400}])  # forget expired broadcasts
         STORE.save()
     log.info("title: broadcast %d: %s %s", nid, TYPES[ntype][0], params)
     return nid
@@ -242,14 +553,7 @@ def delete_broadcast(nid):
         kept = [b for b in live if b["id"] != nid]
         if len(kept) == len(live):
             return False
-        d["broadcasts"] = kept
-        state = d.get("broadcastState", {})
-        for who in list(state):
-            seen = state[who]
-            for k in ("read", "cleared"):
-                seen[k] = [i for i in seen.get(k, []) if i != nid]
-            if not seen["read"] and not seen["cleared"]:
-                del state[who]
+        keep_broadcasts(kept)
         STORE.save()
     log.info("title: broadcast %d deleted by the operator", nid)
     return True
@@ -289,26 +593,28 @@ def retrieve(xuid, body):
 
 def update(xuid, body, clear):
     p, _ = x.decode(x.NotificationsId_Params, body)
+    nid, who = p["notificationId"], key(xuid)
     with STORE.lock:
         d = STORE.load()
-        mine = d["byRecipient"].get(key(xuid), [])
-        for n in mine:
-            if n["id"] == p["notificationId"]:
-                if clear:
-                    mine.remove(n)
-                else:
-                    n["read"] = True
+        mine = next((n for n in d["byRecipient"].get(who, []) if n["id"] == nid), None)
+        if mine is not None:
+            if clear:
+                STORE._clear(who, {nid})
+                STORE.changes.setdefault("clear", {}).setdefault(who, []).append(nid)
+            elif not mine["read"]:
+                STORE._read(who, {nid})
+                STORE.changes.setdefault("read", {}).setdefault(who, []).append(nid)
+            STORE.save()
+        elif any(b["id"] == nid for b in d.get("broadcasts", [])):
+            seen = d.get("broadcastState", {}).get(who, {})
+            k = "cleared" if clear else "read"
+            if nid not in seen.get(k, []):
+                new = {"read": list(seen.get("read", [])),
+                       "cleared": list(seen.get("cleared", []))}
+                new[k].append(nid)
+                set_state(who, new)
                 STORE.save()
-                break
-        else:
-            if any(b["id"] == p["notificationId"] for b in d.get("broadcasts", [])):
-                seen = d.setdefault("broadcastState", {}).setdefault(key(xuid), {})
-                ids = seen.setdefault("cleared" if clear else "read", [])
-                if p["notificationId"] not in ids:
-                    ids.append(p["notificationId"])
-                    STORE.save()
-    log.info("title: notification %d %s by %016X", p["notificationId"],
-             "cleared" if clear else "read", xuid)
+    log.info("title: notification %d %s by %016X", nid, "cleared" if clear else "read", xuid)
     return x.reply()
 
 

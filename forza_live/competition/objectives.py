@@ -206,10 +206,7 @@ class Store:
         if not self.path:
             return
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.data, f, indent=1)
-        durable.replace(tmp, self.path)
+        durable.write_json(self.path, self.data)  # on the loop: the C encoder (durable)
 
     def current(self, kind, now):
         """The stored period of `kind` at `now`, made (and older ones of the kind pruned) when it

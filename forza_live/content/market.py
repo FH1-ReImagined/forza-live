@@ -25,7 +25,6 @@ DATA_DIR/auctions.json and gifts.json hold the records, DATA_DIR/market/ the blo
 parts, tuning, livery, thumbnails) as the game sent them.
 """
 
-import json
 import logging
 import os
 import time
@@ -117,10 +116,7 @@ class Market:
         for name, data in (("auctions.json", {"auctions": self.auctions, "textures": self.textures,
                                               "nextId": self.next_id}),
                            ("gifts.json", {"gifts": self.gifts, "nextId": self.next_id})):
-            tmp = self.path(name) + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(jsonable(data), f, indent=1)
-            durable.replace(tmp, self.path(name))
+            durable.write_json(self.path(name), jsonable(data))  # the C encoder (durable)
 
     def new_id(self):
         self.load()

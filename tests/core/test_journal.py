@@ -13,6 +13,7 @@ import random
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -188,6 +189,33 @@ class JournalTest(Base):
         for before, after in zip([0] + sizes, sizes):
             self.assertLessEqual(after - before, journal.FLUSH_EVERY + 65536)
         self.assertEqual(len(self.kv().data["big"]), 56 * 65536)
+
+    def test_a_long_dump_pauses_for_the_event_loop(self):
+        """Each millisecond of a dump's work ends in a pause at its next write, in which the
+        interpreter is the event loop's (the module's docstring)."""
+        kv = self.kv()
+        kv.set(a=1)
+        paused, real = [], journal.time.sleep
+
+        def sleep(seconds):
+            paused.append(seconds)
+            return real(seconds)
+
+        def dump(data, f):  # 10 ms of work, in 100 writes
+            f.write("{\"big\": \"")
+            for _ in range(100):
+                ends = time.perf_counter() + 0.0001
+                while time.perf_counter() < ends:
+                    pass
+                f.write("x")
+            f.write("\"}")
+
+        with mock.patch.object(journal.time, "sleep", sleep):
+            self.assertTrue(kv.checkpoint(None, dump))
+        self.assertGreaterEqual(len(paused), 5)  # 10 at most here, fewer on a slow machine
+        self.assertLess(len(paused), 50)          # and not at each of the 102 writes
+        self.assertEqual(set(paused), {journal.PAUSE})
+        self.assertEqual(self.kv().data["big"], "x" * 100)
 
     def test_the_previous_copy_and_the_journal_give_the_same_store(self):
         kv = self.kv()

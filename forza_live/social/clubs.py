@@ -17,7 +17,6 @@ DATA_DIR/clubs.json holds the clubs, members, requests, invitations, history and
 cars; DATA_DIR/clubs/ the shared cars' liveries, tuning and textures.
 """
 
-import json
 import logging
 import os
 import time
@@ -58,10 +57,7 @@ class Clubs:
 
     def save(self):
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = self.path() + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.data, f, indent=1)
-        durable.replace(tmp, self.path())
+        durable.write_json(self.path(), self.data)  # on the loop: the C encoder (durable)
 
     def new_id(self):
         d = self.load()
@@ -135,10 +131,10 @@ def names(club):
 
 
 def tell(club, ntype, params, roles=(LEADER, CO_LEADER, MEMBER), skip=()):
-    """A Message Center notification to the club's members with these roles."""
-    for m, r in members_of(club["id"]):
-        if r["role"] in roles and m not in skip:
-            notifications.send(m, ntype, params)
+    """A Message Center notification to the club's members with these roles, in one line of
+    the notifications' journal."""
+    notifications.send_many([m for m, r in members_of(club["id"])
+                             if r["role"] in roles and m not in skip], ntype, params)
 
 
 def join(xuid, club, role=MEMBER):

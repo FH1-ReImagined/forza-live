@@ -18,6 +18,9 @@ After a load that had to read the .bak, the next replace() of that file keeps th
 (#70): it is the copy that could be read, and the file in place is the one that could not. Only
 that next replace: once the new file is in place, the one after it keeps it as the .bak again.
 
+write_json() is the save of a store's whole file: replace() with the JSON written in one call
+of the C encoder.
+
 A file too big to write at every change has a journal beside it (journal.py): load_digest()
 gives it the SHA-256 of the file that was read, the name by which a journal knows the file it
 continues, and replace(backup=False) is for the journal's own file, which needs no copy.
@@ -67,6 +70,19 @@ def replace(tmp, path, backup=True):
         _fsync_path(os.path.dirname(os.path.abspath(path)), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     except OSError:
         pass  # Windows cannot open a folder; its rename is already durable enough
+
+
+def write_json(path, data):
+    """data as path's JSON, by replace(): written to <path>.tmp, flushed, renamed over path.
+    One call of the C encoder: json.dump, and json.dumps with an indent, are the pure-Python
+    encoder, several times the work. A store written whole on the event loop at a
+    player's action (objectives.json, clubs.json, stats.json, the market's files) held the loop
+    20 ms for half a megabyte that way; a compact file is the same JSON to every reader."""
+    text = json.dumps(data)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    replace(tmp, path)
 
 
 def _text(path):

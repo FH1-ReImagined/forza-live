@@ -37,13 +37,20 @@ stop's). A lock keeps the journal's file and what is known of it: the loop waits
 while a checkpoint rewrites the journal, a file of three checkpoints' changes at most (unless
 the .bak cannot be read, above). And the
 new file is flushed as it is written (Paced), so that megabytes of it are never waiting for the
-disk at once: the journal's own flush, on the loop, would wait behind them.
+disk at once: the journal's own flush, on the loop, would wait behind them. And the thread
+pauses after each millisecond of its work (Paced): without that the loop, back from its own
+flush or from waiting for the players, waits for the interpreter until the thread is made to let
+it go (sys.getswitchinterval(), 5 ms), a few times for each notification sent during the write
+(2.6 ms each with an 11 MB notifications.json, against 0.08 ms with the pauses, the disk's
+flushes left out). A pause comes only between two of the dump's writes: a dump writes in short
+steps.
 """
 
 import json
 import logging
 import os
 import threading
+import time
 
 from forza_live.core import durable
 
@@ -52,6 +59,8 @@ log = logging.getLogger("forza-live")
 NO_FILE, UNREADABLE = "none", "unreadable"
 NOT_READ = object()  # Journal._bak(): a .bak that is there but cannot be read
 FLUSH_EVERY = 1 << 20  # characters of a new file between two flushes to disk (Paced)
+PAUSE_EVERY = 0.001    # seconds of a dump's work between two pauses (Paced)
+PAUSE = 0.0001         # each pause: the interpreter is the event loop's meanwhile
 
 
 class Unreadable(OSError):
@@ -62,16 +71,21 @@ class Unreadable(OSError):
 
 class Paced:
     """What a checkpoint's dump writes to: the text file f, flushed to disk every FLUSH_EVERY
-    characters."""
+    characters, and paused for PAUSE at the first write after each PAUSE_EVERY of the thread's
+    work, so that the event loop gets the interpreter (the module's docstring)."""
 
     def __init__(self, f):
         self.f, self.waiting = f, 0
+        self.ran = time.perf_counter()
 
     def write(self, text):
         self.f.write(text)
         self.waiting += len(text)
         if self.waiting >= FLUSH_EVERY:
             self.flush()
+        if time.perf_counter() - self.ran >= PAUSE_EVERY:
+            time.sleep(PAUSE)
+            self.ran = time.perf_counter()
 
     def flush(self):
         self.f.flush()

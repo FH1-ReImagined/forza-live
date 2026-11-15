@@ -37,6 +37,7 @@ from forza_live.content import design_feed
 from forza_live.content import videos
 from forza_live.social import discord_status
 from forza_live.social import friends
+from forza_live.social import notifications
 from forza_live.competition import events
 from forza_live.core import limits
 from forza_live.core import media
@@ -2242,7 +2243,8 @@ def own_error(error, handled):
 def save_at_stop(server, held=None):
     """What the server writes as it stops, the boards last: their last write is megabytes, and
     whatever ends it early (a second signal, the stop's time running out) costs the boards
-    nothing, their journal has every change (#67). The stores before them have no journal: a
+    nothing, their journal has every change (#67); so for the notifications' write before them,
+    and a signal that ends that one still lets the boards be written. The stores before them have no journal: a
     stop signal waits until they are written (held: what hold_stop_signals() gave, when the
     caller already holds them), and each is written whatever became of the others, so that the
     boards' last write is always reached (#70)."""
@@ -2268,7 +2270,20 @@ def save_at_stop(server, held=None):
                           exc_info=own_error(e, stopping))
     finally:
         release_stop_signals(held)
-    scores.STORE.stop()  # scoreboards.json gets what only its journal had
+    # The stores with a journal, which loses nothing whatever ends the stop: the boards last,
+    # reached whatever ends the notifications' write (a second signal there ends the stop only
+    # once the boards are written, or a third one cuts them).
+    try:
+        notifications.STORE.stop()  # notifications.json gets what only its journal had
+    except Exception as e:  # noqa: BLE001 - the boards are still written
+        log.error("stop: the notifications could not be written", exc_info=own_error(e, stopping))
+    except BaseException as e:
+        log.warning("stop: %s while notifications.json was written whole: not written, its "
+                    "journal has every change; the boards are written all the same",
+                    type(e).__name__)
+        raise
+    finally:
+        scores.STORE.stop()  # scoreboards.json gets what only its journal had
 
 
 async def main():
@@ -2354,6 +2369,7 @@ async def main():
     set_rate_limit(args.rate_limit)
     counting = asyncio.create_task(keep_counted())  # the disk totals, never on this loop (#64)
     writing = asyncio.create_task(scores.keep_written())  # scoreboards.json whole: a thread's (#67)
+    noting = asyncio.create_task(notifications.keep_written())  # notifications.json too
 
     loop = asyncio.get_running_loop()
     transport, server = await loop.create_datagram_endpoint(
@@ -2412,6 +2428,7 @@ async def main():
         held = hold_stop_signals()  # until the stores without a journal are written
         counting.cancel()
         writing.cancel()
+        noting.cancel()
         limits.STORED.close()  # a count under way ends now: its thread does not hold the exit
         videos.STORED.close()
         save_at_stop(server, held)
@@ -2431,9 +2448,9 @@ def run():
     except KeyboardInterrupt:
         pass
     except journal.Unreadable:
-        # scoreboards.json is there and cannot be read, nor its .bak (or it is damaged and the
-        # .bak cannot be read): the log has said so, and the server does not start on empty
-        # boards (docs/operating.md, "Scores on disk")
+        # scoreboards.json or notifications.json is there and cannot be read, nor its .bak (or
+        # it is damaged and the .bak cannot be read): the log has said so, and the server does
+        # not start without them (docs/operating.md, "Scores on disk", "Notifications on disk")
         sys.exit(1)
 
 
