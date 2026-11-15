@@ -3,9 +3,11 @@
 Players meet only the others in their room (the game's live_room setting or FORZA_ROOM, sent in
 its HELLO; a Title Update 4 game adds "#TU4", so the default room of a TU4 game is "#TU4"). The
 launcher plays Forza Horizon 2's and Fast & Furious's maps converted for FH1 (a "world") in a room
-of its own: the player's room plus "+fh2" or "+anthem" (the launcher's fh2ffworld.world_room,
-which keeps the ending whole within the game's 32 characters), so the players in a world meet
-each other and never the players in Colorado.
+of its own: the player's room plus "+fh2" or "+anthem" (the launcher's fh2ffworld.world_room),
+so the players in a world meet each other and never the players in Colorado. The game keeps the
+first 32 BYTES of the room: the ending stays whole only when the launcher cuts the room in bytes
+too. A room cut in letters that takes more than 32 bytes in UTF-8 (letters such as "é" or "ク")
+loses its ending in the game, and the server cannot tell it from a Colorado room.
 
 A world is another map with other roads: the boards, the 1000 Club, the daily and weekly
 challenges and the co-op campaign are Colorado's. The title services take nothing of them from

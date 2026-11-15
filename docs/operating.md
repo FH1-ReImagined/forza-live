@@ -411,7 +411,10 @@ the room, the session's own play, photos, designs and videos are as in Colorado.
 the answers and how the server finds a call's room.
 
 Nothing to set up. Only a room that ends in `+anthem` or `+fh2` is a world's; a player who names
-their own room that way by hand is in it too (the server cannot tell the two apart). The log says
+their own room that way by hand is in it too (the server cannot tell the two apart). The game
+keeps 32 bytes of the room: a long room with letters such as `é` or `ク` that the launcher cuts in
+letters loses its ending there, and its world's results count as Colorado's (the `join` line
+shows the room the game sent). The log says
 once per session and kind what it left out:
 `world: <XUID> in room '+fh2#TU4' (Forza Horizon 2's world): not kept, as Colorado's: race stats
 (first: User.WriteRaceStatsEx; told once per session)`. A row that is on a board already is

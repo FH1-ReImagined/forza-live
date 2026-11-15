@@ -420,9 +420,13 @@ sent in its HELLO; a Title Update 4 game adds `#TU4`, so the default room of a T
 `#TU4`. The launcher can play Forza Horizon 2's and Fast & Furious's maps converted for FH1 (a
 "world", [FH1 #832](https://github.com/FH1-ReImagined/ForzaHorizon1-ReImagined/pull/832)) online,
 and gives a world a room of its own: the player's room plus `+fh2` or `+anthem`
-(`launcher/forza_launcher/fh2ffworld.py`, `world_room`; the room is cut so that the ending stays
-whole in the game's 32 characters). So the players in a world meet each other, and the server
-sees `+anthem#TU4`, `club+fh2#TU4` and so on.
+(`launcher/forza_launcher/fh2ffworld.py`, `world_room`). So the players in a world meet each
+other, and the server sees `+anthem#TU4`, `club+fh2#TU4` and so on. The game keeps the first 32
+**bytes** of the room (`kernel/identity.cpp`, `LiveRoom`), so the ending stays whole only when
+the launcher cuts the player's room in bytes as well. A room with letters that take more than one
+byte in UTF-8 (`é`, `ñ`, `ク`), cut to 32 letters, can be longer than 32 bytes and lose its
+ending in the game: the server then sees a Colorado room and keeps that world's results as
+Colorado's. `tests/core/test_rooms.py` has both cuts.
 
 A world is another map with other roads: the boards, the 1000 Club, the daily and weekly
 challenges and the co-op campaign are Colorado's. `rooms.world_key(room)` is `anthem`, `fh2` or

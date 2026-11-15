@@ -11,8 +11,27 @@ from forza_live.core import rooms
 
 def world_room(room, key):
     """The launcher's fh2ffworld.world_room (FH1-ReImagined/ForzaHorizon1-ReImagined #832): the
-    player's room plus the world's key, in the game's 32 characters."""
+    player's room plus the world's key, cut to 32 characters."""
     return (room[:31 - len(key)] + "+" + key)[:32]
+
+
+def world_room_in_bytes(room, key):
+    """world_room cut to the game's 32 BYTES: what keeps the ending whole for a room of letters
+    that take more than one byte in UTF-8 (the launcher has to cut it this way)."""
+    return room.encode("utf-8")[:31 - len(key)].decode("utf-8", "ignore") + "+" + key
+
+
+def game_room(env_room, tu4=False):
+    """The room the server sees: the game keeps the first 32 bytes of FORZA_ROOM (forza-recomp
+    kernel/identity.cpp, LiveRoom), a Title Update 4 game adds "#TU4", and the server reads the
+    HELLO's room as UTF-8 (server.py)."""
+    raw = env_room.encode("utf-8")[:32] + (b"#TU4" if tu4 else b"")
+    return raw.decode("utf-8", "replace")
+
+
+# rooms with letters that take two or three bytes in UTF-8, short and long
+WIDE_ROOMS = ("Équipe", "Équipe de France Horizon", "Ñandú Racing Club 2026 !!",
+              "x" * 24 + "é", "é" * 20, "クラブ" * 4, "クラブ")
 
 
 class WorldKeyTest(unittest.TestCase):
@@ -22,8 +41,26 @@ class WorldKeyTest(unittest.TestCase):
                 made = world_room(room, key)
                 self.assertLessEqual(len(made), 32)
                 self.assertEqual(rooms.world_key(made), key, made)
-                # a Title Update 4 game adds "#TU4" after the game's 32 characters
-                self.assertEqual(rooms.world_key(made + "#TU4"), key, made)
+                for tu4 in (False, True):  # a Title Update 4 game adds "#TU4" after the 32 bytes
+                    self.assertEqual(rooms.world_key(game_room(made, tu4)), key, made)
+
+    def test_rooms_of_wider_letters_keep_their_ending_only_when_cut_in_bytes(self):
+        """The game keeps 32 bytes, not 32 letters. A room cut to 32 letters that is longer than
+        32 bytes loses its ending in the game, and the server takes it as Colorado's room: the
+        launcher has to cut the room in bytes for those."""
+        lost = []
+        for room in WIDE_ROOMS:
+            for key in ("anthem", "fh2"):
+                made = world_room_in_bytes(room, key)
+                self.assertLessEqual(len(made.encode("utf-8")), 32)
+                for tu4 in (False, True):
+                    self.assertEqual(rooms.world_key(game_room(made, tu4)), key, (room, key))
+                if rooms.world_key(game_room(world_room(room, key), True)) != key:
+                    lost.append((room, key))
+        # cut in letters (#832 as it is): these lose the ending, so their world counts as Colorado
+        self.assertEqual(lost, [("Ñandú Racing Club 2026 !!", "anthem"), ("x" * 24 + "é", "anthem"),
+                                ("é" * 20, "anthem"), ("é" * 20, "fh2"), ("クラブ" * 4, "anthem"),
+                                ("クラブ" * 4, "fh2")])
 
     def test_colorado_s_rooms(self):
         for room in ("", "#TU4", "club", "club#TU4", "anthem", "fh2", "+fh", "myfh2", "my-anthem",
