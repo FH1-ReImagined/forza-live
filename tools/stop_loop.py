@@ -2,14 +2,17 @@
 """Stop a busy server over and over, and count the stops that were lost (#78).
 
 Usage: stop_loop.py RUNS [--repo DIR] [--python EXE] [--signals SIGTERM[,SIGINT...]] [--gap S]
-                         [--gc-threshold N] [--diag] [--out FILE.jsonl]
+                         [--gc-threshold N] [--slow-discord S] [--diag] [--out FILE.jsonl]
 
 Each run starts the server (forza_live_server.py of --repo, this repository by default) on
 127.0.0.1 with free ports and a temporary data folder, waits for /status, and puts it under load:
 HTTP connections opened and closed as fast as one thread can (a third answered, a third dropped
 after half a request, a third dropped at once) and junk UDP datagrams, so tasks die and their weak
 references are cleaned up all the time. --gc-threshold N runs the server with
-gc.set_threshold(N), the garbage collector at work far more often. At a random moment the run
+gc.set_threshold(N), the garbage collector at work far more often. --slow-discord S turns on a
+Discord status (nothing sent) whose update takes S seconds, with the server's ticks 100 times
+faster (an update every 0.3 s instead of 30 s): most signals then come while the tick waits for
+it, and the stop's saves must not wait for it. At a random moment the run
 sends the signal(s), --gap seconds apart, and waits 20 s (the public server's stop_grace_period)
 for the process to end.
 
@@ -43,6 +46,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # the server run as forza_live_server.py runs it, with what --gc-threshold and --diag add
 WRAPPER = ("import gc, faulthandler, runpy, signal, sys\n"
            "if {gc}: gc.set_threshold({gc})\n"
+           "if {slow}:\n"
+           "    import time\n"
+           "    from forza_live import server\n"
+           "    from forza_live.social import discord_status\n"
+           "    discord_status.enabled = lambda: True\n"
+           "    discord_status.update = lambda *a, **k: time.sleep({slow})\n"
+           "    discord_status.offline = lambda data_dir: None\n"
+           "    real_wait = server.StopRequest.wait\n"
+           "    async def wait(self, seconds):\n"
+           "        return await real_wait(self, seconds / 100)\n"
+           "    server.StopRequest.wait = wait\n"
            "if {diag}: faulthandler.register(signal.SIGUSR1, all_threads=True)\n"
            "sys.argv = sys.argv[1:]\n"
            "runpy.run_path(sys.argv[0], run_name='__main__')\n")
@@ -96,7 +110,7 @@ def one(args, signals, template):
         shutil.copytree(template, data)
         http, udp = free(socket.SOCK_STREAM), free(socket.SOCK_DGRAM)
         log_path = os.path.join(top, "server.log")
-        wrapper = WRAPPER.format(gc=args.gc_threshold, diag=args.diag)
+        wrapper = WRAPPER.format(gc=args.gc_threshold, diag=args.diag, slow=args.slow_discord)
         with open(log_path, "w") as log:
             proc = subprocess.Popen(
                 [args.python, "-c", wrapper, os.path.join(args.repo, "forza_live_server.py"),
@@ -174,6 +188,8 @@ def main():
     parser.add_argument("--gap", type=float, default=0.0, help="seconds between the signals")
     parser.add_argument("--gc-threshold", type=int, default=0, metavar="N",
                         help="gc.set_threshold(N) in the server (default: Python's)")
+    parser.add_argument("--slow-discord", type=float, default=0.0, metavar="S",
+                        help="a Discord status update that takes S seconds, every 0.3 s")
     parser.add_argument("--diag", action="store_true",
                         help="the stacks of a lost stop's threads in its log, before the kill")
     parser.add_argument("--out", help="a JSON line per run, added to this file")
@@ -192,7 +208,8 @@ def main():
             results.append(r)
             if out:
                 out.write(json.dumps(dict(r, python=version, signals=args.signals,
-                                          gc=args.gc_threshold)) + "\n")
+                                          gc=args.gc_threshold,
+                                          slow_discord=args.slow_discord)) + "\n")
                 out.flush()
             if r["tail"]:
                 print("run %d: lost=%s rc=%s saved=%s took=%.2f s\n%s" % (
@@ -205,7 +222,8 @@ def main():
     print("Python %s, %d runs, %s%s: lost %d, without the stop's saves %d, exit status not 0 %d, "
           "a traceback %d, 'Exception ignored' %d, not started %d" % (
               version, len(results), args.signals,
-              ", gc threshold %d" % args.gc_threshold if args.gc_threshold else "",
+              (", gc threshold %d" % args.gc_threshold if args.gc_threshold else "")
+              + (", Discord update %g s" % args.slow_discord if args.slow_discord else ""),
               sum(r["lost"] for r in results), sum(not r["saved"] for r in results),
               sum(r["rc"] != 0 for r in results), sum(r["traceback"] for r in results),
               sum(r["ignored"] for r in results), sum(not r["started"] for r in results)))

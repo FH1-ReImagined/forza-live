@@ -768,7 +768,9 @@ The exit status stays 0, even for a signal that comes as the process ends.
 The stop takes a fraction of a second, most of it those last two writes (a slow disk can make them
 take a few seconds), and on a bad network a few more for the Discord status after them; the
 compose file gives it 20 s (`stop_grace_period`). Only a kill ends it earlier: Docker's at the end
-of that time, `docker compose kill`, or SIGKILL. Since every signal after the first is ignored, a
+of that time, `docker compose kill`, or SIGKILL. A Discord update stuck on the network past the 5 s
+does not hold the saves, which are made by then, but the process ends only once it gives up; past
+the 20 s Docker kills it (exit status 137), at no cost to what was saved. Since every signal after the first is ignored, a
 stop that does not end (the Discord status stuck on the network after the saves, say) is not
 ended by a second Ctrl+C either: in a terminal, Ctrl+\ (SIGQUIT) or `kill -9` ends it. Likewise
 a server whose event loop is held for good never gets to the stop: only a kill ends it, and the
