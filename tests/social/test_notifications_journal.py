@@ -15,6 +15,7 @@ import json
 import os
 import random
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -572,6 +573,34 @@ class StopTest(Base):
             srv.save_at_stop(self.server())
         boards.assert_called_once_with()
         self.assertIn("stop: the notifications could not be written", logs.output[0])
+
+    def test_a_second_signal_during_its_write_still_lets_the_boards_be_written(self):
+        """docker stop twice: the second signal comes while notifications.json is written
+        whole at the stop (the stop signals are no longer held then). That write ends, the
+        journal has every change, and the boards' stop still runs before the stop ends."""
+        old = scores.DATA_DIR
+        self.addCleanup(scores.configure, old)
+        scores.configure(self.dir.name, "main-1")
+        scores.STORE.load()
+        nid = self.news(A, "only in the journal")
+        real = notices.dump
+
+        def dump(*args):
+            signal.raise_signal(signal.SIGTERM)  # docker stop again, in the middle of it
+            return real(*args)
+        previous = signal.signal(signal.SIGTERM, signal.default_int_handler)  # as run() has it
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        with mock.patch.object(notices, "dump", dump), \
+                mock.patch.object(scores.STORE, "stop", wraps=scores.STORE.stop) as boards, \
+                self.assertLogs("forza-live", "INFO") as logs:
+            self.assertRaises(KeyboardInterrupt, srv.save_at_stop, self.server())
+        boards.assert_called_once_with()
+        self.assertTrue(any("KeyboardInterrupt while notifications.json was written whole" in
+                            line and line.startswith("WARNING") for line in logs.output),
+                        logs.output)
+        self.assertFalse(os.path.exists(self.path("notifications.json")))
+        self.restart()  # nothing lost: the journal had it
+        self.assertEqual([n["id"] for n in notices.pending(A)], [nid])
 
     def test_the_server_does_not_start_on_a_file_it_cannot_read(self):
         os.mkdir(self.path("notifications.json"))  # a read error no test runner's root passes

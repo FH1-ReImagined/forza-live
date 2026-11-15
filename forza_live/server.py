@@ -2243,7 +2243,8 @@ def own_error(error, handled):
 def save_at_stop(server, held=None):
     """What the server writes as it stops, the boards last: their last write is megabytes, and
     whatever ends it early (a second signal, the stop's time running out) costs the boards
-    nothing, their journal has every change (#67). The stores before them have no journal: a
+    nothing, their journal has every change (#67); so for the notifications' write before them,
+    and a signal that ends that one still lets the boards be written. The stores before them have no journal: a
     stop signal waits until they are written (held: what hold_stop_signals() gave, when the
     caller already holds them), and each is written whatever became of the others, so that the
     boards' last write is always reached (#70)."""
@@ -2269,12 +2270,20 @@ def save_at_stop(server, held=None):
                           exc_info=own_error(e, stopping))
     finally:
         release_stop_signals(held)
-    # The stores with a journal, which loses nothing whatever ends the stop: the boards last.
+    # The stores with a journal, which loses nothing whatever ends the stop: the boards last,
+    # reached whatever ends the notifications' write (a second signal there ends the stop only
+    # once the boards are written, or a third one cuts them).
     try:
         notifications.STORE.stop()  # notifications.json gets what only its journal had
     except Exception as e:  # noqa: BLE001 - the boards are still written
         log.error("stop: the notifications could not be written", exc_info=own_error(e, stopping))
-    scores.STORE.stop()  # scoreboards.json gets what only its journal had
+    except BaseException as e:
+        log.warning("stop: %s while notifications.json was written whole: not written, its "
+                    "journal has every change; the boards are written all the same",
+                    type(e).__name__)
+        raise
+    finally:
+        scores.STORE.stop()  # scoreboards.json gets what only its journal had
 
 
 async def main():

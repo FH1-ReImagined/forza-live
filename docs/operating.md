@@ -736,7 +736,10 @@ friends) are written first, each whatever became of the others (an error in one 
 boards are still written). While they are written a second stop signal (a second `docker compose
 stop`, Ctrl+C) is ignored and logged (`stop: SIGTERM again while the registrations, co-op ledger
 and friends were written: ignored until they were`); once they are, a signal ends the stop again,
-which costs the boards nothing.
+which costs the boards nothing. The notifications' last write comes between those stores and the
+boards: a signal while it runs ends it (`stop: KeyboardInterrupt while notifications.json was
+written whole: not written, its journal has every change; the boards are written all the same`, a
+warning) and the boards are still written; only a signal after that one cuts theirs short.
 
 **A `scoreboards.json` that cannot be read.** When the file is there but cannot be read (a read
 error, permissions) the boards come from its `.bak` and the journal, as above. When the `.bak`
