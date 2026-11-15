@@ -4,6 +4,7 @@ SQLite owns awards and a durable delivery outbox. Gameplay membership is evidenc
 attendance, not proof of race completion. Identity is explicitly enrolled by an
 organizer against the existing friends credential; it is not an arbitrary XUID header.
 """
+import asyncio
 import json
 import re
 import sqlite3
@@ -95,12 +96,34 @@ class Events:
                     self.credential(peer) == row[0] and row[0])
 
     def enroll(self, peer):
+        """The player's identity enrolled: its binding must be on disk first (the friends store's
+        database). It nearly always is, a moment after the sign-in that made it; when it is not,
+        on the event loop, this is a coroutine that awaits that write off the loop (the HTTP and
+        operator panel routes await it), and without a loop (a tool) the write is waited for
+        here."""
         credential = self.credential(peer)
         if not credential or peer.id in self.server.restored:
             raise ValueError("player must sign in with a verified friends credential")
-        xuid = hx(peer.xuid)
-        if self.server.friends.store.path and not self.server.friends.store.save():
+        store = self.server.friends.store
+        if store.path and store.pending():
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                if not store.save():
+                    raise OSError("could not persist the player's identity binding") from None
+            else:
+                return self._enroll_written(peer, credential)
+        return self._enroll(peer, credential)
+
+    async def _enroll_written(self, peer, credential):
+        if not await self.server.friends.store.written():
             raise OSError("could not persist the player's identity binding")
+        if self.credential(peer) != credential or peer.id in self.server.restored:
+            raise ValueError("the player's binding changed meanwhile: enroll again")
+        return self._enroll(peer, credential)
+
+    def _enroll(self, peer, credential):
+        xuid = hx(peer.xuid)
         with self.db:
             old = self.db.execute("SELECT credential FROM identities WHERE xuid=?", (xuid,)).fetchone()
             if old and old[0] != credential:

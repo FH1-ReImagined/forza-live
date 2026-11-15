@@ -37,6 +37,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: The server's dependencies (pinned, by hash)
+        run: python -m pip install --require-hashes -r requirements.txt
       - name: Unit tests
         env:
           FORZA_REPO_TOOLS: ${{ github.workspace }}/.game-repo/tools
@@ -54,6 +56,7 @@ jobs:
           python-version: "3.12"
       - name: Screening worker tests
         run: |
+          python -m pip install --require-hashes -r requirements.txt  # the server it runs against
           python -m pip install numpy==2.5.3 pillow==12.3.0
           python -m unittest discover -s screening -p 'test_screen_*.py' -v
 
@@ -69,6 +72,8 @@ jobs:
           python-version: "3.12"
       - name: ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: The server's dependencies
+        run: python -m pip install --require-hashes -r requirements.txt
       - name: Converter tests
         run: python -m unittest discover -s video -p 'test_*.py' -v
       - name: The server's videos with the real converter
@@ -127,6 +132,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: The server's dependencies
+        run: python -m pip install --require-hashes -r requirements.txt
       - name: Unit tests
         run: python -m unittest discover -s tests -t .
 
@@ -144,7 +151,9 @@ jobs:
           done
           docker logs forza-live
           python3 -c "import json; json.load(open('status.json'))"
+          docker exec forza-live python3 -m forza_live.core.storage --data-dir /data backup /tmp/copy.sqlite3
           docker rm -f forza-live
+          docker image ls forza-live --format 'forza-live image: {{.Size}}'
       - run: docker build -t forza-accounts -f accounts/Dockerfile .
       - name: The accounts image starts and answers on /api/health
         run: |

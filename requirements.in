@@ -1,0 +1,6 @@
+# The server's dependencies, pinned. requirements.txt is made from this file with
+#   uv pip compile --universal --generate-hashes --python-version 3.12 -o requirements.txt requirements.in
+# and installed with
+#   python3 -m pip install --require-hashes -r requirements.txt
+# SQLAlchemy: the server's database (forza_live/core/storage.py, #75). typing-extensions comes with it.
+SQLAlchemy==2.1.8

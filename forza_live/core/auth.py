@@ -301,7 +301,7 @@ def binding(record):
 def rebind(store, xuid, pub, why):
     p = store.get(xuid, create=True, own=True)
     old = binding(p)
-    store.bind(p, pub=pub.hex())
+    store.bind(p, pub=pub.hex(), xuid=xuid)
     COUNTS[why] += 1
     for fn in getattr(store, "on_rebind", ()):
         fn(xuid, old, binding(p))

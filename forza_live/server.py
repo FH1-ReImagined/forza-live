@@ -42,6 +42,7 @@ from forza_live.competition import events
 from forza_live.core import limits
 from forza_live.core import media
 from forza_live.core import rooms
+from forza_live.core import storage
 from forza_live.content import online
 from forza_live.title_services import lsp
 from forza_live.network import proxy
@@ -2129,6 +2130,8 @@ async def http_handler(server, reader, writer):
                         if not isinstance(data, dict):
                             raise ValueError("expected a JSON object")
                         result = server.events.handle(method, url.path, data)
+                        if asyncio.iscoroutine(result):  # an enrollment awaiting its binding's write
+                            result = await result
                         reply = response(200, json.dumps(result).encode(), "application/json", conn)
                     except (ValueError, TypeError, sqlite3.IntegrityError) as error:
                         reply = response(400, json.dumps({"error": str(error)}).encode(), "application/json", conn)
@@ -2289,14 +2292,20 @@ def save_at_stop(server, held=None):
     and a signal that ends that one still lets the boards be written. The stores before them have no journal: a
     stop signal waits until they are written (held: what hold_stop_signals() gave, when the
     caller already holds them), and each is written whatever became of the others, so that the
-    boards' last write is always reached (#70)."""
+    boards' last write is always reached (#70). The friends' last changes are waited for, then
+    the database (core/storage.py) commits what is still queued and closes, before the stores
+    with a journal (#75)."""
     def ledger():
         if coop_ledger.LEDGER.dirty:
             coop_ledger.LEDGER.save()
 
     def friends_store():
-        if server.friends.store.dirty or server.friends.store.saving:
-            server.friends.store.save()
+        if server.friends.store.pending() and not server.friends.store.save():
+            log.error("stop: the friends' last changes are not all in %s", storage.FILE)
+
+    def database():
+        if not storage.close_all():  # what is still queued, committed; the writer ended
+            log.error("stop: %s did not take its last changes in time", storage.FILE)
 
     if held is None:
         held = hold_stop_signals()
@@ -2304,7 +2313,7 @@ def save_at_stop(server, held=None):
     try:
         # the registrations first: a restart now keeps the players (#93)
         for what, save in (("registrations", server.save_state), ("co-op ledger", ledger),
-                           ("friends", friends_store)):
+                           ("friends", friends_store), ("database", database)):
             try:
                 save()
             except Exception as e:  # noqa: BLE001 - the stores after it, and the boards, go on

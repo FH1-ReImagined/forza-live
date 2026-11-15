@@ -106,7 +106,7 @@ observed seconds. The JSON award response includes grant IDs and delivery status
 
 `events.sqlite3` holds enrolled credential fingerprints, events, participation,
 per-event grants/revocations, and a durable delivery/notice outbox. Back up the
-whole data directory together, including `friends.json`, `gifts.json` and
+whole data directory together, including `forza_live.sqlite3` (the friends), `gifts.json` and
 `notifications.json`; preserve SQLite consistently while the service is stopped
 or with SQLite's backup API. Do not restore only the grants into an older delivery
 store, which discards delivery receipts.

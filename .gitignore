@@ -8,3 +8,5 @@ data/
 # The accounts service's data and collected static files (accounts/README.md)
 accounts/data/
 accounts/static/
+# A virtual environment for the server's dependency (README.md, Development)
+.venv/

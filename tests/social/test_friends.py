@@ -7,6 +7,7 @@ import struct
 import tempfile
 import unittest
 
+from forza_live.core import storage
 from forza_live.social import friends as fr
 from forza_live import server as srv
 from tests.support import FakeTransport
@@ -293,11 +294,15 @@ class FriendsTest(unittest.TestCase):
             self.assertEqual(again.relation(a.xuid, b.xuid), fr.FRIEND)
             self.assertEqual(again.relation(a.xuid, c.xuid), fr.INCOMING)
             self.assertTrue(again.blocks(c.xuid, b.xuid))
-            with open(store.path, "w") as f:
+            with open(store.path, "w") as f:  # a friends.json that does not continue the database
                 f.write("{broken")
             broken = fr.Store(store.path)
-            broken.load()  # logged, not fatal
-            self.assertEqual(broken.players, {})
+            with self.assertLogs("forza-live", "WARNING") as logs:
+                broken.load()  # put aside, not read, and the database is the store
+            self.assertIn("friends.json.unused", logs.output[0])
+            self.assertEqual(broken.players, store.players)
+            self.assertFalse(os.path.exists(store.path))
+            storage.close_all()  # before the folder goes (Windows)
 
     def test_restart_keeps_the_friends_flag(self):
         a = self.peers[0]

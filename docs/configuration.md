@@ -25,7 +25,7 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--relay-only` | | run as a [volunteer relay](operating.md#running-a-relay) of a main server, with `--relay-of HOST:PORT`, `--relay-id ID` and `--relay-secret-file FILE` |
 | `--relay-allow-private` | | a relay also forwards to private and loopback addresses (a test on one LAN only) |
 | | `FORZA_DISK_CAP_MB` | cap of ghosts, cars and market blobs (default 4096) |
-| | `FORZA_MAX_PLAYERS` | cap of player records, and of the records with a key in `friends.json` (the players' keys, friends and blocks); as many again may have no key (a name another player blocked or asked) (default 20000) |
+| | `FORZA_MAX_PLAYERS` | cap of player records, and of the friends' records with a key (the players' keys, friends and blocks, in the database); as many again may have no key (a name another player blocked or asked) (default 20000) |
 | `--no-invites` | `FORZA_INVITES=0` | drop every game invite |
 | `--stall-limit MS` | | log what holds the event loop longer than this, and count it on the status page (default 50; `0`: off) ([what holds the event loop](operating.md#what-holds-the-event-loop)) |
 | `--stall-stack MS` | | also log where the loop was once it has been held this long (default 250; `0`: never) |
@@ -337,8 +337,8 @@ server kept its SHA-256.
   From then on that XUID's friends key is refused, so a copied key stops working when its owner
   upgrades. Games send the upgrade only to the official server's names; on other servers an XUID
   bound to a friends key stays off friends and chat until the operator lets the new game in
-  (`--rebind-legacy`, or by clearing `key` in the player's `friends.json` record while the
-  server is stopped). An upgrade or sign-in with another public key than the one on record is
+  (`--rebind-legacy`, or by clearing `key` in the player's friends record while the server is
+  stopped: [the database](operating.md#the-database)). An upgrade or sign-in with another public key than the one on record is
   refused, and the game is told the account is linked to another installation: recovery is by
   hand.
 - `--server-name HOST` (repeatable; env `FORZA_SERVER_NAMES`, comma separated): the names
@@ -362,8 +362,8 @@ server kept its SHA-256.
   `--raw-key-cutoff`, none without one): from then on an XUID still bound to a raw friends key is
   no longer moved to a public key by that key, because a copied key could do it before its owner
   does. Its player's game is told the account is linked to another installation, and the operator
-  releases it by hand as for any such account (clear `key` in the player's `friends.json` record
-  while the server is stopped; the next signed game that signs in with the XUID binds it). Every
+  releases it by hand as for any such account (clear `key` in the player's friends record while
+  the server is stopped, [the database](operating.md#the-database); the next signed game that signs in with the XUID binds it). Every
   upgrade until then is a warning in the log, with the address it came from.
 - New keys have a budget. An XUID with no key on record is bound to the first key that signs in
   with it, at most 16 at once from one address (then 16 an hour) and 2 a second for the whole
@@ -371,7 +371,7 @@ server kept its SHA-256.
   minute; raw friends keys, which bind with one datagram whose source may be forged, 10 at once
   and one a minute, counted apart from their address's signed games. Over a budget the XUID
   stays unbound until a later HELLO (the game says one every few seconds), with a warning in the
-  log, and the game is told that friends are off "for now". `friends.json` holds at most
+  log, and the game is told that friends are off "for now". The friends store holds at most
   `FORZA_MAX_PLAYERS` records with a key, and such a record is never forgotten, however long its
   player is away. Records without a key are made only by what other players do (a name someone
   blocked, a request to a player who has not signed in with a key): they have a cap of their

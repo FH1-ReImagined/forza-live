@@ -1,6 +1,6 @@
 """Likes and the player's own items (members.likes, members.items, members.game.counted), against
 a game server's data folder made here (community.json, videos.json, designs.json beside
-friends.json, players/
+its friends database, players/
 and banned_xuids.json), and the owner-only delete route of the game server itself
 (forza_live.content.owners) served on 127.0.0.1.
 

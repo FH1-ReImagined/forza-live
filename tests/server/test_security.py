@@ -16,7 +16,7 @@ from forza_live.core import limits
 from forza_live.title_services import lsp
 from forza_live import server as srv
 from forza_live.network import xtsw as x
-from tests.support import ROOT
+from tests.support import PYTHON, ROOT, child_env
 
 MAGIC = b"RLV1"
 
@@ -193,11 +193,11 @@ class ServerTest(unittest.TestCase):
     def setUpClass(cls):
         cls.port, cls.http = free_port(), free_port(socket.SOCK_STREAM)
         cls.data = tempfile.TemporaryDirectory()
-        env = dict(os.environ, FORZA_ADMIN_TOKEN="tok123")
+        env = child_env(FORZA_ADMIN_TOKEN="tok123")
         cls.proc = subprocess.Popen(
             # Windows venv's python.exe is a launcher; terminating it leaves its
             # child server alive, now holding events.sqlite3 open at cleanup.
-            [getattr(sys, "_base_executable", sys.executable), os.path.join(ROOT, "forza_live_server.py"), "--host", "127.0.0.1",
+            [PYTHON, os.path.join(ROOT, "forza_live_server.py"), "--host", "127.0.0.1",
              "--port", str(cls.port), "--http-port", str(cls.http), "--data-dir", cls.data.name],
             stderr=subprocess.DEVNULL, env=env)
         cls.base = "http://127.0.0.1:%d" % cls.http

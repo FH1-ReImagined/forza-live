@@ -8,7 +8,6 @@ import os
 import socket
 import struct
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -18,11 +17,10 @@ import urllib.request
 from forza_live.core import relays
 from forza_live.network import relay_broker as rb
 from forza_live.network import relay_node as rn
-from tests.support import ROOT
+from tests.support import PYTHON, ROOT, child_env
 
 MAGIC = b"RLV1"
 HELLO, WELCOME, RELAY, FORWARD = 1, 2, 5, 6
-PYTHON = getattr(sys, "_base_executable", sys.executable)
 
 
 def free_port(kind=socket.SOCK_DGRAM):
@@ -107,7 +105,8 @@ class RelayProcesses(unittest.TestCase):
 
     def spawn(self, args):
         proc = subprocess.Popen([PYTHON, os.path.join(ROOT, "forza_live_server.py")] + args,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env=child_env())
         self.procs.append(proc)
         self.addCleanup(self.stop, proc)
         return proc

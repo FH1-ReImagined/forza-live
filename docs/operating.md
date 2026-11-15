@@ -129,8 +129,8 @@ Every operator endpoint and command, and where it is in the panel:
 
 Not in the panel: the `/owner/` routes (the website accounts service's, with their own token),
 the screening worker (it uses the photo and design routes above), `tools/xtsw_decode.py` (a
-developer's tool), `--rebind-legacy` or clearing a key in `friends.json` (by hand, with the
-server stopped), backups, and the start options.
+developer's tool), `--rebind-legacy` or clearing a player's key (by hand in the database, with
+the server stopped: [the database](#the-database)), backups, and the start options.
 
 The panel's own routes are under `/operator/api/`: `GET` for what it shows, `POST` with a JSON
 body for a change. They call the same code as the endpoints above, with the panel's rules
@@ -138,11 +138,11 @@ body for a change. They call the same code as the endpoints above, with the pane
 
 ## Friends, chat and clubs
 
-Friends are kept per player (XUID) in `friends.json` in the data folder: each
-player's gamertag, when it was last seen, the public key of its game (or, until the player
-upgrades, a SHA-256 of the friends key of a game before signed requests), and its friends,
-requests both ways and blocks (written at most every 2 s after a change and on shutdown;
-keep the data folder). The first game that uses an XUID's friends binds them to its key
+Friends are kept per player (XUID) in the server's database, `forza_live.sqlite3` in the data
+folder ([the database](#the-database); `friends.json` before it): each player's gamertag, when it
+was last seen, the public key of its game (or, until the player upgrades, a SHA-256 of the
+friends key of a game before signed requests), and its friends, requests both ways, blocks and
+mutes (each change written a moment after it is made, by a thread; keep the data folder). The first game that uses an XUID's friends binds them to its key
 ([signed requests](configuration.md#signed-requests)); another game claiming that XUID gets no list. A record with a key is never forgotten; one without (a name another player blocked or asked) that holds no friends, requests or blocks is forgotten after 180 days, and such records never count against the room for new players (`FORZA_MAX_PLAYERS`).
 Limits: 200 friends, 50 requests waiting each way, 200 blocks per player; 10 requests a
 minute (bursts of 5), 60 other changes a minute, 30 searches a minute; searches answer at
@@ -161,7 +161,7 @@ messages), and the server keeps only the last 200 messages in memory (time, send
 the club's tag for the Club channel, recipients, text) for moderation; they are gone
 when the server stops. Limits: 200 characters per message, 5 messages per 10 s per player
 (the sender is told to slow down), direct messages only between friends; a player's mutes
-(kept in `friends.json`) and blocks hide the other's messages. Games up to v0.1.14 have no
+(kept with its friends) and blocks hide the other's messages. Games up to v0.1.14 have no
 chat.
 
 Car clubs in the Horizon World : Find Game > Horizon World searches are answered with
@@ -597,7 +597,9 @@ holds. Running `add` again for a listed id gives it a new secret and revokes the
 
 ### Running a relay
 
-The relay's operator runs, with the secret file from the main server's operator:
+The relay's operator runs, with the secret file from the main server's operator and the
+server's dependency installed (`python3 -m pip install --require-hashes -r requirements.txt`,
+in a virtual environment if the system's Python wants one):
 
     python3 forza_live_server.py --relay-only --port 21200 \
         --relay-of your.host:21200 --relay-id eu-1 --relay-secret-file /path/to/eu-1.txt
@@ -709,9 +711,10 @@ service in [`accounts/`](../accounts/README.md), with its own image, database an
 runs behind the website's nginx at `/api/` and never on the game server's ports or tunnel. Its
 README lists every setting, what to register with Discord, GitHub and the mail relay, an nginx
 example, the daily upkeep and backups. To link accounts to players' games, count likes and list
-players' own photos and designs, it reads this server's data folder (`friends.json`, `players/`,
-`banned_xuids.json`, `community.json`, `designs.json`) through a read-only mount, and never writes
-to it.
+players' own photos and designs, it reads this server's data folder (the friends in
+`forza_live.sqlite3`, `players/`, `banned_xuids.json`, `community.json`, `designs.json`) through a
+read-only mount, and never writes to it. It reads the database's `-wal` and `-shm` files beside
+it too, so its user needs to be able to read those (they are made with the database's own mode).
 
 Players delete their own photos and designs from the account page: the service asks this server's
 [owner routes](title_services.md#a-players-own-items-forza_livecontentownerspy), which need
@@ -722,13 +725,91 @@ the routes are off and the account page cannot delete.
 
 ## Backups and rollback
 
-Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it.
+Everything the server keeps (players, friends, clubs, scores, photos, designs, moderation lists) is in the data folder. Stop the server for a moment so every file is complete, copy the folder, and start it again (the commands are in the [hosting guide](hosting.md#keeping-it-running)). To restore a backup, stop the server, replace the data folder with the backup's, and start it. The database can also be copied while the server runs ([the database](#the-database)).
 
-To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, or from before the notifications' journal, put each journal in its file first ([scores on disk](#scores-on-disk) and [notifications on disk](#notifications-on-disk) have the commands). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
+To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, or from before the notifications' journal, put each journal in its file first ([scores on disk](#scores-on-disk) and [notifications on disk](#notifications-on-disk) have the commands). Before going back to a version from before the database, export the friends to `friends.json` first ([the database](#the-database)). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
+
+### The database
+
+`forza_live.sqlite3` in the data folder is the server's database: SQLite, which the server uses
+through SQLAlchemy (`forza_live/core/storage.py`). The friends are its first store: each player's
+record in the table `friends_players` (`xuid`, `name`, `seen`, `key`, `pub`, and in `extra` any
+other field) and its friends, requests both ways, blocks and mutes in `friends_relations` (`xuid`,
+`map`: `friends`, `in`, `out`, `blocked` or `muted`, `other`, `since`). The other stores still have
+their own files; they move to it one at a time (#75). While the server runs, `forza_live.sqlite3-wal`
+and `forza_live.sqlite3-shm` are beside it: they are part of the database (SQLite's write-ahead
+log). A stop folds the log into the database and removes both.
+
+- **How it is written.** A change is written a moment after the server makes it, by a thread of
+  its own, in the order the changes were made: nothing a player does waits for the disk. A kill
+  or a power cut loses at most the changes of that last moment that were not committed yet, and
+  never leaves the database half written. A write that fails (a full disk) is logged once
+  (`friends: changes could not be written to forza_live.sqlite3 (...): they are written again
+  with the next ones`) and made again every second until it goes through (`friends: written to
+  forza_live.sqlite3 again (after 3 failed write(s))`). The stop waits for the friends' last
+  changes and closes the database before it writes the stores with a journal (`stop:
+  forza_live.sqlite3 did not take its last changes in time` when it could not in 15 s).
+- **The first start** imports `friends.json` into it and renames the file
+  `friends.json.imported`, which it never changes or deletes: `friends: 6714 record(s) imported
+  from friends.json into forza_live.sqlite3 in 0.28 s; the file is kept as friends.json.imported`.
+  When `friends.json` is damaged it imports its `.bak`, with a warning; when neither can be read,
+  the server does not start (`friends: friends.json is there and cannot be read (...): not
+  started`), so that nothing is lost: fix or replace the file and start again. A database that
+  cannot be read stops the start the same way (`friends: forza_live.sqlite3 cannot be read (...):
+  not started`): restore it from a backup.
+- **A backup while it runs**, consistent at one moment of the database, with SQLite's own backup:
+
+      docker compose exec forza-live python3 -m forza_live.core.storage --data-dir /data backup /data/backup.sqlite3
+
+  or on the host, with SQLite's command line tool: `sqlite3 data/forza_live.sqlite3 ".backup
+  data/backup.sqlite3"`. A copy of the files themselves is only complete with the server
+  stopped (as the hosting guide's backup does). To restore a backup: stop the server, put the
+  copy in place as `forza_live.sqlite3` (with no `-wal` or `-shm` beside it), and start it.
+- **Reading it.** The friends as the `friends.json` of the versions before it, to read or to keep:
+
+      docker compose exec forza-live python3 -m forza_live.core.storage --data-dir /data export friends > friends-export.json
+
+  (`... export friends /data/friends-export.json` writes the file in the data folder). Or with
+  `sqlite3`, read-only, while the server runs:
+
+      sqlite3 -readonly data/forza_live.sqlite3 "SELECT xuid, name, pub IS NOT NULL FROM friends_players WHERE name = 'Gamertag'"
+      sqlite3 -readonly data/forza_live.sqlite3 "SELECT other, datetime(since, 'unixepoch') FROM friends_relations WHERE xuid = '0009000000000001' AND map = 'friends'"
+
+- **Changing a record by hand** (clearing a key, so that the next game that signs in as that
+  XUID gets it): with the server stopped, since a running server keeps the records in memory
+  and would write its own over the change:
+
+      sqlite3 data/forza_live.sqlite3 "UPDATE friends_players SET key = '', pub = NULL WHERE xuid = '0009000000000001'"
+
+  Without `sqlite3` on the host: `docker compose run --rm --entrypoint python3 forza-live -c
+  "import sqlite3; c = sqlite3.connect('/data/forza_live.sqlite3'); c.execute(\"UPDATE ...\");
+  c.commit()"`.
+- **A `friends.json` beside the database** at a start (a backup put back, a previous version run
+  meanwhile) is never read over it without a reason, and never deleted:
+  - the file the database imported (or exported, below), the same bytes: nothing in it is new.
+    The database is the store; the file is renamed `friends.json.imported.1` (or
+    `friends.json.exported`, and a number after it when the name is taken).
+  - a file the previous version wrote after the export below, while the database has not changed
+    since that export: the rollback's own file, with everything the database had and what changed
+    during the rollback. It is imported again in place of the friends (`friends: ... imported
+    again from friends.json`) and renamed like the first one.
+  - anything else (a previous version started without the export, a file put back by hand): the
+    file does not continue the database, so the database is the store. The file is renamed
+    `friends.json.unused` (a number after it when the name is taken), with a warning. To take it
+    instead, stop the server and run `docker compose run --rm --entrypoint python3 forza-live -m
+    forza_live.core.storage --data-dir /data import friends /data/friends.json.unused`.
+- **Rolling back to a version from before the database.** That version reads `friends.json`,
+  which this one renamed. Stop the server, write the file with this version's image:
+
+      docker compose run --rm --entrypoint python3 forza-live -m forza_live.core.storage --data-dir /data export friends /data/friends.json
+
+  and start the previous version. Without that step it starts with no friends and no players'
+  keys at all. Coming back to this version takes the file that version wrote (the second case
+  above), as long as nothing started this version in between.
 
 ### The previous copies (`.bak`)
 
-Most files of the data folder (`friends.json`, `live_state.json`, `scoreboards.json`, the players'
+Most files of the data folder (`live_state.json`, `scoreboards.json`, the players'
 records, the indexes of photos, videos and designs, and the others) are saved whole beside the
 one in place and renamed over it, and the file they replace is kept as `<name>.bak`. The `.bak` is
 itself replaced in one step (a second link made as `<name>.bak.tmp` and renamed over it): a kill or
@@ -743,8 +824,9 @@ scoreboards.json.bak` (`is damaged` for damaged content). The next save of that 
 that `.bak` as it is rather than make the file that failed the new `.bak`; the save after it
 rotates them as usual again. A file that is not there is not looked for in its `.bak`. When
 neither can be used, each store does what it did before: most start without what the file held
-and log it, and the boards refuse to start when the file cannot be read, or is damaged with a
-`.bak` that is there but cannot be read (next section).
+and log it, the friends' import refuses to start ([the database](#the-database)), and the boards
+refuse to start when the file cannot be read, or is damaged with a `.bak` that is there but cannot
+be read (next section).
 
 ### Scores on disk
 
@@ -794,9 +876,9 @@ of them (a kill, a crash, a stop that ran out of its 20 s), it is complete only 
 does (rolling back, below).
 
 The stores that have no journal (the registrations in `live_state.json`, the co-op ledger and
-friends) are written first, each whatever became of the others (an error in one is logged as
-`stop: the friends could not be written` with that save's own traceback, and the others and the
-boards are still written). While they are written a second stop signal (a second `docker compose
+friends, then the database closes: [the database](#the-database)) are written first, each
+whatever became of the others (an error in one is logged as `stop: the friends could not be
+written` with that save's own traceback, and the others and the boards are still written). While they are written a second stop signal (a second `docker compose
 stop`, Ctrl+C) is ignored and logged (`stop: SIGTERM again while the registrations, co-op ledger
 and friends were written: ignored until they were`); once they are, a signal ends the stop again,
 which costs the boards nothing. The notifications' last write comes between those stores and the
@@ -879,8 +961,8 @@ What that means for you:
 - **Starting the boards from nothing**: delete `scoreboards.json`, `scoreboards.json.bak` and
   `scoreboards.journal` with the server stopped.
 
-`friends.json` is one file as before, written whole at most every 2 s after a change: by a
-thread too, from a copy the server takes in a few milliseconds.
+The friends are in the database ([the database](#the-database)), written a moment after each
+change by its own thread.
 
 ### Notifications on disk
 

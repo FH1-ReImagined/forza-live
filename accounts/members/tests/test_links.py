@@ -1,12 +1,11 @@
 """The game link (members.links, members.game): the launcher's signed calls against a game
-server's data folder made here (friends.json, players/, banned_xuids.json), and the website's
+server's data folder made here (its friends database, players/, banned_xuids.json), and the website's
 peek, claim and remove. Every check of a signed request (signature, server name, path, clock,
 replay in this worker and in another, unbound and legacy keys, browsers), the start's checks
 (ban, a result on the boards, limits), both confirmations, the rules (one key per account, moving, once a
 day, unlink and sign out from both sides) and the pinned key (frozen, waiting)."""
 
 import json
-import os
 import tempfile
 import time
 from datetime import timedelta
@@ -19,7 +18,8 @@ from django.core.management import call_command
 from django.test import Client, override_settings
 from django.utils import timezone
 
-from forza_live.core import auth, ed25519
+from forza_live.core import auth, ed25519, storage
+from forza_live.social import friends
 from members import api, links
 from members.management.commands import nightly
 from members.models import GameLink, LinkRequest, SignedNonce, User
@@ -46,13 +46,13 @@ class LinkTest(AccountsTest):
         super().setUp()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        self.addCleanup(storage.close_all)  # the game server's database, before the folder goes
         self.data = Path(tmp.name)
         (self.data / "players").mkdir()
         override = override_settings(GAME_DATA=self.data)
         override.enable()
         self.addCleanup(override.disable)
         self.friends = {}
-        self.stamp = 1_000_000_000_000_000_000
         self.player(XUID, SEED, "DriverA")
         self.game_client = Client(HTTP_HOST=HOST)
 
@@ -73,10 +73,10 @@ class LinkTest(AccountsTest):
         (self.data / "players" / ("%016X.json" % xuid)).write_text(json.dumps(record))
 
     def write_friends(self):
-        path = self.data / "friends.json"
-        path.write_text(json.dumps({"version": 1, "players": self.friends}))
-        self.stamp += 1_000_000  # a new mtime every time, however fast
-        os.utime(path, ns=(self.stamp, self.stamp))
+        """The friends as the game server keeps them: its database in the data folder."""
+        db = storage.database(str(self.data))
+        storage.ensure(db, friends.NAME, friends.VERSION, friends.TABLES)
+        db.call(friends.replace_all, self.friends)
 
     def ban(self, *xuids):
         (self.data / "banned_xuids.json").write_text(json.dumps(["%016X" % x for x in xuids]))
@@ -348,7 +348,7 @@ class StartChecks(LinkTest):
     def test_a_key_just_bound_is_found(self):
         stranger = 0x0009000000000077
         self.assertEqual(self.start(xuid=stranger, seed=SEED_C)[0].status_code, 401)
-        self.player(stranger, SEED_C, "Newcomer")  # friends.json written by the game server
+        self.player(stranger, SEED_C, "Newcomer")  # its binding written by the game server
         self.assertEqual(self.start(xuid=stranger, seed=SEED_C)[0].status_code, 200)
 
 
