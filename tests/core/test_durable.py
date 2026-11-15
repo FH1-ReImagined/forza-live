@@ -10,7 +10,7 @@ from unittest import mock
 from forza_live.core import durable
 
 
-class Durable(unittest.TestCase):
+class Folder(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.dir.name, "scoreboards.json")
@@ -24,6 +24,8 @@ class Durable(unittest.TestCase):
             json.dump(data, f)
         durable.replace(tmp, self.path)
 
+
+class Durable(Folder):
     def test_keeps_the_previous_file_as_bak(self):
         self.save({"n": 1})
         self.assertFalse(os.path.exists(self.path + ".bak"))
@@ -62,7 +64,7 @@ class Durable(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path + ".bak"))
 
 
-class TwoFaults(Durable):
+class TwoFaults(Folder):
     """The cases the reviews of #69 left (#70): a file that cannot be read at all, and the
     previous copy at every step of the next save."""
 
