@@ -11,6 +11,7 @@ Run: python3 -m unittest discover -s tests -t .
 
 import asyncio
 import copy
+import io
 import json
 import os
 import random
@@ -342,6 +343,29 @@ class CrashTest(Base):
         self.restart()
         self.assertEqual([n["id"] for n in notices.pending(A)], [nid])
 
+    def test_a_held_change_the_file_already_has_is_not_applied_twice(self):
+        """A send, a read and a clear whose journal line failed stay in memory; a whole write
+        then puts them in the file, the next save adds them to the journal after the file's
+        place, and a kill comes: the start applies that line on a file that has it already.
+        Each notification is there once, read and cleared as it was."""
+        first, second = self.news(A, "first"), self.news(A, "second")
+        with mock.patch.object(journal.Journal, "append", side_effect=OSError("disk full")):
+            self.assertRaises(OSError, self.news, A, "held")
+            self.assertRaises(OSError, mark, A, first)          # read, held
+            self.assertRaises(OSError, mark, A, second, True)   # cleared, held
+        held = notices.STORE.data["nextId"] - 1
+        notices.STORE.write(notices.STORE.snapshot())  # the thread's write: the file has them
+        last = self.news(A, "after")                   # the held changes go in this line
+        line = self.journal_lines()[-1]
+        self.assertEqual([n["id"] for n in line["add"]["%016X" % A]], [held, last])
+        self.assertEqual((line["read"], line["clear"]), ({"%016X" % A: [first]},
+                                                         {"%016X" % A: [second]}))
+        kept = copy.deepcopy(notices.STORE.data)
+        self.restart()  # a kill now: the last line is applied on the file
+        self.assertEqual(notices.STORE.data, kept)
+        self.assertEqual([(n["id"], n["read"]) for n in notices.pending(A)],
+                         [(first, True), (held, False), (last, False)])
+
     def test_killed_at_each_step_of_a_whole_write(self):
         """The checkpoint stopped before and after each of its steps: the start has it all."""
         self.news(A, "in the file")
@@ -518,6 +542,42 @@ class PruneTest(Base):
                          [3, 4, nid])
 
 
+class SnapshotTest(Base):
+    """What lets a thread write the file while the loop goes on: a snapshot is never changed,
+    whatever the loop does after it is taken (the Store's docstring)."""
+
+    def test_a_snapshot_is_what_the_store_was_when_it_was_taken(self):
+        read_one, clear_one = self.news(A, "to read"), self.news(A, "to clear")
+        self.news(B, "kept", idempotency_key="event:1")
+        casts = notices.broadcast(notices.NEWS, {"Message": "everyone"})
+        mark(C, casts)
+        snapshot = notices.STORE.snapshot()
+        tables = snapshot[2]
+        then = copy.deepcopy(tables)
+        records = {who: [id(n) for n in mine] for who, mine in tables["byRecipient"].items()}
+        # what the loop does meanwhile: a new recipient, a read, a clear, a broadcast's read and
+        # clear, a receipt, a new broadcast and one taken back, and an expired one pruned
+        self.news(PLAYER + 9, "a new recipient", idempotency_key="event:2")
+        mark(A, read_one)
+        mark(A, clear_one, True)
+        mark(B, casts)
+        mark(C, casts, True)
+        notices.delete_broadcast(notices.broadcast(notices.NEWS, {"Message": "taken back"}))
+        notices.send(B, notices.NEWS, {"Message": "gone"}, keep_days=-1)
+        notices.STORE.prune()
+        self.assertNotEqual(notices.STORE.data, then)
+        self.assertEqual(tables, then)  # deep-equal: nothing in it changed in place
+        self.assertEqual({who: [id(n) for n in mine] for who, mine in
+                          tables["byRecipient"].items()}, records)
+        f = io.StringIO()
+        notices.dump(f, tables, time.time())
+        self.assertEqual(json.loads(f.getvalue()), then)  # what the thread writes from it
+        self.assertEqual(notices.STORE.write(snapshot), True)
+        self.restart()  # the file the snapshot made, and the journal's lines after its place
+        mine = [(n["id"], n["read"]) for n in notices.pending(A)]
+        self.assertEqual(mine, [(read_one, True), (casts, False)])
+
+
 class StopTest(Base):
     """The stop writes the file whole and says so; the server's stop writes it before the
     boards."""
@@ -601,6 +661,17 @@ class StopTest(Base):
         self.assertFalse(os.path.exists(self.path("notifications.json")))
         self.restart()  # nothing lost: the journal had it
         self.assertEqual([n["id"] for n in notices.pending(A)], [nid])
+
+    def test_rolling_back_without_the_fold(self):
+        """What docs/operating.md says of a rollback after a kill with no fold: the previous
+        version reads the file alone, so the notifications only in the journal are not there,
+        and its next id is one they had: it gives their ids out again."""
+        self.news(A, "in the file")
+        notices.STORE.write()
+        lost = self.news(B, "only in the journal")
+        previous = as_the_previous_version_reads_it(self.dir.name)  # a kill, then the rollback
+        self.assertEqual(previous_pending(previous, B), [])
+        self.assertEqual(previous["nextId"], lost)  # the previous version's next notification
 
     def test_the_server_does_not_start_on_a_file_it_cannot_read(self):
         os.mkdir(self.path("notifications.json"))  # a read error no test runner's root passes

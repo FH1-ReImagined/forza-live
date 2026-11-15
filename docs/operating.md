@@ -874,8 +874,10 @@ server stopped and the image still this version's, put the journal in the file:
 
 It ends with one of the first two lines above. Without that step a rollback after a stop that
 was not clean loses the last minute's notifications, and reads and clears of that minute come
-back unread or uncleared. The previous version writes the file at its first notification, after
-which the journal no longer continues it and is put aside at the next update.
+back unread or uncleared. Those notifications are lost for good, and their ids are given out
+again: the file's next id is the one from its last write, and the previous version counts on from
+it. The previous version writes the file at its first notification, after which the journal no
+longer continues it and is put aside at the next update.
 
 ### The other stores
 
