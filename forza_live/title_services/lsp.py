@@ -57,6 +57,7 @@ import logging
 import os
 import time
 import urllib.parse
+import uuid
 
 from forza_live.core import auth
 from forza_live.core import bans
@@ -73,6 +74,7 @@ from forza_live.core import media
 from forza_live.content import online
 from forza_live.content import owners
 from forza_live.core import relays
+from forza_live.core import rooms
 from forza_live.core import server_list
 from forza_live.competition import leaderboards
 from forza_live.competition import objectives
@@ -720,7 +722,9 @@ def hopper_get_game_options(server, xuid, body):
     hopper, round_num = params["hopperId"], params["roundNum"]
     path = os.path.join(DATA_DIR, "hoppers", "%d.xml" % hopper)
     found = server.world_of(xuid) if hopper in WORLD_HOPPERS and server else None
-    event_xml = world.WORLDS.next_round(*found, trusted=caller_trusted()) if found else None
+    # a converted world's co-op round is not the campaign's: Colorado's career (WORLD_ANSWERS)
+    event_xml = world.WORLDS.next_round(*found, trusted=caller_trusted(),
+                                        ledger_round=not rooms.call_world()) if found else None
     if event_xml:
         xml = event_xml
         log.info("title: hopper %d round %d for %016X: world %s event", hopper, round_num, xuid,
@@ -869,6 +873,49 @@ def changes_state(short, method):
     return not method.startswith(READ_PREFIXES) or (short, method) in STATE_CHANGING
 
 
+# --- Converted worlds (core/rooms.py) -----------------------------------------------------------
+# A game in a converted world (Forza Horizon 2's or Fast & Furious's map, in a room of its own:
+# the player's room plus "+fh2" or "+anthem") plays another map with other roads. Its results are
+# not Colorado's: these calls are answered as the game expects for an accepted call, and nothing
+# of them is kept (the handler is not run). The answer is the one the server already gives a call
+# it keeps nothing of: a submission that is not a best or from a banned player (a new scoreId,
+# no ghost asked for), and the empty success of the others, which the game takes as done and
+# never sends again. kind: what the log line (once per session and kind) says was left out.
+def _not_a_best(xuid, body):
+    return x.reply(x.ScoreboardSubmitScore_Results, {"scoreId": uuid.uuid4().bytes,
+                                                     "uploadFiles": False})
+
+
+def _accepted(xuid, body):
+    return x.reply()
+
+
+WORLD_ANSWERS = {
+    ("Scoreboard", "SubmitScore"): ("scores", _not_a_best),      # speed traps, zones, online XP
+    ("Scoreboard", "SubmitScoreEx"): ("scores", _not_a_best),    # events and Rivals times
+    ("Scoreboard", "UploadFile"): ("ghosts", _accepted),         # never asked for: a stray one
+    ("Scoreboard", "NotifyRival"): ("rival messages", _accepted),
+    ("Challenge", "ChallengeCompleted"): ("1000 Club medals", _accepted),
+    ("User", "WriteRaceStats"): ("race stats", _accepted),       # also the challenges, co-op
+    ("User", "WriteRaceStatsEx"): ("race stats", _accepted),
+    ("OnlineProfile", "UpdateAll"): ("online profile (online XP)", _accepted),
+}
+
+
+def world_of_caller(server, xuid):
+    """(world key, session, room) of the converted world the caller's game is in (the server's
+    player_world, from the player's UDP sessions), or None: Colorado, or no server."""
+    lookup = getattr(server, "player_world", None)
+    if lookup is None or not xuid:
+        return None
+    try:
+        found = lookup(xuid)
+    except Exception:  # never fail a call over this: Colorado's, as before
+        log.exception("title: the world of %016X could not be looked up", xuid)
+        return None
+    return found if isinstance(found, tuple) and len(found) == 3 else None
+
+
 def service_call(headers, body, server=None, http_method="POST", path="/Services.Horizon/o.xtsw"):
     """bin/xtsw call -> reply body."""
     cls = headers.get("x-classname", "").split(",")[0]          # Forza.WebServices.Hopper
@@ -913,15 +960,21 @@ def service_call(headers, body, server=None, http_method="POST", path="/Services
         log.info("title: %s.%s from %016X (%d bytes): empty answer", cls, method, xuid,
                  len(body))
         return x.reply() + bytes(EMPTY_ANSWER)
+    found = world_of_caller(server, xuid)
+    if found and (short, method) in WORLD_ANSWERS:
+        kind, fn = WORLD_ANSWERS[(short, method)]
+        rooms.left_out(kind, "%s.%s" % (short, method), found, xuid)
     token = _caller.set(state)
     signed = _signed.set(state == TRUSTED and auth.HEADER in headers)
     source = scores.set_source(state == TRUSTED, client_build(headers))  # rows' tags (#517)
+    in_world = rooms.set_call(found, xuid)  # what a call that stays must not keep (rooms.py)
     try:
         return fn(xuid, body)
     except ValueError as e:  # parameters that don't parse
         log.warning("title: %s.%s: bad parameters (%s): %s", cls, method, e, body.hex())
         return x.failure(2, "bad parameters")
     finally:
+        rooms.reset_call(in_world)
         scores.reset_source(source)
         _signed.reset(signed)
         _caller.reset(token)

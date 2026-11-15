@@ -57,7 +57,9 @@ signed in to this server: a title service call that carries its player's own key
 game before signed requests). A result from any other caller (a game before the friends key, or
 an XUID nobody signed in with here) is kept **unranked**: off the boards, for review, the
 player's best one per board. A caller that is refused, because its XUID has a key and the call
-does not carry it, leaves nothing at all. So is a
+does not carry it, leaves nothing at all. Nor does a game in a converted world (Forza Horizon 2's
+or Fast & Furious's map, whose room ends in `+fh2` or `+anthem`): its results are not Colorado's
+([title services](title_services.md#converted-worlds-rooms-forza_livecoreroomspy)). So is a
 Rivals time whose ghost fails the checks (`forza_live/competition/ghost.py`: sizes, chunks, the version, one
 car and the row's, the event's track when the server has the game's database, a lap time and
 records that match the score; the game gets a failure and carries on, and the player's previous
