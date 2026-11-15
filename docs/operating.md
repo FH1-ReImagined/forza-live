@@ -663,6 +663,24 @@ Everything the server keeps (players, friends, clubs, scores, photos, designs, m
 
 To roll back a bad update, check out the previous version of this repository, rebuild with `docker compose up -d --build`, and restore the data folder from before the update if the new version changed what it keeps. Before going back to a version from before the scores' journal, put the journal in the file first ([scores on disk](#scores-on-disk) has the command). Before going back to a server without PROXY protocol support, turn the tunnel's PROXY setting off first ([configuration](configuration.md#proxy-protocol-v2-hole-punching-through-the-tunnel)).
 
+### The previous copies (`.bak`)
+
+Most files of the data folder (`friends.json`, `live_state.json`, `scoreboards.json`, the players'
+records, the indexes of photos, videos and designs, and the others) are saved whole beside the
+one in place and renamed over it, and the file they replace is kept as `<name>.bak`. The `.bak` is
+itself replaced in one step (a second link made as `<name>.bak.tmp` and renamed over it): a kill or
+a power cut at any moment leaves the file in place and a `.bak`, the one before or the new one. A
+`<name>.bak.tmp` left by a kill is removed at the next save.
+
+When a file is empty, damaged, or cannot be read at all (a read error of the disk, permissions
+that refuse the server), the server reads its `.bak` instead, with a warning in the log:
+`... scoreboards.json cannot be read ([Errno 5] Input/output error); using its previous copy
+scoreboards.json.bak` (`is damaged` for damaged content). The next save of that file then keeps
+that `.bak` as it is rather than make the file that failed the new `.bak`; the save after it
+rotates them as usual again. A file that is not there is not looked for in its `.bak`. When
+neither can be used, each store does what it did before: most start without what the file held
+and log it, and the boards refuse to start when the file cannot be read (next section).
+
 ### Scores on disk
 
 The boards are more than one file in the data folder:
@@ -685,17 +703,52 @@ from scoreboards.journal on top of scoreboards.json`). So a kill, a crash or a p
 moment loses no score or ghost a player was told was kept; a line the stop cut in half was
 never acknowledged and is dropped.
 
-The stop says in the log what it did with the file, in one of three lines:
+The stop says in the log what it did with the file, in one line; the first two end with what
+the boards hold:
 
-- `scoreboards: scoreboards.json written whole at the stop in 0.32 s: it has every change`
-- `scoreboards: nothing to write at the stop: scoreboards.json has every change`
+- `scoreboards: scoreboards.json written whole at the stop in 0.32 s: it has every change: 412
+  boards, 50123 rows, 812 unranked rows, 1500 players in the 1000 Club`
+- `scoreboards: nothing to write at the stop: scoreboards.json has every change: 412 boards, ...`
 - `scoreboards: ... not written at the stop (...); its journal has every change`, a warning (a
   full disk, for example).
+- `scoreboards: ... not written at the stop (...), and the last changes could not be added to its
+  journal either (...): those are lost, the journal keeps the changes before them`, a warning:
+  the disk refused the journal's last line too. What is lost is what the journal never took:
+  changes whose own save had failed already, or a new name waiting for the next change.
+- `scoreboards: no scoreboards.json in /data, and no journal to apply: nothing was read, nothing
+  to write at the stop`: there were no boards in that folder at all (`scoreboards.json in /data
+  could not be read` when the file was there but damaged, with no `.bak`).
 
 After one of the first two, `scoreboards.json` alone is complete. After the third, or with none
 of them (a kill, a crash, a stop that ran out of its 20 s), it is complete only together with
 `scoreboards.journal`. This version loses nothing either way; a version from before the journal
 does (rolling back, below).
+
+The stores that have no journal (the registrations in `live_state.json`, the co-op ledger and
+friends) are written first, each whatever became of the others (an error in one is logged as
+`stop: the friends could not be written` with its traceback, and the others and the boards are
+still written). While they are written a second stop signal (a second `docker compose stop`,
+Ctrl+C) is ignored and logged (`stop: SIGTERM again while the registrations, co-op ledger and
+friends were written: ignored until they were`); once they are, a signal ends the stop again,
+which costs the boards nothing.
+
+**A `scoreboards.json` that cannot be read.** When the file is there but cannot be read (a read
+error, permissions) the boards come from its `.bak` and the journal, as above. When the `.bak`
+cannot be used either, the server does not start rather than run on empty boards, whose next
+write would replace both copies. It stops at once, before it opens a port, with exit code 1 and
+this line, and with `restart: unless-stopped` Docker starts it again and it stops again with
+the same line until the file is put right:
+
+    /data/scoreboards.json cannot be read ([Errno 13] Permission denied: '/data/scoreboards.json'), and there is no previous copy scoreboards.json.bak that can be: not started, rather than run without what it holds. Make it readable again, or move it out of the folder to start without it
+
+Nothing in the folder is changed, renamed or put aside meanwhile. Fix what the error names (the
+file's owner or mode, the disk) and start again. To start without those boards on purpose, stop
+the container and move `scoreboards.json` (and `scoreboards.json.bak`, if there is one) out of the
+data folder: the next start finds no file and starts empty, and a journal that continued the
+file is kept as `scoreboards.journal.unused.<n>` (below). A file whose content is damaged, with
+no `.bak` to fall back to, is not refused: the boards start with what the journal has on top of
+nothing, as before, and the log says `scoreboards.json cannot be read (...): starting without what
+it held`.
 
 What that means for you:
 
@@ -722,8 +775,11 @@ What that means for you:
       docker compose stop
       docker compose run --rm --entrypoint python3 forza-live -c "import logging; logging.basicConfig(level=logging.INFO); from forza_live.competition import scores; scores.configure('/data'); scores.STORE.load(); scores.STORE.stop()"
 
-  It must end with one of the first two lines above; after a clean stop it finds nothing to
-  write, and that is how you know. Then check out the previous version and run
+  It must end with one of the first two lines above, which say how many boards and rows it
+  read; after a clean stop it finds nothing to write, and that is how you know. A last line that
+  says `no scoreboards.json in ...: nothing was read` means the folder is not the data folder
+  (or has no boards): do not roll back before it reads yours. Then check out the previous
+  version and run
   `docker compose up -d --build`. Without Docker, run the same `python3 -c "..."` from the
   repository's folder with your data folder in place of `/data`.
 

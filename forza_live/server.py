@@ -55,6 +55,7 @@ from forza_live.world import coop_ledger
 from forza_live.world import world
 from forza_live.world import world_host
 from forza_live.core import durable
+from forza_live.core import journal
 
 MAGIC = b"RLV1"
 VERSION = 1
@@ -2187,15 +2188,65 @@ async def keep_counted(stores=None, every=None):
         await asyncio.sleep(limits.RESCAN_SECONDS if every is None else every)
 
 
-def save_at_stop(server):
+STOP_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGINT")
+                     if hasattr(signal, name))
+
+
+def hold_stop_signals():
+    """From here a stop signal (SIGTERM, SIGINT) is noted and ignored, until
+    release_stop_signals(held): the stores without a journal are written whole, and a second
+    `docker stop` or Ctrl+C in the middle would cut them short (#70). None where signals cannot
+    be set (a thread other than the main one): nothing is held then."""
+    came, previous = [], {}
+    try:
+        for number in STOP_SIGNALS:
+            previous[number] = signal.signal(number, lambda number, frame: came.append(number))
+    except ValueError:
+        release_stop_signals((came, previous))
+        return None
+    return came, previous
+
+
+def release_stop_signals(held):
+    """The handlers as they were before hold_stop_signals(), and the log told of a signal that
+    came meanwhile."""
+    if held is None:
+        return
+    came, previous = held
+    for number, handler in previous.items():
+        signal.signal(number, handler)
+    if came:
+        log.info("stop: %s again while the registrations, co-op ledger and friends were written: "
+                 "ignored until they were", signal.Signals(came[0]).name)
+
+
+def save_at_stop(server, held=None):
     """What the server writes as it stops, the boards last: their last write is megabytes, and
     whatever ends it early (a second signal, the stop's time running out) costs the boards
-    nothing, their journal has every change (#67). The stores before them have no journal."""
-    server.save_state()  # a restart now keeps the players (#93)
-    if coop_ledger.LEDGER.dirty:
-        coop_ledger.LEDGER.save()
-    if server.friends.store.dirty or server.friends.store.saving:
-        server.friends.store.save()
+    nothing, their journal has every change (#67). The stores before them have no journal: a
+    stop signal waits until they are written (held: what hold_stop_signals() gave, when the
+    caller already holds them), and each is written whatever became of the others, so that the
+    boards' last write is always reached (#70)."""
+    def ledger():
+        if coop_ledger.LEDGER.dirty:
+            coop_ledger.LEDGER.save()
+
+    def friends_store():
+        if server.friends.store.dirty or server.friends.store.saving:
+            server.friends.store.save()
+
+    if held is None:
+        held = hold_stop_signals()
+    try:
+        # the registrations first: a restart now keeps the players (#93)
+        for what, save in (("registrations", server.save_state), ("co-op ledger", ledger),
+                           ("friends", friends_store)):
+            try:
+                save()
+            except Exception:  # noqa: BLE001 - the stores after it, and the boards, go on
+                log.exception("stop: the %s could not be written", what)
+    finally:
+        release_stop_signals(held)
     scores.STORE.stop()  # scoreboards.json gets what only its journal had
 
 
@@ -2337,11 +2388,12 @@ async def main():
                 # urllib blocks: off the event loop, and never fatal (it catches everything)
                 await asyncio.to_thread(discord_status.update, server.status(), args.data_dir)
     finally:
+        held = hold_stop_signals()  # until the stores without a journal are written
         counting.cancel()
         writing.cancel()
         limits.STORED.close()  # a count under way ends now: its thread does not hold the exit
         videos.STORED.close()
-        save_at_stop(server)
+        save_at_stop(server, held)
         if discord_status.enabled():
             discord_status.offline(args.data_dir)
         transport.close()
@@ -2357,6 +2409,10 @@ def run():
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except journal.Unreadable:
+        # scoreboards.json is there and cannot be read, nor its .bak: the log has said so, and
+        # the server does not start on empty boards (docs/operating.md, "Scores on disk")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

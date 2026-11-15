@@ -17,13 +17,17 @@ one change, a JSON object whose meaning is its store's:
 A file that is none of those was written by something else: a previous version of the server,
 a restored backup, an edit by hand. The journal is not applied to it and is kept as
 <file>.journal.unused.<n>, a new n each time. NO_FILE and UNREADABLE stand for a file that is
-not there and for one that cannot be read.
+not there and for one whose content is damaged, with no previous copy that is whole. A file that
+is there but cannot be read at all (a read error, its permissions), with no previous copy that
+can be, is no store to start from: load() raises Unreadable, and leaves every file as it is.
 
 A checkpoint, in this order: the new file is written beside the one in place (<file>.tmp) and
 flushed; the journal is rewritten to name it too, without the lines the .bak already holds;
 the new file takes the place of the old one, which durable.replace keeps as .bak. Stopped at
 any point, the file in place and its .bak are both files the journal continues: the previous
-copy durable falls back to is made whole by it as the file itself is.
+copy durable falls back to is made whole by it as the file itself is. Which file the .bak is, the
+checkpoint reads from the .bak itself (its SHA-256), not from the order of the names: a new file
+can have the very bytes of the .bak (#70).
 
 Threads: append(), mark() and behind() are the event loop's, checkpoint() a thread's (or the
 stop's). A lock keeps the journal's file and what is known of it: the loop waits for it only
@@ -43,6 +47,11 @@ log = logging.getLogger("forza-live")
 
 NO_FILE, UNREADABLE = "none", "unreadable"
 FLUSH_EVERY = 1 << 20  # characters of a new file between two flushes to disk (Paced)
+
+
+class Unreadable(OSError):
+    """The file is there but cannot be read, and neither can its previous copy: a start would
+    have none of what it holds. Logged by Journal.load, which raises it."""
 
 
 class Paced:
@@ -80,16 +89,23 @@ class Journal:
         self.first = 0          # how many changes went before lines[0], dropped by checkpoints
 
     def load(self):
-        """(what the file holds, or None; the changes it lacks, in order). Never raises: a file
-        that cannot be read is logged and counts as none, a journal that cannot be used is put
-        aside."""
+        """(what the file holds, or None; the changes it lacks, in order). A file whose content
+        is damaged, with no whole previous copy, is logged and counts as none, a journal that
+        cannot be used is put aside. Unreadable when the file is there but cannot be read, nor
+        its previous copy: nothing is changed then, nor put aside."""
         try:
             data, self.base = durable.load_digest(self.path)
         except FileNotFoundError:
             data, self.base = None, NO_FILE
-        except (OSError, ValueError) as e:
+        except ValueError as e:
             log.error("%s cannot be read (%s): starting without what it held", self.path, e)
             data, self.base = None, UNREADABLE
+        except OSError as e:
+            log.error("%s cannot be read (%s), and there is no previous copy %s.bak that can be: "
+                      "not started, rather than run without what it holds. Make it readable "
+                      "again, or move it out of the folder to start without it", self.path, e,
+                      os.path.basename(self.path))
+            raise Unreadable(e.errno, "%s cannot be read: %s" % (self.path, e)) from e
         self.continues, self.lines, self.first = {self.base: 0}, [], 0
         return data, self._read()
 
@@ -123,17 +139,20 @@ class Journal:
             elif n >= held:
                 changes.append(change)
                 lacking.append(line + b"\n")
-        if damaged or cut or held > len(rest):
+        if damaged or held > len(rest):
             # Not whole: made anew at the next append, with the changes the file lacks only.
             self.lines = lacking
-            if damaged or held > len(rest):
-                log.warning("%s: %d damaged lines skipped, %d changes applied", self.name,
-                            damaged, len(changes))
-            else:
-                log.info("%s: its last line was cut short by the stop (a change nobody was told "
-                         "was kept); %d changes applied", self.name, len(changes))
+            log.warning("%s: %d damaged lines skipped, %d changes applied", self.name,
+                        damaged, len(changes))
             return changes
-        self.continues, self.lines, self._whole = known, [line + b"\n" for line in rest], True
+        if cut:
+            # Only the last line is cut short: every whole line is where the first line counts
+            # it, so the names stay, with every line, and the previous copy is still covered
+            # (#70). The file is made anew at the next append, without the cut part.
+            log.info("%s: its last line was cut short by the stop (a change nobody was told "
+                     "was kept); %d changes applied", self.name, len(changes))
+        self.continues, self.lines = known, [line + b"\n" for line in rest]
+        self._whole = not cut
         return changes
 
     def _put_aside(self, known, changes):
@@ -143,8 +162,13 @@ class Journal:
         that is here has them it cannot know, and does not say."""
         folder, start = os.path.split(self.name + ".unused.")
         try:
-            taken = [int(name[len(start):]) for name in os.listdir(folder or ".")
-                     if name.startswith(start) and name[len(start):].isdigit()]
+            taken = []
+            for name in os.listdir(folder or "."):
+                if name.startswith(start) and name[len(start):].isdecimal():
+                    try:
+                        taken.append(int(name[len(start):]))
+                    except ValueError:
+                        pass  # a name of someone else's: not one of the numbers
             unused = "%s%d" % (self.name + ".unused.", max(taken, default=0) + 1)
             os.replace(self.name, unused)
             where = "Kept as %s" % unused
@@ -214,14 +238,13 @@ class Journal:
                 dump(paced)
                 paced.flush()
             new = durable.digest(tmp)
+            bak = self._bak()
             with self._lock:
                 # The journal names the new file too, and loses the lines the .bak holds (the
                 # file in place has them as well). Not the lines the file in place holds: it is
                 # not the .bak before the rename below, and a start that falls back to the
                 # .bak, at whatever moment this stopped, needs them.
-                names = list(self.continues)
-                at = names.index(self.base) if self.base in names else 0
-                before = names[at - 1] if at else None  # the .bak, as the first line names it
+                before = bak if bak in self.continues else None  # the .bak, if the journal has it
                 held = self.continues.get(self.base, 0)
                 drop = min(self.continues[before], held) if before else 0
                 continues = {}
@@ -236,6 +259,14 @@ class Journal:
             with self._lock:
                 self.base = new
             return True
+
+    def _bak(self):
+        """The SHA-256 of the .bak there is now, or None: what a start that falls back to it
+        reads. Read from the file, the order of the names cannot say it (#70)."""
+        try:
+            return durable.digest(self.path + ".bak")
+        except OSError:
+            return None
 
     def _rewrite(self, continues, lines):
         """The journal's file made anew with these (the lock is held): written beside it and

@@ -203,9 +203,13 @@ class Store:
         return os.path.join(DATA_DIR, "scoreboards.json")
 
     def load(self):
+        """The boards from scoreboards.json and its journal, once. journal.Unreadable when the
+        file is there but cannot be read, nor its .bak: the server does not start on empty
+        boards. The store is loaded only once this succeeded: a load that raised is made again
+        at the next call, never taken for boards with nothing on them (#70)."""
         if self.loaded:
             return
-        self.loaded = True
+        self.boards, self.unranked, self.club, self.next_file = {}, {}, {}, 1
         self.journal = journal.Journal(self.path())
         data, changes = self.journal.load()
         if data is not None:
@@ -231,6 +235,7 @@ class Store:
         # players' bests and block their real ones (#349).
         for key, xuid in drop_impossible_speeds(self.boards):
             self.changes.setdefault("boards", {}).setdefault(key, {})[xuid] = None
+        self.loaded = True
         self.save()
 
     def apply(self, change):
@@ -324,22 +329,53 @@ class Store:
     def stop(self):
         """The server is stopping: scoreboards.json gets what only its journal had, so the file
         alone is complete (all a previous version of the server reads). The log says which it
-        was: written, nothing to write, or not written (the journal then has what it lacks)."""
+        was, in one line that ends with what the boards hold (what was read, for the command
+        that folds the journal into the file): written, nothing to write, or not written (the
+        journal then has what it lacks, unless it could not take the last changes either)."""
         if not self.loaded:
             return
         name = os.path.basename(self.path())
         try:
             self.save()
-            if not self.journal.behind():
-                log.info("scoreboards: nothing to write at the stop: %s has every change", name)
-            else:
-                began = time.monotonic()
-                if self.write(stopping=True):
-                    log.info("scoreboards: %s written whole at the stop in %.2f s: it has every "
-                             "change", name, time.monotonic() - began)
+            unsaved = None
         except OSError as e:
-            log.warning("scoreboards: %s not written at the stop (%s); its journal has every "
-                        "change", self.path(), e)
+            unsaved = e  # still in memory: the whole file takes them, if it can be written
+        if unsaved is None and not self.journal.behind():
+            if self.journal.base not in (journal.NO_FILE, journal.UNREADABLE):
+                log.info("scoreboards: nothing to write at the stop: %s has every change: %s",
+                         name, self.held())
+            else:  # a wrong folder for the command of docs/operating.md looks like this
+                log.info("scoreboards: %s, and no journal to apply: nothing was read, nothing to "
+                         "write at the stop", ("no %s in %s" if self.journal.base == journal.NO_FILE
+                                               else "%s in %s could not be read")
+                         % (name, os.path.abspath(DATA_DIR)))
+            return
+        began = time.monotonic()
+        try:
+            written = self.write(stopping=True)
+        except OSError as e:
+            if unsaved is None:
+                log.warning("scoreboards: %s not written at the stop (%s); its journal has every "
+                            "change", self.path(), e)
+            else:
+                log.warning("scoreboards: %s not written at the stop (%s), and the last changes "
+                            "could not be added to its journal either (%s): those are lost, the "
+                            "journal keeps the changes before them", self.path(), e, unsaved)
+            return
+        if written:
+            log.info("scoreboards: %s written whole at the stop in %.2f s: it has every change: "
+                     "%s", name, time.monotonic() - began, self.held())
+
+    def held(self):
+        """What the boards hold, for the log: "2 boards, 40 rows, 1 unranked row, 3 players in
+        the 1000 Club"."""
+        def count(n, one, many):
+            return "%d %s" % (n, one if n == 1 else many)
+        return ", ".join((
+            count(len(self.boards), "board", "boards"),
+            count(sum(len(b) for b in self.boards.values()), "row", "rows"),
+            count(sum(len(b) for b in self.unranked.values()), "unranked row", "unranked rows"),
+            count(len(self.club), "player", "players") + " in the 1000 Club"))
 
     def board(self, kind, sbid, stt, create=False):
         """A board's entries by player: {} for a board nobody is on, or with create the
