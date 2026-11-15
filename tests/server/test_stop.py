@@ -172,19 +172,22 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await srv.StopRequest().until_stopped(refused())
 
-    async def test_after_the_stop_a_signal_is_noted_and_ignored(self):
+    async def test_after_the_stop_a_signal_is_ignored(self):
+        """To the end of the process, with SIG_IGN: the interpreter's end puts the default
+        action back for Python's own handlers, and a signal then ended the process with its
+        status instead of 0 (a third signal 20 ms into a stop of the busy server, 179 times in
+        700)."""
         stop = srv.StopRequest().install(self.loop)
         stop.block()  # run(): the loop's close puts Python's handlers back meanwhile
         self.take_off()
-        waited = []
-        if stop.blocked is not None:  # (POSIX) a signal then waits, and is not the default's
+        if stop.blocked is not None:  # (POSIX) a signal then waits, and is dropped after
             signal.raise_signal(signal.SIGTERM)
-            waited = [signal.SIGTERM]
-            self.assertEqual(stop.came, [])
         stop.quiet()
         self.assertIsNone(stop.blocked)
-        signal.raise_signal(signal.SIGINT)
-        self.assertEqual(stop.came, waited + [signal.SIGINT])
+        for number in srv.STOP_SIGNALS:
+            self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
+        signal.raise_signal(signal.SIGINT)  # nothing happens
+        self.assertEqual(stop.came, [])
 
 
 class HeldTest(unittest.TestCase):
@@ -308,7 +311,10 @@ class RealStopTest(unittest.TestCase):
         said = [line.split(" ", 2)[2] for line in lines]
         self.assertIn(first, said)
         stop = said.index(first)
-        # the last lines: the notifications', then the boards'
+        # the last lines: the notifications', then the boards' (then, when signals came while
+        # they were written, the line that says so)
+        if " again while notifications.json and scoreboards.json were written" in said[-1]:
+            said = said[:-1]
         self.assertRegex(said[-2], r"^notifications: notifications\.json written whole at the "
                                    r"stop in [\d.]+ s: it has every change: 1 notification ")
         self.assertRegex(said[-1], r"^scoreboards: .*at the stop")
@@ -356,6 +362,7 @@ class RealStopTest(unittest.TestCase):
         self.ready(proc, http)
         for number in (signal.SIGTERM, signal.SIGTERM, signal.SIGINT):
             proc.send_signal(number)
+            time.sleep(0.01)  # the last one as the process ends, often (its status stays 0)
         said = self.assert_stopped_cleanly(*self.ended(proc, log))
         self.assertTrue(all(line.startswith(("stop: ", "notifications: ", "scoreboards: "))
                             for line in said), said)

@@ -2343,14 +2343,14 @@ class StopRequest:
             self.blocked = signal.pthread_sigmask(signal.SIG_BLOCK, self.taken)
 
     def quiet(self):
-        """From here to the end of the process a stop signal is noted and ignored (a container
-        runtime's second SIGTERM, a second Ctrl+C after the stop): run() calls it once the loop
-        is closed. A signal that waited meanwhile (block) comes now, to this handler."""
-        def ignore(number, frame):
-            self.came.append(number)
+        """From here to the end of the process a stop signal is ignored (a container runtime's
+        second SIGTERM, a second Ctrl+C after the stop): run() calls it once the loop is closed,
+        and a signal that waited meanwhile (block) is dropped. SIG_IGN rather than a handler of
+        ours: Python puts the default action back for its own handlers as the interpreter
+        ends, and a signal then would end the process with that signal's status instead of 0."""
         try:
             for number in STOP_SIGNALS:
-                signal.signal(number, ignore)
+                signal.signal(number, signal.SIG_IGN)
         except ValueError:  # not the main thread
             pass
         finally:
@@ -2660,7 +2660,7 @@ def run(came=()):
 
     A stop signal (SIGTERM: `docker stop`; SIGINT: Ctrl+C) is the event loop's (StopRequest):
     main() returns once the stop's saves are done, and the exit status is 0. Every signal after
-    the first is noted and ignored, to the end of the process. As a container's first process
+    the first is ignored, to the end of the process (noted, and logged, during the saves). As a container's first process
     the server would ignore SIGTERM without a handler of its own."""
     stop = StopRequest()
     try:

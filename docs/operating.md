@@ -737,7 +737,8 @@ request, a tick of its timers) and then stops, in this order:
 5. The Discord status says the server is offline (when it is set up), the UDP port closes, and
    the process ends with exit status 0.
 
-So a stop ends with the notifications' line and then the boards':
+So a stop ends with the notifications' line and then the boards' (after a second signal, one
+more line, below):
 
     stop: SIGTERM: the server stops
     notifications: notifications.json written whole at the stop in 0.14 s: it has every change: 29310 notifications for 3998 players, 5 broadcasts
@@ -751,10 +752,14 @@ run (a file it cannot read) still ends with exit status 1 and its own line. A vo
 
 **A second signal changes nothing.** Once the stop has begun, every further SIGTERM or SIGINT (a
 second `docker compose stop`, Ctrl+C pressed again) is noted and ignored until the process ends:
-no save is cut short, and the log says so once for each part of the stop it came in:
+no save is cut short, and the log says so once for each part of the stop it came in, the first
+line before the notifications' line, the second after the boards' line (the stop's last line
+then):
 
     stop: SIGTERM again while the registrations, co-op ledger and friends were written: ignored until they were
     stop: SIGTERM again while notifications.json and scoreboards.json were written: ignored until they were
+
+The exit status stays 0, even for a signal that comes as the process ends.
 
 The stop takes a fraction of a second, most of it those last two writes; the compose file gives it
 20 s (`stop_grace_period`). Only a kill ends it earlier: Docker's at the end of that time,
