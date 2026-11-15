@@ -748,10 +748,11 @@ more line, below):
     scoreboards: scoreboards.json written whole at the stop in 0.32 s: it has every change: 412 boards, 50123 rows, 812 unranked rows, 1500 players in the 1000 Club
 
 A stop signal that comes while the server starts (while it reads its files, or while Python is
-still loading its code) is noted: the start reads every file whole, and the server then stops as above, the first line being
-`stop: SIGTERM during the start: the server stops now that it is done`. A start that refuses to
-run (a file it cannot read) still ends with exit status 1 and its own line. A volunteer relay
-(`--relay-only`) has nothing to save: it logs the first line and ends with exit status 0.
+still loading its code) is noted: the start reads every file whole, and the server then stops as
+above, the first line being `stop: SIGTERM during the start: the server stops now that it is
+done`. A start that refuses to run (a file it cannot read) still ends with exit status 1 and its
+own line. A volunteer relay (`--relay-only`) has nothing to save: it logs the first line and ends
+with exit status 0.
 
 **A second signal changes nothing.** Once the stop has begun, every further SIGTERM or SIGINT (a
 second `docker compose stop`, Ctrl+C pressed again) is noted and ignored until the process ends:
@@ -768,16 +769,18 @@ The exit status stays 0, even for a signal that comes as the process ends.
 The stop takes a fraction of a second, most of it those last two writes (a slow disk can make them
 take a few seconds), and on a bad network a few more for the Discord status after them; the
 compose file gives it 20 s (`stop_grace_period`). Only a kill ends it earlier: Docker's at the end
-of that time, `docker compose kill`, or SIGKILL. A Discord update stuck on the network past the 5 s
-does not hold the saves, which are made by then, but the process ends only once it gives up; past
-the 20 s Docker kills it (exit status 137), at no cost to what was saved. Since every signal after the first is ignored, a
-stop that does not end (the Discord status stuck on the network after the saves, say) is not
-ended by a second Ctrl+C either: in a terminal, Ctrl+\ (SIGQUIT) or `kill -9` ends it. Likewise
-a server whose event loop is held for good never gets to the stop: only a kill ends it, and the
-[watchdog's](#what-holds-the-event-loop) lines say what held the loop. A kill costs the boards and the notifications nothing (their
-journals have every change) and the other stores what changed since their last save; and it
-leaves `scoreboards.json` and `notifications.json` complete only together with their journals,
-which matters before a rollback ([scores on disk](#scores-on-disk)).
+of that time, `docker compose kill`, or SIGKILL. A kill costs the boards and the notifications
+nothing (their journals have every change) and the other stores what changed since their last
+save; and it leaves `scoreboards.json` and `notifications.json` complete only together with their
+journals, which matters before a rollback ([scores on disk](#scores-on-disk)).
+
+A Discord update stuck on the network past its 5 s does not hold the saves, which are made by
+then, but the process ends only once the update gives up: past the 20 s Docker kills it (exit
+status 137), at no cost to what was saved. Since every signal after the first is ignored, a stop
+that does not end is not ended by a second Ctrl+C either: in a terminal, Ctrl+\ (SIGQUIT) or
+`kill -9` ends it. Likewise a server whose event loop is held for good never gets to the stop:
+only a kill ends it, and the [watchdog's](#what-holds-the-event-loop) lines say what held the
+loop.
 
 Versions before this one stopped through an exception raised wherever the server was when the
 signal came; inside code whose errors Python only prints (`Exception ignored in ...` in the log),
