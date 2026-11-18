@@ -2573,6 +2573,17 @@ class StopRequest:
                 signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 
+def end_the_others(keep=()):
+    """At the stop, before the saves: every task of the loop but this one and keep is
+    cancelled, the open HTTP connections' first (each ends at the await it is at, its
+    request not answered), as the loop's close cancelled them all before #78. They end once
+    the loop runs again, after the saves: nothing they would have done is left out of them."""
+    me = asyncio.current_task()
+    for task in asyncio.all_tasks():
+        if task is not me and task not in keep:
+            task.cancel()
+
+
 def stop_accepting(listening):
     """No new connection on the HTTP port from here, the server object left as it is: its
     listening sockets are taken off the loop. Server.close() would do it too, but on Python
@@ -2881,8 +2892,12 @@ async def main(stop=None):
         held = hold_stop_signals(stop.poked)  # until every store is written: noted, and ignored
         if stop.said():
             log.info("%s", stop.said())
-        # no new connection from here (the open ones end with the loop)
+        # Nothing new from here: no connection on the HTTP port, no datagram (no player joins),
+        # and the requests of the connections still open end where they are: none of them
+        # changes a store after its save (the Discord wait below runs the loop again)
         for step in (lambda: listening is None or stop_accepting(listening),
+                     transport.close,
+                     lambda: end_the_others(keep=(updating,)),
                      watchdog.WATCH.stop,  # the saves hold the loop, on purpose
                      counting.cancel, writing.cancel, noting.cancel,
                      limits.STORED.close,  # a count under way ends now: its thread does not
@@ -2902,7 +2917,6 @@ async def main(stop=None):
             updating.exception()  # (never raises: update() catches everything) seen, not logged
         if discord_status.enabled():
             discord_status.offline(args.data_dir)
-        transport.close()
         server.events.db.close()
 
     stop.at_stop = the_stop

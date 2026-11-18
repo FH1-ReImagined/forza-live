@@ -11,6 +11,7 @@ import asyncio
 import gc
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -27,7 +28,7 @@ from unittest import mock
 from forza_live import server as srv
 from forza_live.core import relays
 from forza_live.social import notifications as notices
-from tests.support import ROOT
+from tests.support import ROOT, hello
 
 PYTHON = getattr(sys, "_base_executable", sys.executable)
 POSIX_SIGNALS = unittest.skipIf(sys.platform == "win32",
@@ -770,6 +771,51 @@ class RealStopTest(unittest.TestCase):
                       "be broken into; the stop waits for it", text)
         self.assertNotIn("stop: SIGTERM: the server stops", text)
         self.assertFalse(os.path.exists(os.path.join(self.data, "notifications.json")))
+
+    def test_nothing_new_is_taken_after_the_saves(self):
+        """During the wait for a Discord status update after the saves, no datagram is answered
+        (no player joins) and a connection opened before the stop gets no answer: nothing
+        changes a store after its save."""
+        proc, log, http = self.start(head=[PYTHON, "-c", SLOW_DISCORD])
+        udp = int(proc.args[proc.args.index("--port") + 1])
+        self.ready(proc, http)
+        before = socket.create_connection(("127.0.0.1", http), timeout=5)
+        self.addCleanup(before.close)
+        request = b"GET /status HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n"
+        before.sendall(request)
+        self.assertTrue(before.recv(65536).startswith(b"HTTP/1.1 200"))
+        deadline = time.monotonic() + 30
+        while "test: the status update starts" not in (log.seek(0) or log.read()):
+            self.assertLess(time.monotonic(), deadline, "no status update")
+            time.sleep(0.02)
+        proc.send_signal(signal.SIGTERM)
+        while not re.search(r"scoreboards: .*at the stop", log.seek(0) or log.read()):
+            self.assertLess(time.monotonic(), deadline, "no saves")
+            time.sleep(0.01)
+        game = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(game.close)
+        game.settimeout(0.5)
+        game.sendto(hello(1, PLAYER, "Late"), ("127.0.0.1", udp))
+        try:
+            answer = game.recv(2048)
+        except OSError:  # nothing, or the port's refusal
+            answer = b""
+        self.assertEqual(answer, b"")
+        try:
+            before.sendall(request)
+            late = before.recv(65536)
+        except OSError:
+            late = b""
+        self.assertEqual(late, b"")
+        status, lines = self.ended(proc, log)
+        text = "\n".join(lines)
+        self.assertEqual(status, 0, text)
+        self.assertNotIn("Traceback", text)
+        self.assertNotIn("join", text)
+        self.assertIn("test: the status update ends", text)  # the wait was under way meanwhile
+        said = [line.split(" ", 2)[2] for line in lines]
+        self.assertGreater(said.index("test: the status update ends"),
+                           [i for i, line in enumerate(said) if line.startswith("scoreboards: ")][0])
 
     def test_a_step_before_the_saves_that_fails_does_not_skip_them(self):
         proc, log, http = self.start(head=[PYTHON, "-c", FAILED_STEP])

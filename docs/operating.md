@@ -728,8 +728,10 @@ request, a tick of its timers) and then stops, in this order. A Discord status u
 is not waited for: the saves come first.
 
 1. `stop: SIGTERM: the server stops` in the log (`SIGINT` for Ctrl+C).
-2. The HTTP port takes no new connection from here. Those already open end once the saves are
-   done.
+2. The server takes nothing new from here: no new connection on the HTTP port, no datagram on
+   the UDP port (no player joins), and the requests of the connections already open end where
+   they are, unanswered. Nothing a player does after the first line can change a store after
+   its save.
 3. The [event loop's watchdog](#what-holds-the-event-loop) is turned off: the saves hold the loop,
    on purpose.
 4. The saves: the registrations (`live_state.json`), the co-op ledger and friends, then
@@ -737,8 +739,7 @@ is not waited for: the saves come first.
    ([scores on disk](#scores-on-disk), [notifications on disk](#notifications-on-disk)).
 5. When the Discord status is set up: an update that was under way when the signal came is given
    up to 5 s more to end, then the status says the server is offline (with its own line only
-   when Discord cannot be reached). Then the UDP port closes, and the process ends with exit
-   status 0.
+   when Discord cannot be reached). Then the process ends with exit status 0.
 
 So a stop ends with the notifications' line and then the boards' (after a second signal, one
 more line, below):
