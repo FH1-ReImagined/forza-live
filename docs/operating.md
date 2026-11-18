@@ -914,7 +914,9 @@ What that means for you:
   everything else the server saves. A second `docker compose stop` (or Ctrl+C) while it stops is
   harmless: it is logged and ignored, and the stop goes on as for one. What ends a stop early is a
   kill (`docker compose kill`, or the 20 s running out), which leaves `scoreboards.json` complete
-  only with its journal: the stop's last line says which it was.
+  only with its journal: the boards' line at the stop (`scoreboards: ... at the stop`, the last
+  line, or the one before a line about a signal ignored meanwhile) is there only when the stop
+  wrote them.
 - **Backups**: the whole data folder, with the server stopped. A copy of `scoreboards.json`
   taken while the server runs is not complete without `scoreboards.journal` beside it: by
   itself it lacks up to a minute of scores. If you must copy from a running server, copy
