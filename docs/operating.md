@@ -778,9 +778,25 @@ A Discord update stuck on the network past its 5 s does not hold the saves, whic
 then, but the process ends only once the update gives up: past the 20 s Docker kills it (exit
 status 137), at no cost to what was saved. Since every signal after the first is ignored, a stop
 that does not end is not ended by a second Ctrl+C either: in a terminal, Ctrl+\ (SIGQUIT) or
-`kill -9` ends it. Likewise a server whose event loop is held for good never gets to the stop:
-only a kill ends it, and the [watchdog's](#what-holds-the-event-loop) lines say what held the
-loop.
+`kill -9` ends it.
+
+**A held event loop.** The stop runs on the event loop, so a loop held by a bug (code that runs
+on and on: the [watchdog's](#what-holds-the-event-loop) lines say what) takes the signal only
+once it is free. Free within 5 s of the signal, it stops then, as above. If not, the stop breaks
+into what holds the loop, as versions before this one did for every signal, and runs as above
+with every save, exit status 0. The saves take well under a second, so they end long before
+Docker's 20 s. The log says so first:
+
+    stop: SIGTERM came 5 s ago and the event loop has not taken it: something holds the loop (the watchdog's lines say what); the stop breaks into it
+
+What held the loop is cut short where it was. A try that lands where Python only prints errors
+(`Exception ignored in ...`, `BreakIn`) is followed by another a tenth of a second later.
+Inside a call that cannot be broken into (C code that waits, such as a lock or a library's
+call), the stop waits for that call to return and then runs at once. The log says
+`stop: the event loop is still held 5 s later: inside a call that cannot be broken into; the
+stop waits for it`. If the call has not returned by Docker's kill, nothing can save there (exit
+status 137). `--stop-limit S` sets the 5 s (0: never break in). Keep it well under the 20 s, so
+that the saves still have their time after it.
 
 Versions before this one stopped through an exception raised wherever the server was when the
 signal came; inside code whose errors Python only prints (`Exception ignored in ...` in the log),

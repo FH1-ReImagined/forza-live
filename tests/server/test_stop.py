@@ -68,6 +68,11 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         stop.serving = True  # as main() has it once the start is done
         return stop
 
+    def installed(self):
+        stop = srv.StopRequest().install(self.loop)
+        self.addCleanup(stop.close)
+        return stop
+
     async def test_the_old_way_loses_a_signal_in_a_weakref_callback(self):
         """Why (#78): with Python's handler the KeyboardInterrupt is raised inside the callback,
         and dropped there."""
@@ -84,7 +89,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reached, [])  # and nobody knows there was a stop
 
     async def test_a_signal_is_noted_and_wakes_the_wait(self):
-        stop = self.serving(srv.StopRequest().install(self.loop))
+        stop = self.serving(self.installed())
         self.assertFalse(await stop.wait(0.01))
         signal.raise_signal(signal.SIGTERM)  # nothing raised here
         self.assertTrue(await stop.wait(5))
@@ -93,7 +98,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop.said(), "stop: SIGTERM: the server stops")
 
     async def test_a_signal_in_a_weakref_callback_is_not_lost(self):
-        stop = srv.StopRequest().install(self.loop)
+        stop = self.installed()
         reached = []
 
         def callback():
@@ -108,7 +113,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         """A signal.signal handler that only hands the note to the loop, on every system (the
         loop's add_signal_handler is not used: Windows' loops have none, and elsewhere the loop
         puts Python's default handlers back as it lets go of them)."""
-        stop = srv.StopRequest().install(self.loop)
+        stop = self.installed()
         for number in srv.STOP_SIGNALS:
             self.assertEqual(signal.getsignal(number), stop.schedule)
         reached = []
@@ -123,7 +128,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop.came, [signal.SIGINT])
 
     async def test_more_signals_change_nothing(self):
-        stop = self.serving(srv.StopRequest().install(self.loop))
+        stop = self.serving(self.installed())
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGTERM):
             signal.raise_signal(number)
         self.assertTrue(await stop.wait(5))
@@ -132,7 +137,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop.said(), "stop: SIGTERM: the server stops")
 
     async def test_a_signal_during_the_start_waits_for_it(self):
-        stop = srv.StopRequest().install(self.loop)
+        stop = self.installed()
         signal.raise_signal(signal.SIGTERM)
         await asyncio.sleep(0.05)  # the start's next await: noted, nothing else
         self.assertTrue(stop.stopping.is_set())
@@ -142,7 +147,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
                                       "that it is done")
 
     async def test_the_relay_is_cancelled_at_its_await(self):
-        stop = srv.StopRequest().install(self.loop)
+        stop = self.installed()
         steps = []
 
         async def relay():
@@ -166,7 +171,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         action back for Python's own handlers, and a signal then ended the process with its
         status instead of 0 (a third signal 20 ms into a stop of the busy server, 179 times in
         700)."""
-        stop = srv.StopRequest().install(self.loop)
+        stop = self.installed()
         stop.end()  # main(), after the saves
         signal.raise_signal(signal.SIGINT)  # nothing happens
         signal.raise_signal(signal.SIGTERM)
@@ -175,6 +180,7 @@ class StopRequestTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(stop.stopping.is_set())
         stop.end()  # (run() again, after main())
         stop.quiet()  # run(), last
+        stop.close()
         for number in srv.STOP_SIGNALS:
             self.assertEqual(signal.getsignal(number), signal.SIG_IGN)
         signal.raise_signal(signal.SIGINT)
@@ -201,6 +207,7 @@ class EndTest(unittest.TestCase):
         with mock.patch.object(signal, "signal", setting):
             try:
                 stop = srv.StopRequest().install(loop)
+                self.addCleanup(stop.close)
                 held = srv.hold_stop_signals()
                 srv.release_stop_signals(held)
                 stop.end()
@@ -314,6 +321,107 @@ class HeldTest(unittest.TestCase):
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.default_int_handler)
 
 
+class BreakInTest(unittest.TestCase):
+    """The last resort (StopRequest.watch): a loop held past the stop's limit, so that it never
+    takes the signal's note, is broken into, and the stop runs; run() as the server has it,
+    with a main() of the test's."""
+
+    def setUp(self):
+        put_back(self)
+
+    def run_held(self, hold, at_stop=None, limit=0.3):
+        steps = []
+
+        async def stopping():
+            steps.append("stop")
+            if at_stop is not None:
+                at_stop()
+            steps.append("saved")
+
+        async def main(stop):
+            stop.limit = limit
+            stop.at_stop = stopping
+            stop.serving = True
+
+            async def holder():
+                await asyncio.sleep(0.05)
+                signal.raise_signal(signal.SIGTERM)  # noted: the loop is held before it takes it
+                hold()
+                steps.append("free")
+            asyncio.get_running_loop().create_task(holder())
+            try:
+                while not await stop.wait(1):
+                    pass
+            finally:
+                await stop.stop_once()
+        with mock.patch.object(srv, "main", main):
+            began = time.monotonic()
+            srv.run()
+        return steps, time.monotonic() - began
+
+    @staticmethod
+    def spin(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            pass
+
+    def test_a_loop_free_before_the_limit_takes_the_signal_itself(self):
+        with self.assertNoLogs("forza-live", "WARNING"):
+            steps, took = self.run_held(lambda: self.spin(0.1))
+        self.assertEqual(steps, ["free", "stop", "saved"])
+
+    def test_a_loop_held_past_the_limit_is_broken_into(self):
+        with self.assertLogs("forza-live", "WARNING") as logs:
+            steps, took = self.run_held(lambda: self.spin(30))
+        self.assertEqual(steps, ["stop", "saved"])  # the hold never ended by itself
+        self.assertLess(took, 5)
+        self.assertRegex(logs.output[0], r"stop: SIGTERM came 0\.3 s ago and the event loop has "
+                                         r"not taken it: .* the stop breaks into it")
+
+    def test_a_try_where_python_only_prints_it_is_followed_by_another(self):
+        """The loop held inside weakref callbacks first: a BreakIn raised there ends the
+        callback and is dropped ("Exception ignored"); the next try, 0.1 s later, is not."""
+        printed = []
+
+        def hold():
+            end = time.monotonic() + 1.0
+            while time.monotonic() < end:
+                obj = Dropped()
+                ref = weakref.ref(obj, lambda ref: self.spin(0.25))
+                del obj  # the callback runs here
+            self.spin(30)
+        with mock.patch("sys.unraisablehook", printed.append), \
+                self.assertLogs("forza-live", "WARNING"):
+            steps, took = self.run_held(hold)
+        self.assertEqual(steps, ["stop", "saved"])
+        self.assertTrue(any(isinstance(p.exc_value, srv.BreakIn) for p in printed), printed)
+        self.assertLess(took, 5)
+
+    def test_never_raised_in_the_stop_s_own_code(self):
+        """A try of the break-in that lands in main()'s own frame (its finally, before the stop
+        has begun) or once the stop has begun is nothing: there it would skip the stop."""
+        stop = srv.StopRequest()
+        stop.forcing = True
+        coro = srv.main(stop)
+        self.addCleanup(coro.close)
+        stop.poking = True
+        self.assertIsNone(stop.schedule(signal.SIGTERM, coro.cr_frame))
+        self.assertFalse(stop.poking)
+        stop.poking = True
+        with self.assertRaises(srv.BreakIn):
+            stop.schedule(signal.SIGTERM, sys._getframe())
+        stop.poking, stop.began = True, True
+        self.assertIsNone(stop.schedule(signal.SIGTERM, sys._getframe()))
+        self.assertEqual(stop.came, [])  # none of them was a signal that came
+
+    def test_never_inside_the_stop(self):
+        """Once the stop has begun, it is never broken into, however long it holds the loop."""
+        with self.assertLogs("forza-live", "WARNING"):
+            steps, took = self.run_held(lambda: self.spin(30), at_stop=lambda: self.spin(1.0))
+        self.assertEqual(steps, ["stop", "saved"])
+        self.assertGreater(took, 1.0)
+
+
 def free_port(kind=socket.SOCK_DGRAM):
     s = socket.socket(socket.AF_INET, kind)
     s.bind(("127.0.0.1", 0))
@@ -376,6 +484,50 @@ def stop_accepting(listening):
     log.info("test: no new connection")
 srv.stop_accepting = stop_accepting
 sys.argv = ["forza_live_server.py"] + sys.argv[1:]
+srv.run()
+"""
+# A server whose loop is held, from the moment a file appears, by a pure-Python loop, a sleep or
+# a C call that signals do not end (a pthread mutex another thread holds): KIND SECONDS FILE
+HELD = """
+import asyncio, ctypes, logging, os, sys, threading, time
+sys.path.insert(0, os.getcwd())
+from forza_live import server as srv
+log = logging.getLogger("forza-live")
+KIND, SECONDS, TRIGGER = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+def c_hold(seconds):
+    libc = ctypes.CDLL(None)
+    mutex = ctypes.create_string_buffer(64)
+    held = threading.Event()
+    def owner():
+        libc.pthread_mutex_lock(mutex)
+        held.set()
+        time.sleep(seconds)
+        libc.pthread_mutex_unlock(mutex)
+    threading.Thread(target=owner, daemon=True).start()
+    held.wait()
+    libc.pthread_mutex_lock(mutex)  # (the GIL let go of: the other threads run)
+    libc.pthread_mutex_unlock(mutex)
+def hold():
+    log.info("test: the loop is held")
+    if KIND == "python":
+        end = time.monotonic() + SECONDS
+        while time.monotonic() < end:
+            pass
+    elif KIND == "sleep":
+        time.sleep(SECONDS)
+    else:
+        c_hold(SECONDS)
+    log.info("test: the loop is free")
+async def trigger():
+    while not os.path.exists(TRIGGER):
+        await asyncio.sleep(0.01)
+    hold()
+real_main = srv.main
+async def main(stop):
+    asyncio.get_running_loop().create_task(trigger())
+    await real_main(stop)
+srv.main = main
+sys.argv = ["forza_live_server.py"] + sys.argv[4:]
 srv.run()
 """
 # A server whose HTTP port cannot be taken off the loop at the stop (a closed socket's fd -1).
@@ -544,6 +696,81 @@ class RealStopTest(unittest.TestCase):
         self.assertTrue(order[1] < saves[0] < saves[1] < order[2], text)
         self.assertEqual(said.index("test: the status says offline"), len(said) - 1, text)
 
+    def held(self, kind, seconds, *flags):
+        """A server whose loop is held (HELD), and a SIGTERM 0.5 s into the hold."""
+        trigger = os.path.join(self.temp.name, "hold")
+        proc, log, http = self.start(*flags, head=[PYTHON, "-c", HELD, kind, str(seconds),
+                                                   trigger])
+        self.ready(proc, http)
+        open(trigger, "w").close()
+        deadline = time.monotonic() + 30
+        while "test: the loop is held" not in (log.seek(0) or log.read()):
+            self.assertLess(time.monotonic(), deadline, "not held")
+            time.sleep(0.01)
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGTERM)
+        return proc, log
+
+    def test_a_loop_held_3_s_stops_once_it_is_free(self):
+        """Under the stop's limit (5 s): the loop takes the signal itself, once it is free."""
+        proc, log = self.held("python", 3)
+        status, lines = self.ended(proc, log)
+        self.assert_stopped_cleanly(status, lines)
+        said = [line.split(" ", 2)[2] for line in lines]
+        self.assertLess(said.index("test: the loop is free"),
+                        said.index("stop: SIGTERM: the server stops"), said)
+        self.assertFalse(any("breaks into" in line for line in said), said)
+
+    def test_a_loop_held_past_the_limit_is_broken_into_and_saves(self):
+        """A loop held by Python code past --stop-limit: broken into, the stop and every save,
+        exit status 0, long before the container runtime's kill."""
+        began = time.monotonic()
+        proc, log = self.held("python", 60, "--stop-limit", "1")
+        said = self.assert_stopped_cleanly(*self.ended(proc, log))
+        self.assertLess(time.monotonic() - began, 15)
+        log.seek(0)
+        lines = [line.split(" ", 2)[2] for line in log.read().splitlines()]
+        self.assertNotIn("test: the loop is free", lines)  # it was broken into
+        told = [i for i, line in enumerate(lines) if line.startswith(
+            "stop: SIGTERM came 1 s ago and the event loop has not taken it")]
+        self.assertEqual(len(told), 1, lines)
+        self.assertLess(told[0], lines.index("stop: SIGTERM: the server stops"))
+        self.assertEqual(said[0], "stop: SIGTERM: the server stops")
+
+    def test_a_loop_held_in_a_sleep_is_broken_into(self):
+        proc, log = self.held("sleep", 60, "--stop-limit", "1")
+        self.assert_stopped_cleanly(*self.ended(proc, log))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "a pthread mutex through ctypes")
+    def test_a_call_that_cannot_be_broken_into_ends_before_the_kill(self):
+        """A C call that signals do not end: the stop waits for it, and is broken into as soon
+        as it returns, with every save."""
+        proc, log = self.held("c", 4, "--stop-limit", "1")
+        status, lines = self.ended(proc, log)
+        self.assert_stopped_cleanly(status, lines)
+        said = [line.split(" ", 2)[2] for line in lines]
+        self.assertTrue(any(line.endswith("the stop breaks into it") for line in said), said)
+        self.assertNotIn("test: the loop is free", said)  # broken into as the call returned
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "a pthread mutex through ctypes")
+    def test_a_call_that_cannot_be_broken_into_past_the_kill(self):
+        """Not ended by the container runtime's kill (here at 8 s): nothing can save there. The
+        log says what the stop waited for; exit status -9, no save made."""
+        proc, log = self.held("c", 60, "--stop-limit", "1")
+        try:
+            proc.wait(8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(proc.returncode, -signal.SIGKILL)
+        log.seek(0)
+        text = log.read()
+        self.assertIn("the stop breaks into it", text)
+        self.assertIn("stop: the event loop is still held 5 s later: inside a call that cannot "
+                      "be broken into; the stop waits for it", text)
+        self.assertNotIn("stop: SIGTERM: the server stops", text)
+        self.assertFalse(os.path.exists(os.path.join(self.data, "notifications.json")))
+
     def test_a_step_before_the_saves_that_fails_does_not_skip_them(self):
         proc, log, http = self.start(head=[PYTHON, "-c", FAILED_STEP])
         self.ready(proc, http)
@@ -551,7 +778,7 @@ class RealStopTest(unittest.TestCase):
         status, lines = self.ended(proc, log)
         text = "\n".join(lines)
         self.assertEqual(status, 0, text)
-        self.assertIn("stop: the steps before the saves failed; the saves are made all the same",
+        self.assertIn("stop: a step before the saves failed; the saves are made all the same",
                       text)
         self.assertIn("ValueError: Invalid file descriptor: -1", text)
         self.assertRegex(lines[-2], r"notifications: notifications\.json written whole at the "

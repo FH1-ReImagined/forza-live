@@ -29,6 +29,7 @@ Options are command line flags of `forza_live_server.py` (`--help` lists them al
 | `--no-invites` | `FORZA_INVITES=0` | drop every game invite |
 | `--stall-limit MS` | | log what holds the event loop longer than this, and count it on the status page (default 50; `0`: off) ([what holds the event loop](operating.md#what-holds-the-event-loop)) |
 | `--stall-stack MS` | | also log where the loop was once it has been held this long (default 250; `0`: never) |
+| `--stop-limit S` | | a stop signal the event loop has not taken after this many seconds (the loop is held) breaks into what holds it, so that the saves are made before the kill (default 5; `0`: never) ([stopping the server](operating.md#stopping-the-server)) |
 | `--server-name HOST` | `FORZA_SERVER_NAMES` | the names players type to reach this server ([signed requests](#signed-requests)) |
 | `--rebind-legacy` | `FORZA_REBIND_LEGACY=1` | let an XUID bound to a friends key move to the first signed game |
 | `--raw-key-cutoff UNIX_TIME` | `FORZA_RAW_KEY_CUTOFF` | refuse friends keys sent raw after this time |
