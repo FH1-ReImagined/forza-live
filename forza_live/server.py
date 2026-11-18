@@ -2448,6 +2448,7 @@ class StopRequest:
             return
         self.began = True  # first: from here the break-in is nothing
         self.begun.set()
+        self.stopping.set()  # main()'s wait ends too, when the stop runs from run(): no tick
         try:
             if self.at_stop is not None:
                 await self.at_stop()
@@ -2502,14 +2503,16 @@ class StopRequest:
         self.stopping.set()
 
     async def wait(self, seconds):
-        """True once a stop was asked for (at once if it was already), False after seconds."""
+        """True once a stop was asked for (at once if it was already), False after seconds.
+        (True after them too when it was asked for meanwhile: a stop that a break-in began
+        while this wait's time ran out, its end not yet taken by main().)"""
         if self.stopping.is_set():
             return True
         try:
             async with asyncio.timeout(seconds):
                 await self.stopping.wait()
         except TimeoutError:
-            return False
+            return self.stopping.is_set()
         return True
 
     async def until_stopped(self, coro):
