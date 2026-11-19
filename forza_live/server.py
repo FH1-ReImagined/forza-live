@@ -2296,6 +2296,7 @@ class StopRequest:
         self.forcing = False  # the watching thread breaks into the loop (its signals: poking)
         self.poking = False
         self.broken = []  # the tasks a BreakIn ended (their exception: seen, never logged)
+        self.own_tasks = set()  # finish()'s: the stop's own, never cancelled by it
         self.watcher = self.wake_fds = None
         self.wakeup_set = False  # the pipe is the signals' wakeup fd too (signal.set_wakeup_fd)
         self.closing = False
@@ -2457,8 +2458,12 @@ class StopRequest:
 
     def finish(self, runner):
         """run(), after a BreakIn ended the loop's run: the stop, if main() did not get to it
-        (the BreakIn was raised in another task, main()'s still waits), on a task of its own.
-        A further try of the break-in before it begins ends that run too: once more."""
+        (the BreakIn was raised in another task, main()'s still waits), on a task of its own,
+        or the end of main()'s, when main() began it first (its wakeup was queued before this
+        task: a loop freed just as the break-in came). That task is part of the stop: the stop
+        does not cancel it with the others (end_the_others). A further try of the break-in
+        before the stop begins ends this run too: once more."""
+        loop = runner.get_loop()
         while True:
             for task in self.broken:
                 if task is not None and task.done() and not task.cancelled():
@@ -2466,8 +2471,10 @@ class StopRequest:
             del self.broken[:]
             if self.finished.is_set():
                 return
+            task = loop.create_task(self.stop_once())
+            self.own_tasks.add(task)
             try:
-                runner.run(self.stop_once())
+                loop.run_until_complete(task)
             except BreakIn:
                 continue
 
@@ -2576,14 +2583,15 @@ class StopRequest:
                 signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 
-def end_the_others(keep=()):
-    """At the stop, before the saves: every task of the loop but this one and keep is
-    cancelled, the open HTTP connections' first (each ends at the await it is at, its
-    request not answered), as the loop's close cancelled them all before #78. They end once
-    the loop runs again, after the saves: nothing they would have done is left out of them."""
+def end_the_others(stop, keep=()):
+    """At the stop, before the saves: every task of the loop but this one, keep and the stop's
+    own (StopRequest.finish: they only wait for this stop to end) is cancelled, the open HTTP
+    connections' first (each ends at the await it is at, its request not answered), as the
+    loop's close cancelled them all before #78. They end once the loop runs again, after the
+    saves: nothing they would have done is left out of them."""
     me = asyncio.current_task()
     for task in asyncio.all_tasks():
-        if task is not me and task not in keep:
+        if task is not me and task not in keep and task not in stop.own_tasks:
             task.cancel()
 
 
@@ -2900,7 +2908,7 @@ async def main(stop=None):
         # changes a store after its save (the Discord wait below runs the loop again)
         for step in (lambda: listening is None or stop_accepting(listening),
                      transport.close,
-                     lambda: end_the_others(keep=(updating,)),
+                     lambda: end_the_others(stop, keep=(updating,)),
                      watchdog.WATCH.stop,  # the saves hold the loop, on purpose
                      counting.cancel, writing.cancel, noting.cancel,
                      limits.STORED.close,  # a count under way ends now: its thread does not

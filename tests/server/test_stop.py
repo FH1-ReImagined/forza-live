@@ -488,7 +488,10 @@ sys.argv = ["forza_live_server.py"] + sys.argv[1:]
 srv.run()
 """
 # A server whose loop is held, from the moment a file appears, by a pure-Python loop, a sleep or
-# a C call that signals do not end (a pthread mutex another thread holds): KIND SECONDS FILE
+# a C call that signals do not end (a pthread mutex another thread holds): KIND SECONDS FILE.
+# edge, chain: held until just before the stop's limit (5 ms, 20 ms), then by a callback of
+# 0.1 s, 0.3 s: the signal's note has run and main()'s wakeup waits behind that callback, which
+# the break-in lands in
 HELD = """
 import asyncio, ctypes, logging, os, sys, threading, time
 sys.path.insert(0, os.getcwd())
@@ -508,9 +511,19 @@ def c_hold(seconds):
     held.wait()
     libc.pthread_mutex_lock(mutex)  # (the GIL let go of: the other threads run)
     libc.pthread_mutex_unlock(mutex)
-def hold():
+def spin(seconds):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        pass
+def hold(stop):
     log.info("test: the loop is held")
-    if KIND == "python":
+    if KIND in ("edge", "chain"):  # free just before the limit, then a callback holds it again
+        while stop.first_at is None:
+            pass
+        before, again = (0.005, 0.1) if KIND == "edge" else (0.02, 0.3)
+        spin(stop.first_at + stop.limit - before - time.monotonic())
+        asyncio.get_running_loop().call_soon(spin, again)
+    elif KIND == "python":
         end = time.monotonic() + SECONDS
         while time.monotonic() < end:
             pass
@@ -519,13 +532,13 @@ def hold():
     else:
         c_hold(SECONDS)
     log.info("test: the loop is free")
-async def trigger():
+async def trigger(stop):
     while not os.path.exists(TRIGGER):
         await asyncio.sleep(0.01)
-    hold()
+    hold(stop)
 real_main = srv.main
 async def main(stop):
-    asyncio.get_running_loop().create_task(trigger())
+    asyncio.get_running_loop().create_task(trigger(stop))
     await real_main(stop)
 srv.main = main
 sys.argv = ["forza_live_server.py"] + sys.argv[4:]
@@ -737,6 +750,23 @@ class RealStopTest(unittest.TestCase):
         self.assertEqual(len(told), 1, lines)
         self.assertLess(told[0], lines.index("stop: SIGTERM: the server stops"))
         self.assertEqual(said[0], "stop: SIGTERM: the server stops")
+
+    def assert_broken_into_at_the_limit(self, kind):
+        proc, log = self.held(kind, 0, "--stop-limit", "1")
+        status, lines = self.ended(proc, log)
+        self.assert_stopped_cleanly(status, lines)
+        said = [line.split(" ", 2)[2] for line in lines]
+        self.assertTrue(any(line.endswith("the stop breaks into it") for line in said), said)
+
+    def test_a_loop_free_at_the_limit_then_held_by_a_callback(self):
+        """The loop frees itself as the break-in comes, and the break-in lands in the next
+        callback: main()'s stop runs first (its wakeup was queued before run()'s own task for
+        the stop), and that task is part of the stop, not cancelled with the others (it was:
+        a CancelledError out of run(), exit status 1, after every save)."""
+        self.assert_broken_into_at_the_limit("edge")
+
+    def test_a_loop_free_before_the_limit_then_held_again(self):
+        self.assert_broken_into_at_the_limit("chain")
 
     def test_a_loop_held_in_a_sleep_is_broken_into(self):
         proc, log = self.held("sleep", 60, "--stop-limit", "1")
