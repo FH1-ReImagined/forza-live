@@ -796,7 +796,7 @@ Inside a call that cannot be broken into (C code that waits, such as a lock or a
 call), the stop waits for that call to return and then runs at once. The log says
 `stop: the event loop is still held 5 s later: inside a call that cannot be broken into; the
 stop waits for it`. If the call has not returned by Docker's kill, nothing can save there (exit
-status 137). `--stop-limit S` sets the 5 s (0: never break in). Keep it well under the 20 s, so
+status 137). `--stop-limit S` sets the 5 s (0: never break in; at most 3600). Keep it well under the 20 s, so
 that the saves still have their time after it.
 
 Versions before this one stopped through an exception raised wherever the server was when the

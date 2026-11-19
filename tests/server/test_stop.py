@@ -7,6 +7,7 @@ stop was lost and the server ran on until the container runtime killed it.
 The unit tests raise the signals in this process (signal.raise_signal), the others stop real
 servers on this machine. tools/stop_loop.py stops a busy server thousands of times."""
 
+import argparse
 import asyncio
 import gc
 import json
@@ -414,6 +415,22 @@ class BreakInTest(unittest.TestCase):
         stop.poking, stop.began = True, True
         self.assertIsNone(stop.schedule(signal.SIGTERM, sys._getframe()))
         self.assertEqual(stop.came, [])  # none of them was a signal that came
+
+    def test_a_limit_that_is_not_seconds_is_refused(self):
+        """--stop-limit inf crashed the watching thread (OverflowError in its wait) once a
+        signal came: inf, nan, a negative number or past STOP_LIMIT_MAX are refused at the
+        command line."""
+        for text in ("inf", "-inf", "nan", "-1", "1e300", "3601", "five"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=text):
+                srv.stop_limit(text)
+        self.assertEqual(srv.stop_limit("0"), 0)
+        self.assertEqual(srv.stop_limit("2.5"), 2.5)
+        refused = subprocess.run([PYTHON, os.path.join(ROOT, "forza_live_server.py"),
+                                  "--stop-limit", "inf"], cwd=ROOT, capture_output=True,
+                                 text=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("argument --stop-limit: 'inf': seconds from 0 (never) to 3600",
+                      refused.stderr)
 
     def test_never_inside_the_stop(self):
         """Once the stop has begun, it is never broken into, however long it holds the loop."""

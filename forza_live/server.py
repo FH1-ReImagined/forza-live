@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import signal
@@ -2247,6 +2248,19 @@ def signal_name(number):
 STOP_LIMIT = 5.0  # s: a stop signal the event loop has not taken by then breaks into it (--stop-limit)
 BREAK_RETRY = 0.1  # s: between the tries of the break-in, until the stop runs
 BREAK_TOLD = 5.0  # s: the log says so when the tries have not reached the stop by then
+STOP_LIMIT_MAX = 3600.0  # s: --stop-limit's largest (far past any container runtime's stop time)
+
+
+def stop_limit(text):
+    """--stop-limit: seconds, from 0 (never break in) to STOP_LIMIT_MAX; anything else (inf,
+    nan, a negative number) is refused as the server starts, with this message."""
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = math.nan
+    if not 0 <= seconds <= STOP_LIMIT_MAX:  # (nan is neither)
+        raise argparse.ArgumentTypeError("%r: seconds from 0 (never) to %g" % (text, STOP_LIMIT_MAX))
+    return seconds
 
 
 class BreakIn(KeyboardInterrupt):
@@ -2403,7 +2417,7 @@ class StopRequest:
             left = max(self.first_at, self.serving_at) + self.limit - time.monotonic()
             if left <= 0:
                 break
-            self.begun.wait(left)
+            self.begun.wait(min(left, 1.0))  # (in steps: a limit set some other way stays a wait)
         log.warning("stop: %s came %g s ago and the event loop has not taken it: something holds "
                     "the loop (the watchdog's lines say what); the stop breaks into it",
                     signal_name(self.first), self.limit)
@@ -2811,7 +2825,7 @@ async def main(stop=None):
     parser.add_argument("--stall-stack", type=float, default=watchdog.STACK_MS, metavar="MS",
                         help="also log where the loop was when it is held longer than this: "
                              "milliseconds, default %(default)g; 0: never")
-    parser.add_argument("--stop-limit", type=float, default=STOP_LIMIT, metavar="S",
+    parser.add_argument("--stop-limit", type=stop_limit, default=STOP_LIMIT, metavar="S",
                         help="a stop signal that the event loop has not taken after this many "
                              "seconds (something holds the loop) breaks into what holds it, so "
                              "that the stop's saves are made before the container runtime's "
@@ -2822,7 +2836,7 @@ async def main(stop=None):
     campaign.add_arguments(parser)
     challenge.add_arguments(parser)
     args = parser.parse_args()
-    stop.limit = max(0.0, args.stop_limit)
+    stop.limit = args.stop_limit
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s")
     if args.relay_only:  # nothing below: no data folder, no HTTP port (relay_node.py)
