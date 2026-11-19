@@ -793,7 +793,7 @@ class StopTest(Base):
         server, ledger = self.server(), mock.Mock(dirty=True)
         server.friends.store.seen(A_XUID, "DriverA")
         self.trap(A_XUID, 50.0)
-        # a second signal while the boards' last write is under way
+        # the boards' last write ended by an exception (no longer a stop signal: those are held)
         with mock.patch.object(coop_ledger, "LEDGER", ledger), \
                 mock.patch.object(scores.STORE, "write", side_effect=KeyboardInterrupt):
             self.assertRaises(KeyboardInterrupt, srv.save_at_stop, server)
@@ -1020,9 +1020,10 @@ class TwoFaultsTest(Base):
         again.load()
         self.assertEqual(again.name(A_XUID), "DriverA")
         self.assertTrue(os.path.exists(server.state_path))
-        self.assertTrue(any("ignored" in line for line in logs.output), logs.output)
+        self.assertIn("INFO:forza-live:stop: SIGTERM again while the registrations, co-op ledger "
+                      "and friends were written: ignored until they were", logs.output)
         self.assertEqual(as_a_previous_version_reads_it(self.dir.name), tables())
-        # and after them a signal ends the stop again: the boards' journal has every change
+        # and after the stop's writes the handler is the one from before them again
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.default_int_handler)
 
     def test_the_stop_tells_the_truth_when_the_journal_cannot_take_the_last_change(self):
