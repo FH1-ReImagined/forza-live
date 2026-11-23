@@ -2270,6 +2270,16 @@ class BreakIn(KeyboardInterrupt):
     lets through to run() where it catches the others."""
 
 
+def quiet_break_in(loop, context):
+    """The loop's exception handler (StopRequest.install): a task a BreakIn ended is no error to
+    log, its exception is seen in finish(). A connection's task (http_handler, from asyncio's
+    streams) was logged as "Unhandled exception in client_connected_cb", with a traceback, after
+    the saves. Anything else as asyncio has it."""
+    if isinstance(context.get("exception"), BreakIn):
+        return
+    loop.default_exception_handler(context)
+
+
 class StopRequest:
     """The stop signals (SIGTERM: `docker stop`; SIGINT: Ctrl+C), taken through the event loop
     (#78). A signal only notes itself here and wakes main(), which then ends from its own code:
@@ -2328,6 +2338,8 @@ class StopRequest:
         is started (it waits for the first signal). Nothing in a thread other than the main
         one, where signals cannot be set (none is delivered there either)."""
         self.loop = loop
+        if loop.get_exception_handler() is None:  # (someone else's: left as it is)
+            loop.set_exception_handler(quiet_break_in)
         try:
             for number in STOP_SIGNALS:
                 signal.signal(number, self.schedule)

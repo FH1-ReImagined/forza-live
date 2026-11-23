@@ -508,9 +508,10 @@ srv.run()
 # a C call that signals do not end (a pthread mutex another thread holds): KIND SECONDS FILE.
 # edge, chain: held until just before the stop's limit (5 ms, 20 ms), then by a callback of
 # 0.1 s, 0.3 s: the signal's note has run and main()'s wakeup waits behind that callback, which
-# the break-in lands in
+# the break-in lands in. task: the same as chain, but what holds the loop 0.3 s is a connection's
+# task (asyncio.start_server's, as http_handler is), woken as the hold ends
 HELD = """
-import asyncio, ctypes, logging, os, sys, threading, time
+import asyncio, ctypes, logging, os, socket, sys, threading, time
 sys.path.insert(0, os.getcwd())
 from forza_live import server as srv
 log = logging.getLogger("forza-live")
@@ -534,12 +535,15 @@ def spin(seconds):
         pass
 def hold(stop):
     log.info("test: the loop is held")
-    if KIND in ("edge", "chain"):  # free just before the limit, then a callback holds it again
+    if KIND in ("edge", "chain", "task"):  # free just before the limit, then held again
         while stop.first_at is None:
             pass
         before, again = (0.005, 0.1) if KIND == "edge" else (0.02, 0.3)
         spin(stop.first_at + stop.limit - before - time.monotonic())
-        asyncio.get_running_loop().call_soon(spin, again)
+        if KIND == "task":
+            go.set()  # (the connection's task: its wakeup queued before main()'s)
+        else:
+            asyncio.get_running_loop().call_soon(spin, again)
     elif KIND == "python":
         end = time.monotonic() + SECONDS
         while time.monotonic() < end:
@@ -549,7 +553,15 @@ def hold(stop):
     else:
         c_hold(SECONDS)
     log.info("test: the loop is free")
+go = asyncio.Event()
+async def connection(reader, writer):
+    await go.wait()
+    spin(0.3)
+    writer.close()
 async def trigger(stop):
+    if KIND == "task":
+        listening = await asyncio.start_server(connection, "127.0.0.1", 0)
+        client = socket.create_connection(listening.sockets[0].getsockname()[:2])
     while not os.path.exists(TRIGGER):
         await asyncio.sleep(0.01)
     hold(stop)
@@ -784,6 +796,12 @@ class RealStopTest(unittest.TestCase):
 
     def test_a_loop_free_before_the_limit_then_held_again(self):
         self.assert_broken_into_at_the_limit("chain")
+
+    def test_a_connection_s_task_broken_into(self):
+        """The break-in lands in a connection's task (http_handler's, from asyncio's streams):
+        the task the BreakIn ended is no error to log (asyncio logged it, "Unhandled exception
+        in client_connected_cb" and a traceback, after the saves)."""
+        self.assert_broken_into_at_the_limit("task")
 
     def test_a_loop_held_in_a_sleep_is_broken_into(self):
         proc, log = self.held("sleep", 60, "--stop-limit", "1")
