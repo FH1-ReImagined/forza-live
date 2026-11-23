@@ -399,7 +399,7 @@ class BreakInTest(unittest.TestCase):
         self.assertEqual(steps, ["stop", "saved"])
         self.assertEqual(self.stop.own_tasks, set())
 
-    def test_a_nan_limit_set_by_code_is_never_and_the_thread_waits(self):
+    def test_a_nan_limit_set_by_code_is_never_and_the_thread_ends(self):
         """A limit of nan (code, not the command line: it refuses nan) is no limit: the
         watching thread ends, rather than spin (Event.wait(nan) returns at once)."""
         stop = srv.StopRequest()

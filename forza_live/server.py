@@ -2267,9 +2267,10 @@ def stop_limit(text):
 
 def glued(argv):
     """The command line with `--stop-limit -inf` (two words) as `--stop-limit=-inf`: argparse
-    takes a word that begins with "-" for an option unless it looks like -1 or -1.5 ("expected
-    one argument"), and the value is refused by stop_limit's message as any other is. Only a
-    number: `--stop-limit -v` stays as it is."""
+    takes a word that begins with "-" for an option unless it looks like -1 or -1.5 (3.12; 3.14
+    also -1e5) ("expected one argument"), and the value is refused by stop_limit's message as
+    any other is. Only a number, after the option's full name: `--stop-limit -v` stays as it
+    is."""
     argv = list(argv)
     for i in range(len(argv) - 1):
         if argv[i] == "--stop-limit" and argv[i + 1].startswith("-"):
