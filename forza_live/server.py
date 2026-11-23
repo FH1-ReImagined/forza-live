@@ -18,13 +18,16 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import signal
 import sqlite3
 import struct
 import sys
+import threading
 import time
+import _thread
 import urllib.parse
 
 from forza_live.core import auth
@@ -2235,32 +2238,464 @@ STOP_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGINT")
                      if hasattr(signal, name))
 
 
-def hold_stop_signals():
+def signal_name(number):
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return str(number)
+
+
+STOP_LIMIT = 5.0  # s: a stop signal the event loop has not taken by then breaks into it (--stop-limit)
+BREAK_RETRY = 0.1  # s: between the tries of the break-in, until the stop runs
+BREAK_TOLD = 5.0  # s: the log says so when the tries have not reached the stop by then
+STOP_LIMIT_MAX = 3600.0  # s: --stop-limit's largest (far past any container runtime's stop time)
+
+
+def stop_limit(text):
+    """--stop-limit: seconds, from 0 (never break in) to STOP_LIMIT_MAX; anything else (inf,
+    nan, a negative number) is refused as the server starts, with this message."""
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = math.nan
+    if not 0 <= seconds <= STOP_LIMIT_MAX:  # (nan is neither)
+        raise argparse.ArgumentTypeError("%r: seconds from 0 (never) to %g" % (text, STOP_LIMIT_MAX))
+    return seconds
+
+
+class BreakIn(KeyboardInterrupt):
+    """Raised in the main thread wherever a held event loop is, when a stop signal has waited
+    for it past StopRequest.limit: it ends what holds the loop, as a stop signal's
+    KeyboardInterrupt did before #78, and the stop runs. A KeyboardInterrupt, which asyncio
+    lets through to run() where it catches the others."""
+
+
+def quiet_break_in(loop, context):
+    """The loop's exception handler (StopRequest.install): a task a BreakIn ended is no error to
+    log, its exception is seen in finish(). A connection's task (http_handler, from asyncio's
+    streams) was logged as "Unhandled exception in client_connected_cb", with a traceback, after
+    the saves. Anything else as asyncio has it."""
+    if isinstance(context.get("exception"), BreakIn):
+        return
+    loop.default_exception_handler(context)
+
+
+class StopRequest:
+    """The stop signals (SIGTERM: `docker stop`; SIGINT: Ctrl+C), taken through the event loop
+    (#78). A signal only notes itself here and wakes main(), which then ends from its own code:
+    the tick loop's wait returns, and the stop runs as main() has it. Python's own way, a
+    KeyboardInterrupt raised in the main thread at whatever it is doing, was lost when that was
+    a weakref callback, a __del__ or a garbage collector callback (it is only printed there,
+    "Exception ignored in ..."): the server ran on until the container runtime killed it, and
+    none of the stop's saves were made.
+
+    install(loop) takes them with a signal.signal handler that only hands the note to the loop
+    (call_soon_threadsafe): nothing is raised where the signal lands, and every signal after
+    the first is noted and changes nothing. Not with loop.add_signal_handler: the loop puts
+    Python's default handlers back as it lets go of them (remove_signal_handler, its close), and
+    a SIGTERM in that moment, taken by any thread still running, ended the process with -15
+    after the saves (a flood of signals: 1 stop in 50).
+
+    The last resort, for a loop held so long that it never takes the note (a bug, Python code
+    that runs for good): a thread (watch) waits for the stop to begin, and `limit` seconds
+    after the first signal (counted from the end of the start) it breaks into what holds the
+    loop, as the signal itself did before: BreakIn raised in the main thread, again every
+    BREAK_RETRY until the stop runs (raised where Python only prints it, it is lost, and the
+    next try is not). The stop's steps then run (stop_once) and save everything, before the
+    container runtime's kill. Never inside them: they begin by turning the break-in off."""
+
+    def __init__(self):
+        self.came = []  # the stop signals, in the order they came
+        self.during_start = False  # the first one came before the server was serving
+        self.serving_at = None  # main() sets serving once the start is done (its time here)
+        self.ended = False  # end(): the stop is done, a signal is nothing from here
+        self.stopping = asyncio.Event()
+        self.loop = None
+        self.limit = STOP_LIMIT  # s: see the class (main(): --stop-limit); 0: never
+        self.first = self.first_at = None  # the first stop signal, and its time, from the handler
+        self.at_stop = None  # main()'s stop: its steps (an async function), once it serves
+        self.began = False  # stop_once() has begun them: never a break-in from here
+        self.begun = threading.Event()  # (the same, for the watching thread)
+        self.finished = asyncio.Event()  # stop_once() is done with them
+        self.forcing = False  # the watching thread breaks into the loop (its signals: poking)
+        self.poking = False
+        self.broken = []  # the tasks a BreakIn ended (their exception: seen, never logged)
+        self.own_tasks = set()  # finish()'s: the stop's own, never cancelled by it
+        self.watcher = self.wake_fds = None
+        self.wakeup_set = False  # the pipe is the signals' wakeup fd too (signal.set_wakeup_fd)
+        self.closing = False
+
+    @property
+    def serving(self):
+        return self.serving_at is not None
+
+    @serving.setter
+    def serving(self, on):
+        self.serving_at = time.monotonic() if on else None
+
+    def install(self, loop):
+        """The signals are this loop's from here, and the thread that watches for a held loop
+        is started (it waits for the first signal). Nothing in a thread other than the main
+        one, where signals cannot be set (none is delivered there either)."""
+        self.loop = loop
+        if loop.get_exception_handler() is None:  # (someone else's: left as it is)
+            loop.set_exception_handler(quiet_break_in)
+        try:
+            for number in STOP_SIGNALS:
+                signal.signal(number, self.schedule)
+        except ValueError:  # not the main thread
+            return self
+        if self.watcher is None:
+            self.wake_fds = os.pipe()
+            os.set_blocking(self.wake_fds[1], False)
+            if os.name == "posix":  # (Windows: the Proactor loop's own, which Ctrl+C needs)
+                # Python's C handler writes each signal's number there, at once: the thread
+                # knows of the signal even while the main thread is in a call that does not
+                # let Python's handler run (it then waits for that call, and says so)
+                try:
+                    old = signal.set_wakeup_fd(self.wake_fds[1], warn_on_full_buffer=False)
+                    if old != -1:  # someone else's: left as it was
+                        signal.set_wakeup_fd(old)
+                    else:
+                        self.wakeup_set = True
+                except (ValueError, OSError):
+                    pass
+            self.watcher = threading.Thread(target=self.watch, args=(self.wake_fds[0],),
+                                            name="stop-watch", daemon=True)
+            self.watcher.start()
+        return self
+
+    def schedule(self, number, frame):
+        """The handler: it runs in the main thread wherever that is (a weakref callback, a
+        __del__, the loop's own code), so it only hands the note to the loop, which cannot fail
+        there, nor raise. After end(), nothing. The watching thread's own signal (poking) is
+        the break-in: BreakIn raised here, unless the stop has begun or this is the stop's own
+        code (main(), run(), this class: where it would skip the stop instead of starting
+        it; the next try comes BREAK_RETRY later)."""
+        if self.ended:
+            return
+        if self.poking:
+            self.poking = False
+            if self.forcing and not self.began and (frame is None or frame.f_code not in OWN_CODE):
+                try:
+                    self.broken.append(asyncio.current_task(self.loop))
+                except RuntimeError:  # no loop (a test's request)
+                    pass
+                raise BreakIn("the event loop was held past the stop's limit")
+            return
+        self.first_signal(number)
+        try:
+            self.loop.call_soon_threadsafe(self.note, number)
+        except RuntimeError:  # the loop is closed: the stop is over
+            self.came.append(number)
+
+    def first_signal(self, number):
+        """The handler (and run(), for a signal while the code was read): the first one wakes
+        the watching thread. A plain write to a pipe: no lock that the code the signal landed
+        in could hold."""
+        if self.first is None:
+            self.first, self.first_at = number, time.monotonic()
+            if self.wake_fds is not None:
+                try:
+                    os.write(self.wake_fds[1], b"!")
+                except OSError:
+                    pass
+
+    def watch(self, fd):
+        """The watching thread: from the first stop signal, it waits for the stop to begin,
+        and breaks into the loop when it has not, `limit` seconds after the signal (or after
+        the start's end, for a signal during the start: the start reads its files whole)."""
+        while True:  # the first stop signal: its number from Python's C handler, or "!" from ours
+            try:
+                byte = os.read(fd, 1)
+            except OSError:
+                return
+            if not byte or self.closing:
+                return
+            if byte[0] in STOP_SIGNALS:
+                if self.first is None:
+                    self.first = byte[0]
+                break
+            if byte == b"!":
+                break
+        if self.first_at is None:
+            self.first_at = time.monotonic()
+        while True:
+            if self.closing or self.begun.is_set() or not self.limit:
+                return
+            if self.serving_at is None:
+                self.begun.wait(0.1)
+                continue
+            left = max(self.first_at, self.serving_at) + self.limit - time.monotonic()
+            if left <= 0:
+                break
+            self.begun.wait(min(left, 1.0))  # (in steps: a limit set some other way stays a wait)
+        log.warning("stop: %s came %g s ago and the event loop has not taken it: something holds "
+                    "the loop (the watchdog's lines say what); the stop breaks into it",
+                    signal_name(self.first), self.limit)
+        self.forcing = True
+        tried = time.monotonic()
+        told = False
+        while not self.closing and not self.begun.is_set():
+            self.poke()
+            self.begun.wait(BREAK_RETRY)
+            if not told and time.monotonic() - tried >= BREAK_TOLD:
+                told = True
+                if not self.begun.is_set():
+                    log.warning("stop: the event loop is still held %g s later: inside a call "
+                                "that cannot be broken into; the stop waits for it",
+                                BREAK_TOLD)
+
+    def poke(self):
+        """One try of the break-in: the first signal again, to the main thread itself (a call
+        that waits there, a sleep or a select, then ends with EINTR), its handler told it is
+        the break-in (poking)."""
+        self.poking = True
+        try:
+            if hasattr(signal, "pthread_kill"):
+                signal.pthread_kill(threading.main_thread().ident, self.first)
+            else:  # Windows: Python's own flag, seen once the main thread runs Python code
+                _thread.interrupt_main(self.first)
+        except (OSError, ValueError, RuntimeError):
+            pass
+
+    def poked(self):
+        """For the saves' handler (hold_stop_signals): True for a last try of the break-in
+        that reached it after the stop had begun, which is not a signal that came."""
+        if self.poking:
+            self.poking = False
+            return True
+        return False
+
+    async def stop_once(self):
+        """main()'s stop (at_stop), once: from main()'s finally, or from run() when a break-in
+        ended the loop's run outside main()'s own code. A second call waits for the first."""
+        if self.began:
+            await self.finished.wait()
+            return
+        self.began = True  # first: from here the break-in is nothing
+        self.begun.set()
+        self.stopping.set()  # main()'s wait ends too, when the stop runs from run(): no tick
+        try:
+            if self.at_stop is not None:
+                await self.at_stop()
+        finally:
+            self.finished.set()
+
+    def finish(self, runner):
+        """run(), after a BreakIn ended the loop's run: the stop, if main() did not get to it
+        (the BreakIn was raised in another task, main()'s still waits), on a task of its own,
+        or the end of main()'s, when main() began it first (its wakeup was queued before this
+        task: a loop freed just as the break-in came). That task is part of the stop: the stop
+        does not cancel it with the others (end_the_others). A further try of the break-in
+        before the stop begins ends this run too: once more."""
+        loop = runner.get_loop()
+        while True:
+            for task in self.broken:
+                if task is not None and task.done() and not task.cancelled():
+                    task.exception()  # what the BreakIn ended: seen, not logged as an error
+            del self.broken[:]
+            if self.finished.is_set():
+                return
+            task = loop.create_task(self.stop_once())
+            self.own_tasks.add(task)
+            try:
+                loop.run_until_complete(task)
+            except BreakIn:
+                continue
+
+    def close(self):
+        """The watching thread ends (quiet(), at the very end; a test's cleanup)."""
+        self.closing = True
+        self.begun.set()
+        if self.wakeup_set:
+            self.wakeup_set = False
+            try:
+                signal.set_wakeup_fd(-1)
+            except ValueError:  # not the main thread
+                pass
+        if self.wake_fds is not None:
+            fds, self.wake_fds = self.wake_fds, None
+            try:
+                os.write(fds[1], b"!")
+            except OSError:
+                pass
+            if self.watcher is not None:
+                self.watcher.join(1)
+            for fd in fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def note(self, number):
+        """A stop signal (the loop calls this, never the signal itself)."""
+        if not self.came:
+            self.during_start = not self.serving
+        self.came.append(number)
+        self.stopping.set()
+
+    async def wait(self, seconds):
+        """True once a stop was asked for (at once if it was already), False after seconds.
+        (True after them too when it was asked for meanwhile: a stop that a break-in began
+        while this wait's time ran out, its end not yet taken by main().)"""
+        if self.stopping.is_set():
+            return True
+        try:
+            async with asyncio.timeout(seconds):
+                await self.stopping.wait()
+        except TimeoutError:
+            return self.stopping.is_set()
+        return True
+
+    async def until_stopped(self, coro):
+        """coro until it ends by itself or a stop is asked for, which cancels it at the await it
+        is at (the --relay-only relay: it has nothing to save; the tick's Discord status
+        update, shielded: the stop's saves never wait for it). Its result or exception, None
+        when the stop cancelled it."""
+        task = asyncio.ensure_future(coro)
+        stopped = asyncio.ensure_future(self.stopping.wait())
+        try:
+            await asyncio.wait((task, stopped), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopped.cancel()
+            if not task.done():
+                task.cancel()
+                await asyncio.wait((task,))
+        if task.cancelled() and self.stopping.is_set():
+            return None
+        return task.result()
+
+    def said(self):
+        """The log's line for the stop that was asked for, or None (main() ends another way).
+        (After a break-in the loop may not have noted the signal yet: the handler's first.)"""
+        first = self.came[0] if self.came else self.first
+        if first is None:
+            return None
+        if self.during_start:
+            return ("stop: %s during the start: the server stops now that it is done"
+                    % signal_name(first))
+        return "stop: %s: the server stops" % signal_name(first)
+
+    def end(self):
+        """The stop is done (main() once its saves are, run() after main()): from here a stop
+        signal is nothing at all (a container runtime's second SIGTERM, a second Ctrl+C), and
+        the handler stays ours, so that no thread can be ended by Python's default action while
+        the loop closes and its threads are joined (quiet() then)."""
+        self.ended = True
+        try:
+            for number in STOP_SIGNALS:
+                signal.signal(number, self.schedule)  # (the held signals' handler, until now)
+        except ValueError:  # not the main thread
+            pass
+
+    def quiet(self):
+        """Every stop signal ignored, to the end of the process: run() calls it last, once the
+        loop is closed and its threads joined. SIG_IGN rather than a handler of ours: Python
+        puts the default action back for its own handlers as the interpreter ends, and a signal
+        then ended the process with that signal's status instead of 0. The main thread blocks
+        the signals meanwhile: one that comes then is dropped, rather than met in Python's
+        handler table by SIG_IGN ("Signal 2 ignored due to race condition", printed)."""
+        blocked = None
+        try:
+            if hasattr(signal, "pthread_sigmask"):
+                blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+            for number in STOP_SIGNALS:
+                signal.signal(number, signal.SIG_IGN)
+        except ValueError:  # not the main thread
+            pass
+        finally:
+            if blocked is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+
+def end_the_others(stop, keep=()):
+    """At the stop, before the saves: every task of the loop but this one, keep and the stop's
+    own (StopRequest.finish: they only wait for this stop to end) is cancelled, the open HTTP
+    connections' first (each ends at the await it is at, its request not answered), as the
+    loop's close cancelled them all before #78. They end once the loop runs again, after the
+    saves: nothing they would have done is left out of them."""
+    me = asyncio.current_task()
+    for task in asyncio.all_tasks():
+        if task is not me and task not in keep and task not in stop.own_tasks:
+            task.cancel()
+
+
+def stop_accepting(listening):
+    """No new connection on the HTTP port from here, the server object left as it is: its
+    listening sockets are taken off the loop. Server.close() would do it too, but on Python
+    3.13 and later a connection accepted just before it then fails in the accept (an assertion,
+    silent) and again as the process ends ("Exception ignored ... _SelectorTransport.__del__",
+    the closed server woken a second time): about one busy stop in 20 on 3.14. Windows' loops
+    accept another way (no remove_reader): Server.close() there."""
+    loop = asyncio.get_running_loop()
+    try:
+        for sock in listening.sockets:
+            loop.remove_reader(sock.fileno())
+    except NotImplementedError:
+        listening.close()
+
+
+DISCORD_WAIT = 5  # s: at the stop, the Discord status update under way, before the offline one
+SMALL_STORES = "the registrations, co-op ledger and friends"
+JOURNALED_STORES = "notifications.json and scoreboards.json"
+
+
+def hold_stop_signals(skip=None):
     """From here a stop signal (SIGTERM, SIGINT) is noted and ignored, until
-    release_stop_signals(held): the stores without a journal are written whole, and a second
-    `docker stop` or Ctrl+C in the middle would cut them short (#70). None where signals cannot
-    be set (a thread other than the main one): nothing is held then."""
+    release_stop_signals(held): the stop's saves run with it, and a second `docker stop` or
+    Ctrl+C in the middle would otherwise reach the loop's handler only once they are done, with
+    nothing in the log (#70, #78). Each signal is noted once, and is then SIG_IGN until the log
+    has told of it (tell_held): a flood of them costs the saves nothing, not even a handler's call
+    each. None where signals cannot be set (a thread other than the main one): nothing is held
+    then. skip: a call that says a signal is not one that came (StopRequest.poked: a last
+    try of the break-in), which is then nothing at all."""
     came, previous = [], {}
+
+    def noted(number, frame):
+        if skip is not None and skip():
+            return
+        came.append(number)
+        # the rest of this part of the stop: nothing. Only this signal: one of the others may
+        # be waiting for its handler in this same round of Python's, which then finds SIG_IGN
+        # and prints "Signal 15 ignored due to race condition"
+        signal.signal(number, signal.SIG_IGN)
+
     try:
         for number in STOP_SIGNALS:
-            previous[number] = signal.signal(number, lambda number, frame: came.append(number))
+            previous[number] = signal.signal(number, noted)
     except ValueError:
-        release_stop_signals((came, previous))
+        release_stop_signals((came, previous, noted))
         return None
-    return came, previous
+    return came, previous, noted
 
 
-def release_stop_signals(held):
+def tell_held(held, during=SMALL_STORES):
+    """The log tells of a signal held while `during` were written, once, and the next one is
+    noted again."""
+    if held is None:
+        return
+    came, previous, noted = held
+    if came:
+        log.info("stop: %s again while %s were written: ignored until they were",
+                 signal_name(came[0]), during)
+        del came[:]
+        for number in previous:
+            signal.signal(number, noted)
+
+
+def release_stop_signals(held, during=SMALL_STORES):
     """The handlers as they were before hold_stop_signals(), and the log told of a signal that
     came meanwhile."""
     if held is None:
         return
-    came, previous = held
+    came, previous, _ = held
     for number, handler in previous.items():
         signal.signal(number, handler)
     if came:
-        log.info("stop: %s again while the registrations, co-op ledger and friends were written: "
-                 "ignored until they were", signal.Signals(came[0]).name)
+        log.info("stop: %s again while %s were written: ignored until they were",
+                 signal_name(came[0]), during)
+        del came[:]
 
 
 def own_error(error, handled):
@@ -2284,12 +2719,12 @@ def own_error(error, handled):
 
 def save_at_stop(server, held=None):
     """What the server writes as it stops, the boards last: their last write is megabytes, and
-    whatever ends it early (a second signal, the stop's time running out) costs the boards
-    nothing, their journal has every change (#67); so for the notifications' write before them,
-    and a signal that ends that one still lets the boards be written. The stores before them have no journal: a
-    stop signal waits until they are written (held: what hold_stop_signals() gave, when the
-    caller already holds them), and each is written whatever became of the others, so that the
-    boards' last write is always reached (#70)."""
+    whatever ends it early (the stop's time running out, a kill) costs the boards nothing,
+    their journal has every change (#67); so for the notifications' write before them. The
+    stores before them have no journal. Each is written whatever became of the others, so that
+    the boards' last write is always reached (#70), and a stop signal waits until all of them
+    are written (held: what hold_stop_signals() gave, when the caller already holds them): the
+    signals no longer end the stop at all (#78), they are noted, and the log says so."""
     def ledger():
         if coop_ledger.LEDGER.dirty:
             coop_ledger.LEDGER.save()
@@ -2300,35 +2735,42 @@ def save_at_stop(server, held=None):
 
     if held is None:
         held = hold_stop_signals()
-    stopping = sys.exc_info()[1]  # what ends main(): the signal's KeyboardInterrupt, ...
+    stopping = sys.exc_info()[1]  # what ends main() when it is an exception
     try:
-        # the registrations first: a restart now keeps the players (#93)
-        for what, save in (("registrations", server.save_state), ("co-op ledger", ledger),
-                           ("friends", friends_store)):
-            try:
-                save()
-            except Exception as e:  # noqa: BLE001 - the stores after it, and the boards, go on
-                log.error("stop: the %s could not be written", what,
-                          exc_info=own_error(e, stopping))
+        try:
+            # the registrations first: a restart now keeps the players (#93)
+            for what, save in (("registrations", server.save_state), ("co-op ledger", ledger),
+                               ("friends", friends_store)):
+                try:
+                    save()
+                except Exception as e:  # noqa: BLE001 - the stores after it, and the boards, go on
+                    log.error("stop: the %s could not be written", what,
+                              exc_info=own_error(e, stopping))
+        finally:
+            tell_held(held, SMALL_STORES)
+        # The stores with a journal, which loses nothing whatever ends the stop: the boards
+        # last, reached whatever ends the notifications' write.
+        try:
+            notifications.STORE.stop()  # notifications.json gets what only its journal had
+        except Exception as e:  # noqa: BLE001 - the boards are still written
+            log.error("stop: the notifications could not be written",
+                      exc_info=own_error(e, stopping))
+        except BaseException as e:  # (not a stop signal: those are held)
+            log.warning("stop: %s while notifications.json was written whole: not written, its "
+                        "journal has every change; the boards are written all the same",
+                        type(e).__name__)
+            raise
+        finally:
+            scores.STORE.stop()  # scoreboards.json gets what only its journal had
     finally:
-        release_stop_signals(held)
-    # The stores with a journal, which loses nothing whatever ends the stop: the boards last,
-    # reached whatever ends the notifications' write (a second signal there ends the stop only
-    # once the boards are written, or a third one cuts them).
-    try:
-        notifications.STORE.stop()  # notifications.json gets what only its journal had
-    except Exception as e:  # noqa: BLE001 - the boards are still written
-        log.error("stop: the notifications could not be written", exc_info=own_error(e, stopping))
-    except BaseException as e:
-        log.warning("stop: %s while notifications.json was written whole: not written, its "
-                    "journal has every change; the boards are written all the same",
-                    type(e).__name__)
-        raise
-    finally:
-        scores.STORE.stop()  # scoreboards.json gets what only its journal had
+        release_stop_signals(held, JOURNALED_STORES)
 
 
-async def main():
+async def main(stop=None):
+    """The server until a stop signal (stop: run()'s StopRequest, already installed; one is
+    installed on this loop when main() is run some other way)."""
+    if stop is None:
+        stop = StopRequest().install(asyncio.get_running_loop())
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="0.0.0.0", help="address to listen on")
     parser.add_argument("--port", type=int, default=int(os.environ.get("FORZA_LIVE_PORT", 21200)),
@@ -2395,16 +2837,25 @@ async def main():
     parser.add_argument("--stall-stack", type=float, default=watchdog.STACK_MS, metavar="MS",
                         help="also log where the loop was when it is held longer than this: "
                              "milliseconds, default %(default)g; 0: never")
+    parser.add_argument("--stop-limit", type=stop_limit, default=STOP_LIMIT, metavar="S",
+                        help="a stop signal that the event loop has not taken after this many "
+                             "seconds (something holds the loop) breaks into what holds it, so "
+                             "that the stop's saves are made before the container runtime's "
+                             "kill: default %(default)g; 0: never")
     parser.add_argument("-v", "--verbose", action="store_true")
     lsp.add_arguments(parser)
     world.add_arguments(parser)
     campaign.add_arguments(parser)
     challenge.add_arguments(parser)
     args = parser.parse_args()
+    stop.limit = args.stop_limit
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s")
     if args.relay_only:  # nothing below: no data folder, no HTTP port (relay_node.py)
-        await relay_node.run(args)
+        stop.serving = True  # nothing to read first: a stop signal ends the relay at once
+        await stop.until_stopped(relay_node.run(args))
+        if stop.said():
+            log.info("%s", stop.said())
         return
     limits.configure_proxies(os.environ.get("FORZA_TRUSTED_PROXIES", ""), *args.trusted_proxy)
     if limits.TRUSTED_PROXIES:
@@ -2447,12 +2898,13 @@ async def main():
     server.relays.probation_time = max(0.0, args.relay_probation) * 60
     server.relays.configure(args.data_dir)
     log.info("Forza Live listening on UDP %s:%d (epoch %04X)", args.host, args.port, server.epoch)
+    listening = None  # the HTTP port's server, closed first at the stop
     if args.http_port:
         server.http_port = args.http_port
         server.proxy_http_port = args.proxy_http_port
         server.invites = not args.no_invites
-        await asyncio.start_server(lambda r, w: http_handler(server, r, w), args.host, args.http_port,
-                                 limit=1 << 15)
+        listening = await asyncio.start_server(lambda r, w: http_handler(server, r, w), args.host,
+                                               args.http_port, limit=1 << 15)
         log.info("title servers and status page on http://%s:%d/", args.host, args.http_port)
     if watchdog.WATCH.on:
         log.info("event loop watchdog: logs what holds the loop over %g ms (stacks over %g ms)",
@@ -2468,10 +2920,47 @@ async def main():
         except (OSError, sqlite3.Error):
             log.warning("community event delivery storage unavailable; retrying later")
 
+    updating = loop.create_future()  # the Discord status update under way (none yet)
+    updating.set_result(None)
+
+    async def the_stop():
+        """The stop, in this order (docs/operating.md, "Stopping the server"): run once, by
+        StopRequest.stop_once."""
+        held = hold_stop_signals(stop.poked)  # until every store is written: noted, and ignored
+        if stop.said():
+            log.info("%s", stop.said())
+        # Nothing new from here: no connection on the HTTP port, no datagram (no player joins),
+        # and the requests of the connections still open end where they are: none of them
+        # changes a store after its save (the Discord wait below runs the loop again)
+        for step in (lambda: listening is None or stop_accepting(listening),
+                     transport.close,
+                     lambda: end_the_others(stop, keep=(updating,)),
+                     watchdog.WATCH.stop,  # the saves hold the loop, on purpose
+                     counting.cancel, writing.cancel, noting.cancel,
+                     limits.STORED.close,  # a count under way ends now: its thread does not
+                     videos.STORED.close):  # hold the exit
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - nothing before the saves keeps them from being made
+                log.exception("stop: a step before the saves failed; the saves are made all "
+                              "the same")
+        try:
+            save_at_stop(server, held)
+        finally:
+            stop.end()  # the saves are done: every signal from here is ignored
+        if not updating.done():  # its edit first, so that the offline one is the last
+            await asyncio.wait((updating,), timeout=DISCORD_WAIT)
+        if updating.done() and not updating.cancelled():
+            updating.exception()  # (never raises: update() catches everything) seen, not logged
+        if discord_status.enabled():
+            discord_status.offline(args.data_dir)
+        server.events.db.close()
+
+    stop.at_stop = the_stop
+    stop.serving = True  # a stop signal during the start was noted: it stops the server here
     try:
         ticks = 0
-        while True:
-            await asyncio.sleep(1)
+        while not await stop.wait(1):  # a stop signal ends this wait, never a tick half way
             ticks += 1
             timed("challenges.tick", server.challenges.tick)
             if ticks % 2 == 0:
@@ -2484,37 +2973,55 @@ async def main():
             timed("videos.tick", videos.tick)  # the video converter's results (videos.collect)
             timed("events.flush", flush_events)
             if ticks % 30 == 0 and discord_status.enabled():
-                # urllib blocks: off the event loop, and never fatal (it catches everything)
-                await asyncio.to_thread(discord_status.update, server.status(), args.data_dir)
+                # urllib blocks: off the event loop, and never fatal (it catches everything).
+                # A stop does not wait for it: on a bad network it takes tens of seconds (its
+                # requests' timeouts, a name lookup with none), past the stop's 20 s
+                updating = asyncio.ensure_future(asyncio.to_thread(
+                    discord_status.update, server.status(), args.data_dir))
+                await stop.until_stopped(asyncio.shield(updating))
     finally:
-        watchdog.WATCH.stop()  # the stop's saves hold the loop, on purpose
-        held = hold_stop_signals()  # until the stores without a journal are written
-        counting.cancel()
-        writing.cancel()
-        noting.cancel()
-        limits.STORED.close()  # a count under way ends now: its thread does not hold the exit
-        videos.STORED.close()
-        save_at_stop(server, held)
-        if discord_status.enabled():
-            discord_status.offline(args.data_dir)
-        transport.close()
-        server.events.db.close()
+        await stop.stop_once()  # (a break-in may have begun it from run(): then it waits)
 
 
-def run():
-    """The command line (forza_live_server.py in the repository's root calls this)."""
-    # SIGTERM (docker stop) ends the server like Ctrl+C; as a container's first process
-    # it would otherwise be ignored.
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
+def run(came=()):
+    """The command line (forza_live_server.py in the repository's root calls this, with the stop
+    signals that came while the server's code was read: they stop it once it has started).
+
+    A stop signal (SIGTERM: `docker stop`; SIGINT: Ctrl+C) is the event loop's (StopRequest):
+    main() returns once the stop's saves are done, and the exit status is 0. Every signal after
+    the first is ignored, to the end of the process (noted, and logged, during the saves). As a
+    container's first process the server would ignore SIGTERM without a handler of its own."""
+    stop = StopRequest()
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
+        with asyncio.Runner() as runner:
+            try:
+                stop.install(runner.get_loop())
+                for number in came:
+                    stop.first_signal(number)
+                    stop.note(number)
+                try:
+                    runner.run(main(stop))
+                except BreakIn:  # a held loop broken into (StopRequest.watch): the stop runs
+                    stop.finish(runner)
+            finally:
+                stop.end()  # (main() did, but for the relay and the other ways it ends)
+        # the loop is closed, its threads joined: SIG_IGN to the end (finally)
+    except KeyboardInterrupt:  # not a stop signal any more (those are the loop's): kept as before
         pass
     except journal.Unreadable:
         # scoreboards.json or notifications.json is there and cannot be read, nor its .bak (or
         # it is damaged and the .bak cannot be read): the log has said so, and the server does
         # not start without them (docs/operating.md, "Scores on disk", "Notifications on disk")
         sys.exit(1)
+    finally:
+        stop.quiet()
+        stop.close()
+
+
+# The stop's own code, where a break-in is never raised (StopRequest.schedule): in main() it
+# would skip the stop's steps rather than run them
+OWN_CODE = frozenset([main.__code__, run.__code__] + [
+    f.__code__ for f in vars(StopRequest).values() if hasattr(f, "__code__")])
 
 
 if __name__ == "__main__":
