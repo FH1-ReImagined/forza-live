@@ -9,6 +9,7 @@ servers on this machine. tools/stop_loop.py stops a busy server thousands of tim
 
 import argparse
 import asyncio
+import contextvars
 import gc
 import json
 import os
@@ -36,6 +37,7 @@ POSIX_SIGNALS = unittest.skipIf(sys.platform == "win32",
                                 "a stop signal to another process is POSIX's (Windows: "
                                 "TerminateProcess, or Ctrl+C in the server's own console)")
 PLAYER = 0x0009000000000001
+SET_IN_MAIN = contextvars.ContextVar("set_in_main", default=None)
 
 
 class Dropped:
@@ -336,11 +338,14 @@ class BreakInTest(unittest.TestCase):
 
         async def stopping():
             steps.append("stop")
+            self.stop_saw = SET_IN_MAIN.get()
             if at_stop is not None:
                 at_stop()
             steps.append("saved")
 
         async def main(stop):
+            self.stop = stop
+            SET_IN_MAIN.set("main")  # (the context main() runs in: the stop's too)
             stop.limit = limit
             stop.at_stop = stopping
             stop.serving = True
@@ -379,6 +384,42 @@ class BreakInTest(unittest.TestCase):
         self.assertLess(took, 5)
         self.assertRegex(logs.output[0], r"stop: SIGTERM came 0\.3 s ago and the event loop has "
                                          r"not taken it: .* the stop breaks into it")
+
+    def test_the_stop_after_a_break_in_runs_in_main_s_context(self):
+        """The stop that run() runs after a break-in (finish) sees the context main() runs
+        in, as main()'s own stop would."""
+        with self.assertLogs("forza-live", "WARNING"):
+            steps, took = self.run_held(lambda: self.spin(30))
+        self.assertEqual(steps, ["stop", "saved"])
+        self.assertEqual(self.stop_saw, "main")
+
+    def test_the_stop_s_own_tasks_are_let_go_once_done(self):
+        with self.assertLogs("forza-live", "WARNING"):
+            steps, took = self.run_held(lambda: self.spin(30))
+        self.assertEqual(steps, ["stop", "saved"])
+        self.assertEqual(self.stop.own_tasks, set())
+
+    def test_a_nan_limit_set_by_code_is_never_and_the_thread_ends(self):
+        """A limit of nan (code, not the command line: it refuses nan) is no limit: the
+        watching thread ends, rather than spin (Event.wait(nan) returns at once)."""
+        stop = srv.StopRequest()
+        stop.limit, stop.serving = float("nan"), True
+        waits = []
+        real = stop.begun.wait
+        stop.begun.wait = lambda seconds=None: waits.append(seconds) or real(seconds)
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        os.write(write, b"!")  # the first stop signal
+        thread = threading.Thread(target=stop.watch, args=(read,), daemon=True)
+        thread.start()
+        thread.join(1)
+        alive = thread.is_alive()
+        stop.closing = True
+        stop.begun.set()
+        thread.join(5)
+        self.assertFalse(alive, "%d waits in 1 s" % len(waits))
+        self.assertLess(len(waits), 5)
 
     def test_a_try_where_python_only_prints_it_is_followed_by_another(self):
         """The loop held inside weakref callbacks first: a BreakIn raised there ends the
@@ -431,6 +472,31 @@ class BreakInTest(unittest.TestCase):
         self.assertEqual(refused.returncode, 2)
         self.assertIn("argument --stop-limit: 'inf': seconds from 0 (never) to 3600",
                       refused.stderr)
+
+    def test_minus_zero_is_refused(self):
+        """-0 is a negative number as it is written, as -1 is: refused, not taken as 0."""
+        for text in ("-0", "-0.0", "-nan"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=text):
+                srv.stop_limit(text)
+        self.assertEqual(srv.stop_limit("+0"), 0)
+
+    def test_a_negative_limit_as_its_own_word_gets_the_same_message(self):
+        """--stop-limit -inf, two words: argparse took -inf for an option ("expected one
+        argument"); the value is refused as --stop-limit=-inf is."""
+        for value in ("-inf", "-1e5"):
+            refused = subprocess.run([PYTHON, os.path.join(ROOT, "forza_live_server.py"),
+                                      "--stop-limit", value], cwd=ROOT, capture_output=True,
+                                     text=True, stdin=subprocess.DEVNULL, timeout=60)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("argument --stop-limit: %r: seconds from 0 (never) to 3600" % value,
+                          refused.stderr)
+
+    def test_glued_only_takes_a_number_after_stop_limit(self):
+        self.assertEqual(srv.glued(["--stop-limit", "-inf", "-v"]), ["--stop-limit=-inf", "-v"])
+        self.assertEqual(srv.glued(["--stop-limit", "-v"]), ["--stop-limit", "-v"])
+        self.assertEqual(srv.glued(["--stop-limit", "2", "--port", "-1"]),
+                         ["--stop-limit", "2", "--port", "-1"])
+        self.assertEqual(srv.glued(["--stop-limit"]), ["--stop-limit"])
 
     def test_never_inside_the_stop(self):
         """Once the stop has begun, it is never broken into, however long it holds the loop."""

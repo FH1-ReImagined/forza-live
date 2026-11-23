@@ -16,6 +16,7 @@ The wire format is RecompiledHaloReach's (its docs/online_plan.md, section 5). S
 
 import argparse
 import asyncio
+import contextvars
 import json
 import logging
 import math
@@ -2253,14 +2254,33 @@ STOP_LIMIT_MAX = 3600.0  # s: --stop-limit's largest (far past any container run
 
 def stop_limit(text):
     """--stop-limit: seconds, from 0 (never break in) to STOP_LIMIT_MAX; anything else (inf,
-    nan, a negative number) is refused as the server starts, with this message."""
+    nan, a negative number, -0 too) is refused as the server starts, with this message."""
     try:
         seconds = float(text)
     except ValueError:
         seconds = math.nan
-    if not 0 <= seconds <= STOP_LIMIT_MAX:  # (nan is neither)
+    # (nan is neither; -0 is 0, its sign is not)
+    if not 0 <= seconds <= STOP_LIMIT_MAX or math.copysign(1, seconds) < 0:
         raise argparse.ArgumentTypeError("%r: seconds from 0 (never) to %g" % (text, STOP_LIMIT_MAX))
     return seconds
+
+
+def glued(argv):
+    """The command line with `--stop-limit -inf` (two words) as `--stop-limit=-inf`: argparse
+    takes a word that begins with "-" for an option unless it looks like -1 or -1.5 (3.12; 3.14
+    also -1e5) ("expected one argument"), and the value is refused by stop_limit's message as
+    any other is. Only a number, after the option's full name: `--stop-limit -v` stays as it
+    is."""
+    argv = list(argv)
+    for i in range(len(argv) - 1):
+        if argv[i] == "--stop-limit" and argv[i + 1].startswith("-"):
+            try:
+                float(argv[i + 1])
+            except ValueError:
+                continue
+            argv[i:i + 2] = [argv[i] + "=" + argv[i + 1]]
+            break
+    return argv
 
 
 class BreakIn(KeyboardInterrupt):
@@ -2421,8 +2441,8 @@ class StopRequest:
         if self.first_at is None:
             self.first_at = time.monotonic()
         while True:
-            if self.closing or self.begun.is_set() or not self.limit:
-                return
+            if self.closing or self.begun.is_set() or not self.limit or math.isnan(self.limit):
+                return  # (0, or nan set by code: never; the command line refuses nan)
             if self.serving_at is None:
                 self.begun.wait(0.1)
                 continue
@@ -2482,13 +2502,14 @@ class StopRequest:
         finally:
             self.finished.set()
 
-    def finish(self, runner):
+    def finish(self, runner, context=None):
         """run(), after a BreakIn ended the loop's run: the stop, if main() did not get to it
         (the BreakIn was raised in another task, main()'s still waits), on a task of its own,
         or the end of main()'s, when main() began it first (its wakeup was queued before this
         task: a loop freed just as the break-in came). That task is part of the stop: the stop
-        does not cancel it with the others (end_the_others). A further try of the break-in
-        before the stop begins ends this run too: once more."""
+        does not cancel it with the others (end_the_others), and lets go of it once it is done.
+        It runs in main()'s context (run()'s). A further try of the break-in before the stop
+        begins ends this run too: once more."""
         loop = runner.get_loop()
         while True:
             for task in self.broken:
@@ -2497,8 +2518,9 @@ class StopRequest:
             del self.broken[:]
             if self.finished.is_set():
                 return
-            task = loop.create_task(self.stop_once())
+            task = loop.create_task(self.stop_once(), context=context)
             self.own_tasks.add(task)
+            task.add_done_callback(self.own_tasks.discard)
             try:
                 loop.run_until_complete(task)
             except BreakIn:
@@ -2847,7 +2869,7 @@ async def main(stop=None):
     world.add_arguments(parser)
     campaign.add_arguments(parser)
     challenge.add_arguments(parser)
-    args = parser.parse_args()
+    args = parser.parse_args(glued(sys.argv[1:]))
     stop.limit = args.stop_limit
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s")
@@ -2992,6 +3014,7 @@ def run(came=()):
     the first is ignored, to the end of the process (noted, and logged, during the saves). As a
     container's first process the server would ignore SIGTERM without a handler of its own."""
     stop = StopRequest()
+    context = contextvars.copy_context()  # main()'s, and the stop's when run() runs it
     try:
         with asyncio.Runner() as runner:
             try:
@@ -3000,9 +3023,9 @@ def run(came=()):
                     stop.first_signal(number)
                     stop.note(number)
                 try:
-                    runner.run(main(stop))
+                    runner.run(main(stop), context=context)
                 except BreakIn:  # a held loop broken into (StopRequest.watch): the stop runs
-                    stop.finish(runner)
+                    stop.finish(runner, context)
             finally:
                 stop.end()  # (main() did, but for the relay and the other ways it ends)
         # the loop is closed, its threads joined: SIG_IGN to the end (finally)
