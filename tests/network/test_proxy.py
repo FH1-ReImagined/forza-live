@@ -3,6 +3,7 @@ per-address limits and keeps its players on the server relay."""
 
 import struct
 import unittest
+from unittest import mock
 
 from forza_live.core import limits
 from forza_live.title_services import lsp
@@ -123,15 +124,19 @@ class ProxyTest(unittest.TestCase):
         a = self.join((PROXY, 40001), 1)
         self.join(("203.0.113.9", 5555), 2)
         big = srv.MAGIC + bytes([srv.BROADCAST]) + b"\0\0\0\0" + bytes(1400)
-        for _ in range(srv.RATE_BURST // len(big) + 50):  # the burst, then over it
-            self.server.datagram_received(big, a.addr)
+        # the refill is held at 0 so a slow loop cannot refill the budget mid-burst
+        with mock.patch.object(srv, "RATE_LIMIT", 0):
+            for _ in range(srv.RATE_BURST // len(big) + 50):  # the burst, then over it
+                self.server.datagram_received(big, a.addr)
         self.assertGreater(self.server.dropped_packets, 0)
 
     def test_untrusted_packet_rate_applies_per_player_via_proxy(self):
         a = (PROXY, 40001)
         self.join(a, 1)
-        for _ in range(srv.PACKETS_PER_IP[1] + 100):
-            self.server.datagram_received(srv.MAGIC + bytes([srv.LIST]), a)
+        # the refill is held at ~0 so a slow loop cannot refill the bucket mid-burst
+        with mock.patch.object(srv, "PACKETS_PER_IP", (0.001, srv.PACKETS_PER_IP[1])):
+            for _ in range(srv.PACKETS_PER_IP[1] + 100):
+                self.server.datagram_received(srv.MAGIC + bytes([srv.LIST]), a)
         self.assertGreater(self.server.dropped_packets, 0)
         # another player behind the same proxy is not affected
         before = self.server.dropped_packets

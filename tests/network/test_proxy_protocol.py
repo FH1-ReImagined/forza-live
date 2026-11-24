@@ -393,8 +393,10 @@ class UdpTest(ProxyServerTest):
     def test_header_datagrams_count_against_the_flows_rate(self):
         a = (AGENT, 40001)
         header = proxy.header(REAL_A, TUNNEL)
-        for _ in range(srv.PACKETS_PER_IP[1] + 100):
-            self.send(header, a)
+        # the refill is held at ~0 so a slow loop cannot refill the bucket mid-burst
+        with patch.object(srv, "PACKETS_PER_IP", (0.001, srv.PACKETS_PER_IP[1])):
+            for _ in range(srv.PACKETS_PER_IP[1] + 100):
+                self.send(header, a)
         self.assertGreater(self.server.dropped_packets, 0)
         self.assertIn(a, self.server.packet_buckets)
         before = self.server.dropped_packets
