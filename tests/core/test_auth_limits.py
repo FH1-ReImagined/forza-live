@@ -67,10 +67,11 @@ class FirstUseTest(LimitsBase):
         socket named a new XUID in every datagram."""
         addr = ("203.0.113.9", 3074)
         named, errors = set(), []
-        for i in range(60):
-            peer, _ = self.hello(os.urandom(16), addr, xuid=0x0009000000003000 + i, token=7)
-            named.add(peer.xuid)
-            errors += self.errors(addr)
+        with mock.patch.object(srv, "HELLOS_PER_IP", (0.001, srv.HELLOS_PER_IP[1])):
+            for i in range(60):
+                peer, _ = self.hello(os.urandom(16), addr, xuid=0x0009000000003000 + i, token=7)
+                named.add(peer.xuid)
+                errors += self.errors(addr)
         self.assertEqual(len(named), srv.HELLOS_PER_IP[1])
         self.assertEqual(set(errors), {srv.ERR_SLOW_DOWN})
         self.assertLessEqual(self.bound(), auth.FIRST_USE_RAW[1])

@@ -393,14 +393,16 @@ class UdpTest(ProxyServerTest):
     def test_header_datagrams_count_against_the_flows_rate(self):
         a = (AGENT, 40001)
         header = proxy.header(REAL_A, TUNNEL)
-        for _ in range(srv.PACKETS_PER_IP[1] + 100):
-            self.send(header, a)
-        self.assertGreater(self.server.dropped_packets, 0)
-        self.assertIn(a, self.server.packet_buckets)
-        before = self.server.dropped_packets
-        b = self.join((AGENT, 40002), 2, REAL_B)  # another flow is not affected
-        self.assertEqual(self.server.dropped_packets, before)
-        self.assertEqual(b.real_addr, REAL_B)
+        # the refill is held at ~0 so a slow loop cannot refill the bucket mid-burst
+        with patch.object(srv, "PACKETS_PER_IP", (0.001, srv.PACKETS_PER_IP[1])):
+            for _ in range(srv.PACKETS_PER_IP[1] + 100):
+                self.send(header, a)
+            self.assertGreater(self.server.dropped_packets, 0)
+            self.assertIn(a, self.server.packet_buckets)
+            before = self.server.dropped_packets
+            b = self.join((AGENT, 40002), 2, REAL_B)  # another flow is not affected
+            self.assertEqual(self.server.dropped_packets, before)
+            self.assertEqual(b.real_addr, REAL_B)
 
     def test_malformed_header_from_the_agent(self):
         a = (AGENT, 40001)
