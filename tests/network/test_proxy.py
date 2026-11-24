@@ -79,8 +79,9 @@ class ProxyTest(unittest.TestCase):
     def test_hello_rate_still_applies_per_tunnelled_player(self):
         # one tunnelled player (one source port) cannot flood new registrations
         addr = (PROXY, 41000)
-        for i in range(60):
-            self.server.datagram_received(hello(1000 + i, "Flood"), addr)
+        with mock.patch.object(srv, "HELLOS_PER_IP", (0.001, srv.HELLOS_PER_IP[1])):
+            for i in range(60):
+                self.server.datagram_received(hello(1000 + i, "Flood"), addr)
         self.assertLessEqual(len(self.server.peers), srv.HELLOS_PER_IP[1] + 1)
         # ...and does not starve the others behind the same proxy
         self.assertIsNotNone(self.join((PROXY, 41001), 7))
@@ -137,12 +138,12 @@ class ProxyTest(unittest.TestCase):
         with mock.patch.object(srv, "PACKETS_PER_IP", (0.001, srv.PACKETS_PER_IP[1])):
             for _ in range(srv.PACKETS_PER_IP[1] + 100):
                 self.server.datagram_received(srv.MAGIC + bytes([srv.LIST]), a)
-        self.assertGreater(self.server.dropped_packets, 0)
-        # another player behind the same proxy is not affected
-        before = self.server.dropped_packets
-        b = self.join((PROXY, 40002), 2)
-        self.server.datagram_received(srv.MAGIC + bytes([srv.LIST]), b.addr)
-        self.assertEqual(self.server.dropped_packets, before)
+            self.assertGreater(self.server.dropped_packets, 0)
+            # another player behind the same proxy is not affected
+            before = self.server.dropped_packets
+            b = self.join((PROXY, 40002), 2)
+            self.server.datagram_received(srv.MAGIC + bytes([srv.LIST]), b.addr)
+            self.assertEqual(self.server.dropped_packets, before)
 
     def test_admin_not_granted_to_proxy_loopback(self):
         old = lsp.ADMIN_TOKEN
