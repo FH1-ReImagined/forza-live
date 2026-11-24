@@ -223,10 +223,13 @@ class LiveSizeTest(Base, unittest.IsolatedAsyncioTestCase):
         members, and the operator's broadcast. How long each call held the loop."""
         took, sent = [], []
 
+        self.held = []  # the same calls in wall time: what the loop waited, a flush or a lock too
+
         def timed(fn, *args):
-            began = time.thread_time()
+            began, wall = time.thread_time(), time.perf_counter()
             result = fn(*args)
             took.append(time.thread_time() - began)
+            self.held.append(time.perf_counter() - wall)
             return result
 
         rival = notices.samples(B, "DriverB")[notices.RIVALS_BEATEN]
@@ -256,6 +259,10 @@ class LiveSizeTest(Base, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(whole.here, [])
         self.assertTrue(whole.threads)  # the file was written, by a thread
         self.assertLess(statistics.median(took), LOOP_MEDIAN)
+        # a wait on the loop (the flush of a journal line, a lock the writing thread holds) uses
+        # no CPU: the median of the calls' wall time sees it, and a few calls the runner did not
+        # schedule do not move a median
+        self.assertLess(statistics.median(self.held), LOOP_MEDIAN)
         self.assertLess(max(took), LOOP_WORST)
         kept = copy.deepcopy(notices.STORE.data)
         self.restart()

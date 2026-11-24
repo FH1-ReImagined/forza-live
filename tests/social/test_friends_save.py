@@ -10,6 +10,7 @@ import json
 import os
 import pickle
 import random
+import statistics
 import tempfile
 import threading
 import time
@@ -109,6 +110,18 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
         self.assertLess(took, LOOP_WORST)
         self.assertFalse(self.store.dirty)
         self.assertEqual(self.on_disk(), {"version": 1, "players": self.store.players})
+
+    async def test_the_tick_waits_for_nothing_on_the_loop(self):
+        """The tick's wall time, five saves: a flush or a lock on the loop uses no CPU, which
+        loop_steps_under does not see; the median of five is not moved by a descheduled one."""
+        held = []
+        for _ in range(5):
+            self.store.dirty, self.store.saved = True, 0.0
+            began = time.perf_counter()
+            self.store.maybe_save()
+            held.append(time.perf_counter() - began)
+            await self.saved()
+        self.assertLess(statistics.median(held), LOOP_WORST)
 
     async def test_what_changes_while_the_thread_writes_goes_with_the_next_save(self):
         writing, go, real = threading.Event(), threading.Event(), durable.replace
