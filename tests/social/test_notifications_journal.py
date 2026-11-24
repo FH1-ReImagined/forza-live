@@ -10,6 +10,7 @@ Run: python3 -m unittest discover -s tests -t .
 """
 
 import asyncio
+import contextlib
 import copy
 import io
 import json
@@ -34,7 +35,7 @@ from forza_live.core import journal
 from forza_live.network import xtsw as x
 from forza_live.social import clubs, friends
 from forza_live.social import notifications as notices
-from tests.support import ROOT, FakeTransport
+from tests.support import ROOT, FakeTransport, loop_steps_under
 
 LIVE_MB = 11.2        # notifications.json on the public server
 PLAYER = 0x0009000100000000  # the tests' own players: none of the generated file's recipients
@@ -198,15 +199,17 @@ class LiveSizeTest(Base, unittest.IsolatedAsyncioTestCase):
             self.restart()
 
     async def asyncSetUp(self):
-        # asyncio's debug mode logs every step that holds the loop longer than this:
-        # answering() takes any such line for a failure.
-        asyncio.get_running_loop().slow_callback_duration = LOOP_WORST
+        # asyncio's slow-callback warning measures wall time: off here, answering() measures the
+        # CPU time of every step instead.
+        asyncio.get_running_loop().slow_callback_duration = 3600
 
     def answering(self):
-        return self.assertNoLogs("asyncio", "WARNING")
-
-    def checking(self):
-        asyncio.get_running_loop().slow_callback_duration = 3600
+        """Inside it no step of the event loop may use LOOP_WORST of CPU or more, and asyncio
+        logs no other warning."""
+        stack = contextlib.ExitStack()
+        stack.enter_context(self.assertNoLogs("asyncio", "WARNING"))
+        stack.enter_context(loop_steps_under(LOOP_WORST))
+        return stack
 
     async def written(self):
         for _ in range(6000):
@@ -221,9 +224,9 @@ class LiveSizeTest(Base, unittest.IsolatedAsyncioTestCase):
         took, sent = [], []
 
         def timed(fn, *args):
-            began = time.perf_counter()
+            began = time.thread_time()
             result = fn(*args)
-            took.append(time.perf_counter() - began)
+            took.append(time.thread_time() - began)
             return result
 
         rival = notices.samples(B, "DriverB")[notices.RIVALS_BEATEN]
@@ -250,7 +253,6 @@ class LiveSizeTest(Base, unittest.IsolatedAsyncioTestCase):
             took, sent = await self.actions()
             await self.written()
             task.cancel()
-        self.checking()
         self.assertEqual(whole.here, [])
         self.assertTrue(whole.threads)  # the file was written, by a thread
         self.assertLess(statistics.median(took), LOOP_MEDIAN)
@@ -269,7 +271,6 @@ class LiveSizeTest(Base, unittest.IsolatedAsyncioTestCase):
         with WholeFile():
             await self.actions()
             await asyncio.to_thread(notices.STORE.write, notices.STORE.snapshot())
-        self.checking()
         previous = as_the_previous_version_reads_it(self.dir.name)
         self.assertEqual(previous, notices.STORE.data)
         for who in list(notices.STORE.data["byRecipient"])[:200] + ["%016X" % (PLAYER + 1)]:

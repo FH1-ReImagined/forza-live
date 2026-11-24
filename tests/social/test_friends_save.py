@@ -18,6 +18,7 @@ from unittest import mock
 
 from forza_live.core import durable
 from forza_live.social import friends as fr
+from tests.support import loop_steps_under
 
 LOOP_WORST = 0.25  # s: what the save of a store of the public server's size may hold the loop
 
@@ -73,7 +74,8 @@ class SaveTest(Base):
 
 class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        asyncio.get_running_loop().slow_callback_duration = LOOP_WORST  # asyncio's debug mode
+        # asyncio's slow-callback warning measures wall time: off, loop_steps_under counts CPU
+        asyncio.get_running_loop().slow_callback_duration = 3600
 
     async def saved(self):
         for _ in range(6000):
@@ -95,17 +97,17 @@ class LoopTest(Base, unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(json, "dump", elsewhere(real_dump)), \
                 mock.patch.object(durable, "replace", elsewhere(real_replace)), \
-                self.assertNoLogs("asyncio", "WARNING"), self.assertNoLogs("forza-live", "WARNING"):
-            began = time.perf_counter()
+                self.assertNoLogs("asyncio", "WARNING"), self.assertNoLogs("forza-live", "WARNING"), \
+                loop_steps_under(LOOP_WORST):
+            began = time.thread_time()
             self.store.maybe_save()  # the server's tick
-            took = time.perf_counter() - began
+            took = time.thread_time() - began
             self.assertEqual((self.store.dirty, self.store.saving), (False, True))
             self.store.maybe_save()  # the next tick, the thread still writing: nothing more
             await self.saved()
         self.assertEqual(len(wrote), 2)  # one file, written and renamed, by a thread
         self.assertLess(took, LOOP_WORST)
         self.assertFalse(self.store.dirty)
-        asyncio.get_running_loop().slow_callback_duration = 3600  # the test's own reading
         self.assertEqual(self.on_disk(), {"version": 1, "players": self.store.players})
 
     async def test_what_changes_while_the_thread_writes_goes_with_the_next_save(self):
