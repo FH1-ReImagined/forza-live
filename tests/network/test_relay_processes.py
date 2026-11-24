@@ -97,6 +97,7 @@ class RelayProcesses(unittest.TestCase):
                                        "127.0.0.1:%d" % self.relay_port, "Here")
         self.procs = []
         self.start_main()
+        self.wait_for_main()
         self.relay = self.spawn(["--relay-only", "--host", "127.0.0.1", "--port",
                                  str(self.relay_port), "--relay-of", "127.0.0.1:%d" % self.main_port,
                                  "--relay-id", "local-1", "--relay-secret-file", secret_file,
@@ -106,11 +107,21 @@ class RelayProcesses(unittest.TestCase):
             self.addCleanup(g.close)
 
     def spawn(self, args):
+        log = open(os.path.join(self.temp.name, "server-%d.log" % len(self.procs)), "wb")
+        self.addCleanup(log.close)
         proc = subprocess.Popen([PYTHON, os.path.join(ROOT, "forza_live_server.py")] + args,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=log, stderr=subprocess.STDOUT)
         self.procs.append(proc)
         self.addCleanup(self.stop, proc)
         return proc
+
+    def logs(self):
+        out = []
+        for name in sorted(os.listdir(self.temp.name)):
+            if name.startswith("server-"):
+                with open(os.path.join(self.temp.name, name), errors="replace") as f:
+                    out.append("--- %s\n%s" % (name, f.read()))
+        return "\n".join(out)
 
     def stop(self, proc):
         if proc.poll() is None:
@@ -125,6 +136,24 @@ class RelayProcesses(unittest.TestCase):
         self.main = self.spawn(["--host", "127.0.0.1", "--port", str(self.main_port), "--http-port",
                                 str(self.http), "--data-dir", self.data, "--relay-after", "1",
                                 "--relay-probation", "0"])
+
+    def wait_for_main(self):
+        """The main server answers (its start takes as long as the machine needs): the relay's
+        first link then finds it, and is not left to the retry."""
+        deadline = time.monotonic() + 120
+        while self.status() is None:
+            if self.main.poll() is not None or time.monotonic() > deadline:
+                self.fail("the main server did not start\n" + self.logs())
+            time.sleep(0.1)
+
+    def wait_for_relay(self):
+        """The relay process is up (it says so in its log): the link and the probe, which is what
+        the tests wait for with a limit, do not include the time the machine took to start it."""
+        deadline = time.monotonic() + 120  # the line is logged by relay_node.run
+        while "relay local-1 on UDP" not in self.logs():
+            if self.relay.poll() is not None or time.monotonic() > deadline:
+                self.fail("the relay did not start\n" + self.logs())
+            time.sleep(0.1)
 
     def status(self):
         try:
@@ -148,11 +177,16 @@ class RelayProcesses(unittest.TestCase):
         s = self.status()
         return bool(s and s.get("relays") and s["relays"][0]["up"])
 
+    def assertUp(self, seconds, message):
+        if not self.wait(self.relay_up, seconds):
+            self.fail("%s; status %s\n%s" % (message, self.status(), self.logs()))
+
     def test_two_games_through_a_local_relay(self):
         main = ("127.0.0.1", self.main_port)
         relay = ("127.0.0.1", self.relay_port)
         a, b = self.games
-        self.assertTrue(self.wait(self.relay_up, 30), "the relay did not link")
+        self.wait_for_relay()
+        self.assertUp(30, "the relay did not link")
         self.assertTrue(self.wait(lambda: a.id and b.id and a.probes and b.probes, 10,
                                   step=lambda: [g.hello(main) for g in self.games]))
         # the two games cannot punch: they relay through the main server until it hands them the
@@ -182,7 +216,8 @@ class RelayProcesses(unittest.TestCase):
         self.assertTrue(self.wait(lambda: (relay, a.id, b"still") in b.got, 5,
                                   step=lambda: a.relay(relay, b.id, b"still")))
         self.start_main()
-        self.assertTrue(self.wait(self.relay_up, 30), "the relay did not link again")
+        self.wait_for_main()
+        self.assertUp(30, "the relay did not link again")
         self.assertIsNone(self.relay.poll())
 
 

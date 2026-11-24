@@ -2,6 +2,7 @@
 datagrams, a car club roster, a reference PNG decoder, the score tokens' clock and the check
 that the stored files' running totals are right."""
 
+import asyncio
 import contextlib
 import os
 import struct
@@ -22,6 +23,31 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # is that repository's server/ submodule, or where FORZA_REPO_TOOLS says (the CI checks the files
 # out).
 GAME_TOOLS = os.environ.get("FORZA_REPO_TOOLS") or os.path.join(ROOT, "..", "tools")
+
+
+@contextlib.contextmanager
+def loop_steps_under(limit):
+    """Inside it no step of the event loop (a callback, or a task between two awaits) may use
+    `limit` seconds of CPU or more. asyncio's own slow-callback warning measures wall time, which a
+    busy CI runner stretches (a step of 3 ms took 340 ms when the process was not scheduled);
+    the CPU time of the loop's thread is what the step itself costs, and is the same on a quiet
+    machine and a busy one. Work that holds the loop without CPU (a flush, a lock) is not counted
+    here: the tests guard the calls that block, by thread, where they matter."""
+    slow, real = [], asyncio.events.Handle._run
+
+    def run(handle):
+        began = time.thread_time()
+        try:
+            return real(handle)
+        finally:
+            used = time.thread_time() - began
+            if used >= limit:
+                slow.append("%.3f s of CPU in %r" % (used, handle))
+
+    with mock.patch.object(asyncio.events.Handle, "_run", run):
+        yield slow
+    if slow:
+        raise AssertionError("steps of the event loop over %.3f s: %s" % (limit, "; ".join(slow)))
 
 
 class RaceClock:
